@@ -206,8 +206,9 @@ export class GradleAdapter implements Adapter {
     const lang = m.meta?.kotlin ? "Kotlin" : "Java";
     return [
       `Platform: ${m.kind === "android" ? "Android library/app" : "JVM"} module \`${m.name}\`, local JVM unit tests (src/test), language ${lang}.`,
-      `Test libraries declared by this module (use ONLY these; do not add dependencies): ${direct.length ? direct.join("; ") : "none found directly"}.`,
-      indirect.length ? `Possibly added by convention plugins (only use if the existing tests above import them): ${indirect.join("; ")}.` : "",
+      `Test libraries declared by this module or its test-helper modules: ${direct.length ? direct.join("; ") : "none found directly"}.`,
+      indirect.length ? `Also referenced by convention plugins (usually applied to every module; confirm via the imports of the existing tests): ${indirect.join("; ")}.` : "",
+      "Use only these; do not add dependencies.",
       "Check the imports of the existing tests below: they show exactly what is on the test classpath.",
       m.kind === "android"
         ? "These are local unit tests on the JVM: android.* classes are stubs that throw unless Robolectric is used. Prefer testing pure logic; mock or fake Android types; never use Context unless Robolectric is available."

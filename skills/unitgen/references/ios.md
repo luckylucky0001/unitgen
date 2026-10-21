@@ -38,9 +38,10 @@ import Testing
 - `#expect(throws: SomeError.self)` when the error type isn't `Equatable`;
   `#expect(throws: SomeError.case)` when it is.
 - `try #require(optional)` to unwrap; never force-unwrap in tests.
-- Name clashes: Foundation (macOS 15+) has `Expression`, `Predicate`, … Avoid
-  `import Foundation` unless needed; in type annotations an ambiguous name fails to
-  compile ("is ambiguous for type lookup") — restructure to avoid the annotation.
+- Name clashes: Foundation (macOS 15+) has `Expression`, `Predicate`, … Value contexts
+  (`Expression("1+2")`, `Expression.parse(...)`) compile fine; only *type* positions
+  (`let x: Expression.Symbol`, `[Expression.Symbol: …]`) fail with "is ambiguous for type
+  lookup". Avoid the annotation or use a nested type reached through a value.
 - Multi-statement closures in dictionary literals need explicit types.
 - Internal symbols are visible through `@testable import`; `private`/`fileprivate` are not.
   Test them through the internal/public API that calls them.
