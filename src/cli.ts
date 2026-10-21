@@ -41,7 +41,7 @@ Common options
 targets:   --limit <n> (20)  --all-kinds
 brief:     --out <file>      --feedback <file>
 verify:    --target <source> --reruns <n> (1)  --allow-no-gain  --quarantine
-mutate:    --target <source> --max <n> (15)
+mutate:    --target <source> --max <n> (15) --equivalent <line,...> (exclude equivalent survivors from the score)
 generate:  --llm anthropic|claude|cmd:<sh> --model <id> --limit <n> (5) --attempts <n> (3) [files...]
 `;
 
@@ -66,6 +66,7 @@ async function main(argv: string[]): Promise<number> {
       model: { type: "string" },
       attempts: { type: "string" },
       max: { type: "string" },
+      equivalent: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -128,6 +129,7 @@ async function main(argv: string[]): Promise<number> {
       const ts = rankTargets(adapter, state.knownCoverage(), { modules: mods, includeKinds: o["all-kinds"] ? ["logic", "model", "di", "ui", "entry", "platform"] : ["logic", "model"] });
       if (!o["all-kinds"]) log("showing logic/model files; add --all-kinds to include ui, platform, di and entry files");
       const lim = Number(o.limit ?? 20);
+      if (!ts.length) log(o["all-kinds"] ? "nothing left to cover here (every file is covered or below 3 uncovered lines)" : "no logic/model file with uncovered lines here; `--all-kinds` lists ui/platform/di files too");
       print(formatTargets(ts.slice(0, lim), root), ts.slice(0, lim).map(({ uncoveredLines, ...t }) => t));
       return 0;
     }
@@ -155,6 +157,11 @@ async function main(argv: string[]): Promise<number> {
       const relTest = relPath(path.resolve(rest[0]), root);
       const tgt = o.target ?? state.data.accepted.find((a) => a.testFile === relTest)?.target;
       if (!tgt) throw new Error("pass --target <source> (no accepted target recorded for this test file)");
+      if (o.equivalent) {
+        const eq = (state.data.equivalent ??= {});
+        eq[relTest] = [...new Set([...(eq[relTest] ?? []), ...o.equivalent.split(",").map((x) => Number(x.trim())).filter(Boolean)])];
+        state.save();
+      }
       const r = mutate(adapter, state, rest[0], path.resolve(root, tgt), Number(o.max ?? 15));
       print(formatMutation(r), r);
       return 0;

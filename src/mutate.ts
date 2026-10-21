@@ -10,13 +10,15 @@ import { exists, log, readFile, readJson, relPath, writeFile } from "./util.ts";
 
 export interface Mutant {
   line: number;
+  /** Last line replaced (multi-line statement deletion); defaults to `line`. */
+  endLine?: number;
   op: string;
   original: string;
   mutated: string;
 }
 
 export interface MutantResult extends Mutant {
-  outcome: "killed" | "killed-crash" | "survived" | "stillborn" | "error";
+  outcome: "killed" | "killed-crash" | "survived" | "equivalent" | "stillborn" | "error";
 }
 
 export interface MutationReport {
@@ -91,15 +93,33 @@ export function mutantsFor(text: string, lines: number[]): Mutant[] {
       const mutated = original.slice(0, m.index) + rep + original.slice(m.index + m[0].length);
       out.push({ line: ln, op, original, mutated });
     }
-    // Negate a simple condition: if (flag) / if (a.b) -> if (!(...)).
-    const cond = /\bif\s*\(\s*(!?[A-Za-z_$][\w$.]*)\s*\)/.exec(masked);
+    // Negate a simple condition: if (flag) / if (a.b) / if (list.isEmpty()) -> if (!(...)).
+    const cond = /\bif\s*\(\s*(!?[A-Za-z_$][\w$.]*(?:\(\))?)\s*\)/.exec(masked);
     if (cond) {
-      const inner = original.slice(cond.index, cond.index + cond[0].length).replace(/\(\s*(!?[A-Za-z_$][\w$.]*)\s*\)/, (_, x: string) => (x.startsWith("!") ? `(${x.slice(1)})` : `(!${x})`));
+      const inner = original.slice(cond.index, cond.index + cond[0].length).replace(/\(\s*(!?[A-Za-z_$][\w$.]*(?:\(\))?)\s*\)/, (_, x: string) => (x.startsWith("!") ? `(${x.slice(1)})` : `(!${x})`));
       out.push({ line: ln, op: "negate condition", original, mutated: original.slice(0, cond.index) + inner + original.slice(cond.index + cond[0].length) });
     }
     // Statement deletion: does any test notice the call never happens?
     if (isCallStatement(t)) {
       out.push({ line: ln, op: "delete statement", original, mutated: original.replace(t, "/* unitgen: statement deleted */") });
+    } else if (/^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\($/.test(t) && !KEYWORD_START.test(t)) {
+      // Multi-line call: `dao.insert(` ... `)` — delete the whole statement if it closes cleanly.
+      let depth = 0;
+      let end = -1;
+      for (let j = ln - 1; j < src.length && j < ln + 40; j++) {
+        for (const c of maskStrings(src[j])) {
+          if (c === "(") depth++;
+          if (c === ")") depth--;
+        }
+        if (depth === 0) {
+          end = j + 1;
+          break;
+        }
+      }
+      if (end > ln && /\)\s*;?\s*$/.test(src[end - 1])) {
+        const indent = original.slice(0, original.length - original.trimStart().length);
+        out.push({ line: ln, endLine: end, op: "delete statement", original: src.slice(ln - 1, end).join("\n"), mutated: `${indent}/* unitgen: statement deleted */` });
+      }
     }
   }
   return out;
@@ -159,7 +179,13 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
   // Pick more than needed: mutants that do not compile are replaced by the next candidates.
   const candidates = pickMutants(all, Math.min(all.length, max * 2));
   if (!candidates.length) {
-    throw new Error(`no mutable operators, conditions or call statements on the ${lines.length} lines ${relTest} covers`);
+    const acc0 = state.data.accepted.find((a) => a.testFile === relTest);
+    if (acc0) {
+      acc0.mutation = { killed: 0, survived: 0, stillborn: 0, score: 1, first: acc0.mutation?.first, none: true };
+      state.save();
+    }
+    return { testFile: relTest, target: relPath(absTarget, adapter.root), killed: 0, crashes: 0, survived: 0, stillborn: 0, score: 1, results: [], candidates: 0,
+      feedback: `nothing to mutate: the ${lines.length} covered lines contain no operators, simple conditions or call statements unitgen can change` };
   }
   const backup = state.file("mutation.backup");
   fs.copyFileSync(absTarget, backup);
@@ -175,7 +201,7 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
     for (const [i, mu] of candidates.entries()) {
       if (results.filter((r) => r.outcome !== "stillborn").length >= max) break;
       const lines2 = original.split("\n");
-      lines2[mu.line - 1] = mu.mutated;
+      lines2.splice(mu.line - 1, (mu.endLine ?? mu.line) - mu.line + 1, mu.mutated);
       fs.writeFileSync(absTarget, lines2.join("\n"));
       const r = adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: `mutant-${i + 1}`, timeoutSec });
       let outcome: MutantResult["outcome"];
@@ -189,13 +215,17 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
       }
       else outcome = r.tests.length ? "survived" : "error";
       results.push({ ...mu, outcome });
-      log(`  mutant ${i + 1} (budget ${max}, ${all.length} candidates) line ${mu.line} (${mu.op}): ${outcome}`);
+      const shown = outcome === "survived" && (state.data.equivalent ?? {})[relTest]?.includes(mu.line) ? "survived (marked equivalent)" : outcome;
+      log(`  mutant ${i + 1} (budget ${max}, ${all.length} candidates) line ${mu.line} (${mu.op}): ${shown}`);
     }
   } finally {
     fs.writeFileSync(absTarget, original);
     fs.unlinkSync(backup);
     fs.unlinkSync(journal(state));
   }
+  // Survivors on lines the user marked equivalent (`--equivalent`) don't count against the score.
+  const eq = new Set((state.data.equivalent ?? {})[relTest] ?? []);
+  for (const r of results) if (r.outcome === "survived" && eq.has(r.line)) r.outcome = "equivalent";
   const killed = results.filter((r) => r.outcome === "killed" || r.outcome === "killed-crash").length;
   const crashes = results.filter((r) => r.outcome === "killed-crash").length;
   const survived = results.filter((r) => r.outcome === "survived").length;
@@ -204,7 +234,8 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
   const surv = results.filter((r) => r.outcome === "survived");
   const feedback = surv.length
     ? `These changes to ${relPath(absTarget, adapter.root)} were NOT detected by any test. Add assertions that would fail for each:\n` +
-      surv.map((s) => `- line ${s.line} (${s.op}):\n    ${s.original.trim()}\n  → ${s.mutated.trim()}`).join("\n")
+      surv.map((s) => `- line ${s.line} (${s.op}):\n    ${s.original.trim()}\n  → ${s.mutated.trim()}`).join("\n") +
+      `\nIf a survivor cannot change observable behaviour (equivalent mutant), exclude it: unitgen mutate ${relTest} --equivalent <line>[,<line>]`
     : "";
   const report: MutationReport = { testFile: relTest, target: relPath(absTarget, adapter.root), killed, crashes, survived, stillborn, score, results, feedback, candidates: all.length };
   const acc = state.data.accepted.find((a) => a.testFile === relTest);
@@ -218,7 +249,7 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
 }
 
 export function formatMutation(r: MutationReport): string {
-  const sampled = r.killed + r.survived + r.stillborn;
+  const sampled = r.results.length;
   const note = r.candidates > sampled ? `\nsampled ${sampled} of ${r.candidates} possible mutants; use --max ${r.candidates} for all` : "";
   const head0 = `mutation score: ${(r.score * 100).toFixed(0)}%  (killed ${r.killed}${r.crashes ? `, of which ${r.crashes} only by a crash, not an assertion` : ""}, survived ${r.survived}, did not compile ${r.stillborn})  ${r.testFile} -> ${r.target}`;
   const head = head0 + note;

@@ -29,6 +29,10 @@ export function buildReport(adapter: Adapter, state: State): string {
   }
   const pct = (a: number) => (wholeExec ? ((100 * a) / wholeExec).toFixed(1) : "0.0");
   const d = state.data;
+  // Hide rejections superseded by a later accepted test for the same target.
+  const acceptedTargets = new Set(d.accepted.map((a) => a.target).filter(Boolean));
+  const rejected = d.rejected.filter((x) => !(x.target && acceptedTargets.has(x.target)) && !d.accepted.some((a) => a.testFile === x.testFile));
+
   const lines: string[] = [
     `# unitgen report`,
     "",
@@ -36,13 +40,13 @@ export function buildReport(adapter: Adapter, state: State): string {
     `- Baseline: ${d.baseline ? `${d.baseline.tests} tests, ${d.baseline.failed} failing, ${d.baseline.seconds.toFixed(0)}s${d.baseline.note ? ` — ${d.baseline.note}` : ""}` : "not run"}`,
     `- Line coverage, files the coverage tool saw: **${b.total.pct.toFixed(1)}% → ${a.total.pct.toFixed(1)}%** (${b.total.covered} → ${a.total.covered} of ${a.total.executable} lines)`,
     `- Whole codebase incl. never-loaded files (estimated lines): ${pct(wholeBefore)}% → ${pct(wholeAfter)}% (${wholeBefore} → ${wholeAfter} of ~${wholeExec} lines)`,
-    `- Generated test files: ${d.accepted.length} accepted (${d.accepted.reduce((s, x) => s + x.tests, 0)} tests), ${d.rejected.length} rejected`,
+    `- Generated test files: ${d.accepted.length} accepted (${d.accepted.reduce((s, x) => s + x.tests, 0)} tests), ${rejected.length} rejected`,
     "",
   ];
   if (d.accepted.length) {
     lines.push("## Accepted", "", "| test file | target | tests | new lines | attempts | mutation score |", "|---|---|---:|---:|---:|---:|");
     for (const x of d.accepted) {
-      const ms = x.mutation
+      const ms = x.mutation?.none ? "n/a (nothing mutable)" : x.mutation
         ? `${x.mutation.first !== undefined && x.mutation.first !== x.mutation.score ? `${Math.round(x.mutation.first * 100)}% → ` : ""}${Math.round(x.mutation.score * 100)}% (${x.mutation.killed}/${x.mutation.killed + x.mutation.survived})`
         : "—";
       lines.push(`| ${x.testFile} | ${x.target ?? ""} | ${x.tests} | ${x.gainedLines} | ${x.attempts} | ${ms} |`);
@@ -59,9 +63,9 @@ export function buildReport(adapter: Adapter, state: State): string {
     for (const { f, before } of perFile) lines.push(`| ${relPath(f.file, adapter.root)} | ${before!.pct.toFixed(0)}% (${before!.covered}/${before!.executable}) | ${f.pct.toFixed(0)}% (${f.covered}/${f.executable}) |`);
     lines.push("");
   }
-  if (d.rejected.length) {
+  if (rejected.length) {
     lines.push("## Rejected", "", "| test file | reason | attempts |", "|---|---|---:|");
-    for (const x of d.rejected) lines.push(`| ${x.testFile} | ${x.reason} | ${x.attempts} |`);
+    for (const x of rejected) lines.push(`| ${x.testFile} | ${x.reason} | ${x.attempts} |`);
     lines.push("");
   }
   const suspects = d.notes.filter((n) => n.kind === "suspect");

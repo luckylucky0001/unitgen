@@ -36,6 +36,17 @@ function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: 
   const parts: string[] = [];
   let used = 0;
   const files = adapter.sourceFiles(m).filter((f) => f !== source);
+  // Types imported from other modules (DAO interfaces, entities, models): resolve `import a.b.Foo` by file name.
+  const imported = new Set([...text.matchAll(/^import\s+(?:class\s+)?[\w.]*\.([A-Z]\w*)\s*$/gm)].map((m) => m[1]));
+  if (imported.size) {
+    for (const other of adapter.modules()) {
+      if (other.name === m.name) continue;
+      for (const f of adapter.sourceFiles(other)) {
+        const base = path.basename(f).replace(/\.\w+$/, "");
+        if (imported.has(base)) files.push(f);
+      }
+    }
+  }
   const scored = files.map((f) => {
     const t = readFile(f);
     const defs = (t.match(/\b(class|struct|enum|protocol|interface|object|typealias)\s+([A-Z]\w*)/g) ?? []).map((s) => s.split(/\s+/)[1]);

@@ -121,7 +121,7 @@ export class GradleAdapter implements Adapter {
       return "ui";
     }
     if (/@Module\b/.test(text) && /@(Test)?InstallIn\b|@Provides\b|@Binds\b/.test(text)) return "di";
-    if (/PreviewParameterProvider|@Preview\b/.test(text)) return "ui";
+    if (/PreviewParameterProvider|@Preview\b|EntryProvider|EntryProviderScope|entry<|NavGraphBuilder|NavKey\b/.test(text) || /EntryProvider\.kt$|Navigation\.kt$/.test(file)) return "ui";
     // Thin wrappers over framework services (notifications, connectivity, broadcasts, WorkManager).
     if (/import android\.(app\.Notification|net\.Connectivity|content\.BroadcastReceiver|content\.Context\b|os\.Build)|import androidx\.(work|core\.app\.Notification)/.test(text) && !/: ViewModel\(/.test(text)) return "platform";
     if (/^\s*@(Dao|Database)\b/m.test(text)) return "generated"; // Room generates the implementation

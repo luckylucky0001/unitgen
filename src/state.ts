@@ -12,7 +12,7 @@ export interface AcceptedTest {
   attempts: number;
   at: string;
   /** Latest mutation run; `first` keeps the score of the first run (before strengthening). */
-  mutation?: { killed: number; survived: number; stillborn: number; score: number; first?: number };
+  mutation?: { killed: number; survived: number; stillborn: number; score: number; first?: number; none?: boolean };
 }
 
 export interface RejectedTest {
@@ -33,6 +33,8 @@ export interface StateData {
   notes: { at: string; text: string; kind: string }[];
   /** verify runs per test file (relative path), so the report shows real attempt counts. */
   attempts?: Record<string, number>;
+  /** Lines (per test file) whose surviving mutants were judged equivalent. */
+  equivalent?: Record<string, number[]>;
 }
 
 export class State {
