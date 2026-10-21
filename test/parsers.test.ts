@@ -88,7 +88,8 @@ test("json5", () => {
 
 test("arkts lint flags common violations and ignores strings/comments", () => {
   const bad = ["let x: any = 1;", "var y = 2;", "const { a } = o;", "const f = function () {};", "delete o.k;", "const c = { ...o };", "o['key'];"].join("\n");
-  assert.equal(arktsLint(bad).length, 7);
+  // `const c = { ...o }` trips both no-spread and no-untyped-obj-literals.
+  assert.equal(arktsLint(bad).length, 8);
   const ok = ["// var y: any", "const s = 'var x: any';", "const xs: number[] = [];", "expect(m.get('k')).assertEqual('v');", "const arr = list[0];"].join("\n");
   assert.deepEqual(arktsLint(ok), []);
 });
@@ -117,4 +118,10 @@ test("mutants skip strings/comments/generics and spread across lines", async () 
   assert.deepEqual(ms.filter((m) => m.line === 4).map((m) => m.mutated), ["  x = y - 2"]);
   const picked = pickMutants(ms, 2);
   assert.deepEqual(picked.map((m) => m.line), [1, 4]);
+});
+
+test("collectSuspects joins continuation comment lines and dedupes", async () => {
+  const { collectSuspects } = await import("../src/verify.ts");
+  const t = ["// UNITGEN-SUSPECT: true + 1 is 2 because Bool", "// bridges to NSNumber", "x()", "// UNITGEN-SUSPECT: true + 1 is 2 because Bool", "// bridges to NSNumber"].join("\n");
+  assert.deepEqual(collectSuspects(t), ["true + 1 is 2 because Bool bridges to NSNumber"]);
 });

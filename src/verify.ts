@@ -3,7 +3,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Adapter, TestCase, TestRun } from "./adapters/types.ts";
-import { type Coverage, newlyCovered, ranges } from "./coverage.ts";
+import { type Coverage, mergeCoverage, newlyCovered, ranges } from "./coverage.ts";
 import type { State } from "./state.ts";
 import { exists, readFile, relPath } from "./util.ts";
 
@@ -18,6 +18,8 @@ export interface VerifyResult {
   gained: Record<string, number[]>;
   gainedLines: number;
   targetGained: number;
+  /** Lines this version adds over the previously accepted version of the same file. */
+  deltaLines?: number;
   suspects: string[];
   feedback: string;
   logFile?: string;
@@ -38,8 +40,28 @@ function suiteTests(run: TestRun, adapter: Adapter, testFile: string): TestCase[
   const base = path.basename(testFile).replace(/\.\w+$/, "").replace(/\.test$/, "").replace(/\.unitgen$/, "");
   const re = new RegExp(`(^|[.\\s/>])${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([.\\s/>]|$)`);
   const mine = run.tests.filter((t) => t.file === testFile || re.test(t.name));
-  // Swift Testing reports bare function names (no suite), so fall back to everything that ran.
-  return mine.length ? mine : run.tests;
+  if (mine.length) return mine;
+  // Swift Testing reports bare function names (no suite): keep the ones declared in this file.
+  const text = exists(testFile) ? readFile(testFile) : "";
+  const declared = run.tests.filter((t) => {
+    const fn = /([A-Za-z_]\w*)\s*\(/.exec(t.name)?.[1] ?? t.name.split(/[.>\s]+/).pop() ?? "";
+    return fn && new RegExp(`\\bfunc\\s+${fn}\\b|\\bfun\\s+\`?${fn}\\b|it\\(\\s*['"]${fn}['"]`).test(text);
+  });
+  return declared.length ? declared : run.tests;
+}
+
+/** "// UNITGEN-SUSPECT: ..." plus any directly following comment lines. */
+export function collectSuspects(text: string): string[] {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  lines.forEach((l, i) => {
+    const at = l.indexOf("UNITGEN-SUSPECT");
+    if (at < 0) return;
+    let s = l.slice(at).replace(/^UNITGEN-SUSPECT:?\s*/, "").trim();
+    for (let j = i + 1; j < lines.length && /^\s*\/\/(?!.*UNITGEN-SUSPECT)/.test(lines[j]); j++) s += " " + lines[j].trim().replace(/^\/\/\s?/, "");
+    out.push(s);
+  });
+  return [...new Set(out)];
 }
 
 export function verify(adapter: Adapter, state: State, testFile: string, opts: VerifyOpts = {}): VerifyResult {
@@ -59,7 +81,7 @@ export function verify(adapter: Adapter, state: State, testFile: string, opts: V
   const text = readFile(abs);
   const m = adapter.moduleFor(abs) ?? (target ? adapter.moduleFor(target) : undefined);
   if (!m) throw new Error(`cannot determine module for ${testFile}`);
-  const suspects = text.split("\n").filter((l) => l.includes("UNITGEN-SUSPECT")).map((l) => l.trim());
+  const suspects = collectSuspects(text);
 
   if (adapter.countAssertions(text) === 0) {
     return res("no_assertions", { suspects, feedback: "The file contains no assertions. Every test must assert on results." });
@@ -99,18 +121,22 @@ export function verify(adapter: Adapter, state: State, testFile: string, opts: V
   const cand: Coverage = run.coverage ?? {};
   const relTest = relPath(abs, adapter.root);
   const known = state.knownCoverage(relTest);
+  const prev = state.perTestCoverage[relTest];
   // Gains of the generated file itself: don't count lines our previously accepted tests already hit.
   const gained = newlyCovered(known, cand);
   const gainedLines = Object.values(gained).reduce((a, b) => a + b.length, 0);
   const targetGained = target ? (gained[target]?.length ?? 0) : gainedLines;
+  const deltaLines = prev ? Object.values(newlyCovered(mergeCoverage(known, prev), cand)).reduce((a, b) => a + b.length, 0) : undefined;
   const mismatch = (run.coverageWarnings ?? []).filter(Boolean);
   if (gainedLines === 0 && mismatch.length) {
     return res("infra_error", { tests, logFile: run.logFile, suspects, feedback: `Tests pass, but the coverage tool discarded data for: ${mismatch.slice(0, 5).join(", ")} (class files do not match the executed bytecode). This is a unitgen/build-setup problem, not your test.` });
   }
-  if (gainedLines === 0 && !opts.allowNoGain) {
+  // Re-verifying an already accepted file (e.g. after adding tests) keeps it even when newer files
+  // now cover the same lines; NO_GAIN only gates files that never contributed.
+  if (gainedLines === 0 && !opts.allowNoGain && !prev) {
     return res("no_gain", { tests, logFile: run.logFile, suspects, feedback: "All tests pass but they cover no line that was not already covered. Target the lines marked \"!\" in the brief." });
   }
-  const r = res("accepted", { tests, gained, gainedLines, targetGained, logFile: run.logFile, suspects });
+  const r = res("accepted", { tests, gained, gainedLines, targetGained, deltaLines, logFile: run.logFile, suspects });
   if (opts.record !== false) state.setTestCoverage(relTest, cand);
   return r;
 }
@@ -128,10 +154,14 @@ function finish(adapter: Adapter, state: State, r: VerifyResult, opts: VerifyOpt
       attempts, at: state.stamp(),
     });
     state.data.rejected = state.data.rejected.filter((x) => x.testFile !== relTest);
+    state.data.notes = state.data.notes.filter((n) => !(n.kind === "suspect" && n.text.startsWith(`${relTest}: `)));
     for (const s of r.suspects) state.data.notes.push({ at: state.stamp(), kind: "suspect", text: `${relTest}: ${s}` });
   } else {
-    // A previously accepted file that no longer passes stops counting.
+    // A previously accepted file that no longer passes stops counting, and must not stay
+    // registered with the real test runner (it would break the build); the next verify re-registers it.
     state.setTestCoverage(relTest, undefined);
+    const m = adapter.moduleFor(r.testFile);
+    if (m && r.verdict !== "infra_error") adapter.forgetTestFile?.(r.testFile, m);
   }
   if (r.verdict !== "accepted" && opts.onFail === "quarantine" && exists(r.testFile)) {
     quarantine(adapter, state, r.testFile, r.verdict, attempts, r.target);
@@ -161,7 +191,7 @@ export function formatVerify(r: VerifyResult, root: string): string {
   const lines = [`verdict: ${r.verdict.toUpperCase()}  (${relPath(r.testFile, root)}, ${r.seconds.toFixed(0)}s)`];
   if (r.tests.length) lines.push(`tests: ${r.tests.length} run, ${r.failed.length} failed`);
   if (r.verdict === "accepted") {
-    lines.push(`new covered lines: ${r.gainedLines}${r.target ? ` (target file: ${r.targetGained})` : ""}`);
+    lines.push(`lines covered only by this file: ${r.gainedLines}${r.target ? ` (in the target: ${r.targetGained})` : ""}${r.deltaLines !== undefined ? `; +${r.deltaLines} vs. its previously accepted version` : ""}`);
     for (const [f, ls] of Object.entries(r.gained)) lines.push(`  ${relPath(f, root)}: ${ranges(ls)}`);
   }
   if (r.suspects.length) lines.push(`suspected bugs flagged: ${r.suspects.length}`, ...r.suspects.map((s) => `  ${s}`));

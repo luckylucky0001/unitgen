@@ -135,7 +135,8 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
 
   const examples = adapter.exampleTests(m, abs).map((f) => {
     const t = stripLicense(readFile(f)).split("\n");
-    return `// ${relPath(f, adapter.root)}${t.length > 120 ? " (first 120 lines)" : ""}\n${t.slice(0, 120).join("\n")}`;
+    const more = t.length > 120 ? ` (first 120 of ${t.length} lines; open the full file: its expected values and error messages are reliable oracles even if it cannot run here)` : "";
+    return `// ${relPath(f, adapter.root)}${more}\n${t.slice(0, 120).join("\n")}`;
   });
 
   const existingGenerated = exists(place.path) ? readFile(place.path) : "";
@@ -154,7 +155,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     "## Conventions",
     adapter.conventions(m),
     "",
-    "## " + RULES,
+    "## " + (examples.length ? RULES : RULES.replace("named in the Conventions section or imported by the existing tests below", "named in the Conventions section (this module has no existing tests to copy from)")),
     "",
     "## Source under test (\"!\" = not covered yet)",
     "```",

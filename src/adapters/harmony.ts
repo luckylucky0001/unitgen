@@ -41,6 +41,33 @@ export class HarmonyAdapter implements Adapter {
     return this.hvigor() ? "hvigor" : "shim";
   }
 
+  /** name -> absolute dir for `file:` dependencies (local modules), which need no ohpm install. */
+  localDeps(): Record<string, string> {
+    const out: Record<string, string> = {};
+    const pkgs = [path.join(this.root, "oh-package.json5"), ...this.modules().map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists);
+    for (const p of pkgs) {
+      try {
+        const j = json5Parse(readFile(p));
+        for (const [k, v] of Object.entries({ ...(j.dependencies ?? {}), ...(j.devDependencies ?? {}) })) {
+          if (typeof v === "string" && v.startsWith("file:")) out[k] = path.resolve(path.dirname(p), v.slice(5));
+        }
+      } catch { /* ignore unreadable package files */ }
+    }
+    return out;
+  }
+
+  private remoteDeps(): Record<string, string> {
+    const out: Record<string, string> = {};
+    const pkgs = [path.join(this.root, "oh-package.json5"), ...this.modules().map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists);
+    for (const p of pkgs) {
+      try {
+        const j = json5Parse(readFile(p));
+        for (const [k, v] of Object.entries(j.dependencies ?? {})) if (typeof v === "string" && !v.startsWith("file:")) out[k] = v;
+      } catch { /* ignore */ }
+    }
+    return out;
+  }
+
   private hvigor(): string | undefined {
     const local = path.join(this.root, "hvigorw");
     if (exists(local)) return local;
@@ -79,7 +106,7 @@ export class HarmonyAdapter implements Adapter {
     lines.push(`modules: ${ms.map((m) => `${m.name} (${m.kind})`).join(", ") || "none"}`);
     const declared = [path.join(this.root, "oh-package.json5"), ...ms.map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists)
       .some((p) => /"dependencies"\s*:\s*\{\s*"/.test(readFile(p).replace(/\/\/.*$/gm, "")));
-    if (declared && !exists(path.join(this.root, "oh_modules"))) {
+    if (declared && !exists(path.join(this.root, "oh_modules")) && Object.keys(this.remoteDeps()).length) {
       lines.push("warning: oh-package.json5 declares dependencies but oh_modules/ is missing: run `ohpm install`. Until then files importing those packages are ranked as `platform` and cannot be verified.");
     }
     const pkgs = [path.join(this.root, "oh-package.json5"), ...ms.map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists);
@@ -125,10 +152,12 @@ export class HarmonyAdapter implements Adapter {
     const fns = (text.match(/\bfunction\s+\w+|\b\w+\s*\([^)]*\)\s*(:\s*[\w<>\[\]|, ]+)?\s*\{|=>\s*\{/g) ?? []).length;
     if (fns === 0) return "model";
     if (this.mode() === "shim") {
-      if (platformImports > 0 || /\b(Color|Alignment|ButtonStyleMode|AppStorage|getContext)\.|\$r\(/.test(text)) return "platform";
+      // $r()/$rawfile() resource references load fine as stubs; enum/global *usage* in logic does not.
+      if (platformImports > 0 || /\b(Color|Alignment|ButtonStyleMode|AppStorage|getContext)\./.test(text)) return "platform";
       const ohm = path.join(this.root, "oh_modules");
       const third = [...text.matchAll(/from\s+['"](@[\w-]+\/[^'"]+|[a-z][^'".]*)['"]/g)].map((m) => m[1]).filter((p) => p !== "@ohos/hypium");
-      if (third.some((p) => !exists(path.join(ohm, p)))) return "platform";
+      const local = this.localDeps();
+      if (third.some((p) => !exists(path.join(ohm, p)) && !local[p])) return "platform";
     }
     return "logic";
   }
@@ -231,7 +260,7 @@ export class HarmonyAdapter implements Adapter {
     const args = ["node", c8, "--reporter=lcov", `--report-dir=${path.join(work, "cov")}`, `--temp-directory=${path.join(work, "tmp")}`,
       "--exclude-after-remap", "--extension=.ets", "--extension=.ts", "--exclude=**/*.test.ets", "--exclude=**/*.test.ts", "--exclude=**/harmony-shim/**", "--exclude=**/oh_modules/**", "--exclude-node-modules",
       "node", path.join(work, "runner.cjs"), tsDir, results, exists(ohm) ? ohm : "-", ...files];
-    const r = run(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 900, logFile });
+    const r = run(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 900, logFile, env: { UNITGEN_LOCAL_DEPS: JSON.stringify(this.localDeps()) } });
     const tests: TestCase[] = readJson<any[]>(results, []).map((t) => ({ name: t.name, status: t.status, message: t.message, file: t.file }));
     const loadFail = tests.filter((t: any) => t.name.startsWith("load ") && t.status === "failed");
     const compiled = loadFail.length === 0 && lint.length === 0;
@@ -294,10 +323,11 @@ export class HarmonyAdapter implements Adapter {
     const pkgs = [...text.matchAll(/from\s+['"]([^'".][^'"]*)['"]/g)].map((m) => m[1]).filter((p) => p !== "@ohos/hypium");
     const system = pkgs.filter((p) => /^@(kit|ohos|system|arkts|hms)\./.test(p));
     const thirdParty = pkgs.filter((p) => !/^@(kit|ohos|system|arkts|hms)\./.test(p));
-    const missing = thirdParty.filter((p) => !exists(path.join(ohm, p)));
+    const local = this.localDeps();
+    const missing = thirdParty.filter((p) => !exists(path.join(ohm, p)) && !local[p]);
     if (missing.length) out.push(`Imports ohpm packages that are not installed (${missing.join(", ")}): tests will fail with INFRA_ERROR until \`ohpm install\` runs. Pick another target if you cannot install them.`);
     if (system.length && this.mode() === "shim") out.push(`Imports system APIs that are stubbed under the Node shim (${system.join(", ")}): only test code paths whose results do not come from these APIs.`);
-    if (/\b(Color|Alignment|FlexAlign|FontWeight|ButtonStyleMode|AppStorage|getContext|\$r)\b/.test(text) && this.mode() === "shim") out.push("Uses ArkUI globals (Color, Alignment, $r, AppStorage, ...): they are inert stubs under the shim.");
+    if (/(\b(Color|Alignment|FlexAlign|FontWeight|ButtonStyleMode|AppStorage|getContext)\b|\$r\s*\(|\$rawfile\s*\()/.test(text) && this.mode() === "shim") out.push("Uses ArkUI globals (Color, Alignment, $r, AppStorage, ...): they are inert stubs under the shim, so do not assert on their values.");
     return out;
   }
 }
@@ -307,9 +337,19 @@ function dropNonCode(cov: Coverage): Coverage {
   const out: Coverage = {};
   for (const [file, lines] of Object.entries(cov)) {
     let inBlock = false;
+    let typeDepth = 0;
     const code = new Set<number>();
     readFile(file).split("\n").forEach((raw, i) => {
       let l = raw.trim();
+      // Interfaces and type aliases are erased by the compiler: never executable.
+      if (typeDepth > 0 || /^(export\s+)?(declare\s+)?(interface|type)\s+\w+/.test(l)) {
+        const opens = (l.match(/\{/g) ?? []).length;
+        const closes = (l.match(/\}/g) ?? []).length;
+        typeDepth += opens - closes;
+        if (typeDepth < 0) typeDepth = 0;
+        return;
+      }
+      if (/^import\s/.test(l) || /^export\s*\{[^}]*\}\s*(from\s.*)?;?$/.test(l)) return;
       if (inBlock) {
         const end = l.indexOf("*/");
         if (end < 0) return;
@@ -347,6 +387,8 @@ export function arktsLint(text: string): string[] {
     [/@ts-ignore|@ts-nocheck|@ts-expect-error/, "ArkTS forbids @ts-ignore / @ts-nocheck"],
     [/\bSymbol\(/, "arkts-no-symbol"],
     [/\bglobalThis\b/, "arkts-no-globalthis"],
+    [/^\s*(const|let)\s+\w+\s*=\s*\{/, "arkts-no-untyped-obj-literals: declare the variable with an interface/class type"],
+    [/^\s*(const|let)\s+\w+\s*=\s*\[\s*\]/, "untyped empty array: write `const xs: T[] = []`"],
     [/\bfunction\s*\*|\byield\b/, "arkts-no-generators"],
   ];
   text.split("\n").forEach((line, i) => {

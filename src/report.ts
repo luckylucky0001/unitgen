@@ -2,7 +2,8 @@
 import type { Adapter } from "./adapters/types.ts";
 import { mergeCoverage, summarize } from "./coverage.ts";
 import type { State } from "./state.ts";
-import { relPath } from "./util.ts";
+import { estimateExecutable } from "./targets.ts";
+import { readFile, relPath } from "./util.ts";
 
 export function buildReport(adapter: Adapter, state: State): string {
   const base = state.baselineCoverage;
@@ -13,13 +14,28 @@ export function buildReport(adapter: Adapter, state: State): string {
   for (const f of Object.keys(now)) if (!baseFilled[f]) baseFilled[f] = Object.fromEntries(Object.keys(now[f]).map((l) => [Number(l), 0]));
   const b = summarize(baseFilled, files.filter((f) => base[f] || now[f]));
   const a = summarize(now, files.filter((f) => base[f] || now[f]));
+  // Whole codebase: unmeasured logic/model files count with estimated executable lines, 0 covered.
+  let wholeExec = 0, wholeBefore = 0, wholeAfter = 0;
+  for (const f of files) {
+    const kind = adapter.classify(f, readFile(f));
+    if (kind === "generated" || kind === "test") continue;
+    if (now[f] || base[f]) {
+      wholeExec += Object.keys(now[f] ?? base[f]).length;
+      wholeBefore += Object.values(base[f] ?? {}).filter((h) => h > 0).length;
+      wholeAfter += Object.values(now[f] ?? {}).filter((h) => h > 0).length;
+    } else {
+      wholeExec += estimateExecutable(readFile(f)).length;
+    }
+  }
+  const pct = (a: number) => (wholeExec ? ((100 * a) / wholeExec).toFixed(1) : "0.0");
   const d = state.data;
   const lines: string[] = [
     `# unitgen report`,
     "",
     `- Project: \`${adapter.root}\` (${adapter.platform}, adapter \`${adapter.id}\`)`,
     `- Baseline: ${d.baseline ? `${d.baseline.tests} tests, ${d.baseline.failed} failing, ${d.baseline.seconds.toFixed(0)}s${d.baseline.note ? ` — ${d.baseline.note}` : ""}` : "not run"}`,
-    `- Line coverage (files seen by the coverage tool): **${b.total.pct.toFixed(1)}% → ${a.total.pct.toFixed(1)}%** (${b.total.covered} → ${a.total.covered} of ${a.total.executable} lines)`,
+    `- Line coverage, files the coverage tool saw: **${b.total.pct.toFixed(1)}% → ${a.total.pct.toFixed(1)}%** (${b.total.covered} → ${a.total.covered} of ${a.total.executable} lines)`,
+    `- Whole codebase incl. never-loaded files (estimated lines): ${pct(wholeBefore)}% → ${pct(wholeAfter)}% (${wholeBefore} → ${wholeAfter} of ~${wholeExec} lines)`,
     `- Generated test files: ${d.accepted.length} accepted (${d.accepted.reduce((s, x) => s + x.tests, 0)} tests), ${d.rejected.length} rejected`,
     "",
   ];
@@ -29,6 +45,7 @@ export function buildReport(adapter: Adapter, state: State): string {
       const ms = x.mutation ? `${Math.round(x.mutation.score * 100)}% (${x.mutation.killed}/${x.mutation.killed + x.mutation.survived})` : "—";
       lines.push(`| ${x.testFile} | ${x.target ?? ""} | ${x.tests} | ${x.gainedLines} | ${x.attempts} | ${ms} |`);
     }
+    if (d.accepted.some((x) => !x.mutation)) lines.push("", "Mutation score: `unitgen mutate <test-file>` (— = not run). Surviving mutants can be equivalent (no observable change); review them before adding assertions.");
     lines.push("");
   }
   const perFile = a.files

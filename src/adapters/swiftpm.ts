@@ -215,6 +215,39 @@ export class SwiftPMAdapter implements Adapter {
       fs.copyFileSync(this.backupPath(), this.manifestPath());
       fs.unlinkSync(this.backupPath());
     }
+    this.unpark();
+  }
+
+  private parkJournal(): string {
+    return path.join(this.stateDir, "swift-parked.json");
+  }
+
+  /**
+   * Swift Testing on the CLT ignores --filter, so isolate a verify run by moving the other generated
+   * test files of the same target aside; otherwise their coverage and test counts leak into this file's.
+   */
+  private park(keep: string[]): void {
+    const keepSet = new Set(keep.map((f) => path.resolve(f)));
+    const moved: { from: string; to: string }[] = [];
+    const dirs = new Set(keep.map((f) => path.dirname(path.resolve(f))));
+    for (const d of dirs) {
+      for (const f of walkFiles(d, [".swift"])) {
+        if (keepSet.has(f) || !f.endsWith(`${SUFFIX}.swift`)) continue;
+        const to = path.join(this.stateDir, "swift-parked", relPath(f, this.root));
+        fs.mkdirSync(path.dirname(to), { recursive: true });
+        moved.push({ from: f, to });
+      }
+    }
+    if (!moved.length) return;
+    writeFile(this.parkJournal(), JSON.stringify(moved));
+    for (const m of moved) fs.renameSync(m.from, m.to);
+  }
+
+  private unpark(): void {
+    if (!exists(this.parkJournal())) return;
+    const moved = JSON.parse(readFile(this.parkJournal())) as { from: string; to: string }[];
+    for (const m of moved) if (exists(m.to)) fs.renameSync(m.to, m.from);
+    fs.unlinkSync(this.parkJournal());
   }
 
   /** Temporarily rewrite Package.swift so the run works on this toolchain. Returns a restore fn. */
@@ -258,6 +291,7 @@ export class SwiftPMAdapter implements Adapter {
     const mods = req.modules ?? this.modules();
     const ours = req.testFiles !== undefined;
     const restore = this.applyRuntimeManifest(ours);
+    if (ours) this.park(req.testFiles!);
     const start = Date.now();
     try {
       const args = ["swift", "test"];
@@ -294,6 +328,7 @@ export class SwiftPMAdapter implements Adapter {
         note: !ours && !t.xctest ? "existing XCTest suites skipped: XCTest needs Xcode (only the Command Line Tools are installed)" : undefined,
       };
     } finally {
+      this.unpark();
       restore();
     }
   }

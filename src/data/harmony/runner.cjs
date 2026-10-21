@@ -13,6 +13,7 @@ const hypium = require("./hypium.cjs");
 const stubPath = path.join(__dirname, "stub.cjs");
 
 const stubbed = new Set();
+const localDeps = JSON.parse(process.env.UNITGEN_LOCAL_DEPS || "{}");
 function missingPackage(request, parent) {
   const e = new Error(`UNITGEN_MISSING_PACKAGE ${request} (imported by ${parent && parent.filename}): ohpm package not installed; run \`ohpm install\` in the project`);
   e.code = "UNITGEN_MISSING_PACKAGE";
@@ -48,6 +49,12 @@ Module._resolveFilename = function (request, parent, ...rest) {
     const base = path.resolve(path.dirname(parent.filename), request);
     for (const cand of [base, base + ".ets", base + ".ts", path.join(base, "Index.ets"), path.join(base, "index.ets"), path.join(base, "index.ts")]) {
       if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return cand;
+    }
+  }
+  if (localDeps[request]) {
+    for (const idx of ["Index.ets", "index.ets", "Index.ts", "index.ts"]) {
+      const f = path.join(localDeps[request], idx);
+      if (fs.existsSync(f)) return f;
     }
   }
   if (!request.startsWith(".") && !path.isAbsolute(request) && !request.startsWith("node:") && !Module.isBuiltin(request)) {

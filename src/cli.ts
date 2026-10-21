@@ -119,7 +119,8 @@ async function main(argv: string[]): Promise<number> {
     }
     case "targets": {
       if (!state.hasBaseline()) log("no baseline yet: line counts are estimates. Run `unitgen baseline` first for real coverage.");
-      const ts = rankTargets(adapter, state.knownCoverage(), { modules: mods, includeKinds: o["all-kinds"] ? ["logic", "model", "di", "ui", "entry", "platform"] : undefined });
+      const ts = rankTargets(adapter, state.knownCoverage(), { modules: mods, includeKinds: o["all-kinds"] ? ["logic", "model", "di", "ui", "entry", "platform"] : ["logic", "model"] });
+      if (!o["all-kinds"]) log("showing logic/model files; add --all-kinds to include ui, platform, di and entry files");
       const lim = Number(o.limit ?? 20);
       print(formatTargets(ts.slice(0, lim), root), ts.slice(0, lim).map(({ uncoveredLines, ...t }) => t));
       return 0;
@@ -138,7 +139,7 @@ async function main(argv: string[]): Promise<number> {
       if (!rest[0]) throw new Error("usage: unitgen verify <test-file> [--target <source>]");
       if (!state.hasBaseline()) log("warning: no baseline; every covered line counts as new. Run `unitgen baseline` first.");
       const r = verify(adapter, state, rest[0], {
-        target: o.target, reruns: Number(o.reruns ?? 1), allowNoGain: o["allow-no-gain"], onFail: o.quarantine ? "quarantine" : "keep",
+        target: o.target ?? inferTarget(adapter, rest[0]), reruns: Number(o.reruns ?? 1), allowNoGain: o["allow-no-gain"], onFail: o.quarantine ? "quarantine" : "keep",
       });
       print(formatVerify(r, root), r);
       return r.verdict === "accepted" ? 0 : 2;
@@ -191,6 +192,17 @@ async function main(argv: string[]): Promise<number> {
       process.stderr.write(`unknown command: ${cmd}\n\n${HELP}`);
       return 64;
   }
+}
+
+/** FooUnitGenTests.swift / FooUnitGenTest.kt / Foo.unitgen.test.ets -> the source the placement maps to. */
+function inferTarget(adapter: ReturnType<typeof detectAdapter>, testFile: string): string | undefined {
+  const abs = path.resolve(testFile);
+  for (const m of adapter.modules()) {
+    for (const src of adapter.sourceFiles(m)) {
+      if (adapter.placement(src, m).path === abs) return src;
+    }
+  }
+  return undefined;
 }
 
 main(process.argv.slice(2)).then(
