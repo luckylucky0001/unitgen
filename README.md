@@ -82,18 +82,20 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 
 ## 验证结果（2026-10-21，本机：macOS + Command Line Tools，无 Xcode / DevEco）
 
-三轮共 7 个独立子代理只读 Skill 完成了大部分目标（标 ★），其余由我按同一流程完成。
+四轮共 9 个独立子代理只读 Skill 完成了大部分目标（标 ★），其余由我按同一流程完成。
 
 | 平台 | 工程 | 目标 | 覆盖率 | 测试数 |
 |---|---|---|---|---|
 | iOS | nicklockwood/Expression | Expression.swift（1.5k 行解析器） | 0% → 82% | 38 |
 | iOS | nicklockwood/Expression ★ | AnyExpression.swift（1.1k 行，Any 类型求值器） | 0% → 99% | 106 |
 | iOS | SwiftyJSON ★ | SwiftyJSON.swift | 0% → 97% | 40 |
+| iOS | JohnSundell/Splash ★ | Tokenizer.swift / SwiftGrammar.swift | 0% → 100% / 99% | 12 / 165 |
 | Android | android/nowinandroid（34 模块，AGP 9） | NiaPreferencesDataSource | 35% → 91% | 18 |
 | Android | android/nowinandroid | DefaultSearchContentsRepository | 0% → 100% | 7 |
 | Android | android/nowinandroid ★ | SearchViewModel（SavedStateHandle + Flow） | 75% → 100% | 12 |
 | Android | android/nowinandroid ★ | GetSearchContentsUseCase | 0% → 100% | 7 |
 | Android | android/nowinandroid ★ | MainActivityViewModel（:app，Hilt 字节码改写） | 0% → 100% | 11 |
+| Android | android/nowinandroid ★ | DefaultRecentSearchRepository / SyncUtilities | 0% → 100% / 64% → 76% | 6 / 5 |
 | Android | android/architecture-samples | DefaultTaskRepository | 78% → 100% | 7 |
 | Android | android/architecture-samples ★ | AddEditTaskViewModel | 82% → 99% | 10 |
 | Android | android/architecture-samples ★ | TaskDetailViewModel | 85% → 98% | 6+ |
@@ -115,6 +117,8 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 | colors.ets ★ | 80% → 100% | 两个幸存者都是真漏洞（NaN 色相、非纯色），补测试后全杀 |
 | AddEditTaskViewModel ★ | 75% → 100% | 发现「整体比较默认 UiState」的断言永远不会失败（变异后默认值也跟着变） |
 | TaskDetailViewModel ★ | 90% → 100% | |
+| SwiftGrammar.swift ★ | 93% → 100% | 删掉 `keywordsToAvoid.remove("return")` 原测试发现不了，补 `return call()` 用例后全杀 |
+| SyncUtilities ★ | 100% | 1 个幸存者经判断为等价变异（返回值被丢弃），用 `--equivalent` 排除 |
 | DefaultTaskRepository | 67% → **100%** | 揪出 `deleteAllTasks` 的测试其实什么都没验证（删掉 `deleteAll()` 也通过）；补一条断言后全杀。**覆盖率没变，只有变异测试能发现这种弱测试** |
 
 **发现的疑似 bug**（测试按现行为断言并标注 `UNITGEN-SUSPECT`，均已对照源码确认或有可复现证据）：
@@ -124,7 +128,7 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 - interview-handbook：`getPercentText` 未处理 `total === 0`，返回 `'Infinity%'` / `'NaN%'`。
 - LinysBrowser：`isFn('foo')` 返回 true（只判断长度 > 1 且以 F 开头）。
 
-**迭代过程**：每轮试用的子代理都把 CLI/Skill 的问题按「最重要」列出，共修复约 60 处，例如 SwiftPM `Source/` 目录、Gradle `--tests` 绑定到错误任务、Hilt 改写字节码导致 JaCoCo 丢数据、`src/testDemo` 测试源集、鸿蒙三方包被误桩、iOS 同 target 测试互相串覆盖率、报告中的重复/截断等。
+**迭代过程**：每轮试用的子代理都把 CLI/Skill 的问题按「最重要」列出，共修复约 80 处，例如 SwiftPM `Source/` 目录、Gradle `--tests` 绑定到错误任务、Hilt 改写字节码导致 JaCoCo 丢数据、`src/testDemo` 测试源集、鸿蒙三方包被误桩、iOS 同 target 测试互相串覆盖率、报告中的重复/截断等。
 
 ## 已知限制
 

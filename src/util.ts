@@ -179,6 +179,8 @@ export function errorExcerpt(out: string, maxLines = 80): string {
   const pick = new Set<number>();
   const re = /(error[:\s]|e: |FAILED|failed|Exception|AssertionError|Expectation failed|✘|expected|Caused by|Unresolved reference|cannot find|No such module)/i;
   lines.forEach((l, i) => {
+    // Compiler warnings about production code are noise for a failing generated test.
+    if (/\bwarning:/.test(l) && !/\berror\b/.test(l)) return;
     if (re.test(l)) for (let k = Math.max(0, i - 1); k <= Math.min(lines.length - 1, i + 3); k++) pick.add(k);
   });
   const sel = [...pick].sort((a, b) => a - b).map((i) => lines[i]);

@@ -176,8 +176,17 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
   if (!lines.length) throw new Error(`${relTest} covers no line of ${relPath(absTarget, adapter.root)}`);
   const original = readFile(absTarget);
   const all = mutantsFor(original, lines);
+  // Re-runs: re-check previous survivors first (did strengthening work?), then mutants never tried,
+  // and only then ones already killed — so repeated runs walk through the whole candidate set.
+  const prevFile = state.file("mutation", `${path.basename(absTest)}.json`);
+  const prev = readJson<{ results?: MutantResult[] } | null>(prevFile, null)?.results ?? [];
+  const key = (m: Mutant) => `${m.line}|${m.op}|${m.mutated}`;
+  const prevOutcome = new Map(prev.map((r) => [key(r), r.outcome]));
+  const rank = (m: Mutant) => { const o = prevOutcome.get(key(m)); return o === "survived" ? 0 : o === undefined ? 1 : 2; };
+  const ordered = [...all].sort((a, b) => rank(a) - rank(b));
+  const fresh = ordered.filter((m) => rank(m) < 2);
   // Pick more than needed: mutants that do not compile are replaced by the next candidates.
-  const candidates = pickMutants(all, Math.min(all.length, max * 2));
+  const candidates = [...pickMutants(fresh, Math.min(fresh.length, max * 2)), ...pickMutants(ordered.filter((m) => rank(m) === 2), max * 2)];
   if (!candidates.length) {
     const acc0 = state.data.accepted.find((a) => a.testFile === relTest);
     if (acc0) {
@@ -215,7 +224,7 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
       }
       else outcome = r.tests.length ? "survived" : "error";
       results.push({ ...mu, outcome });
-      const shown = outcome === "survived" && (state.data.equivalent ?? {})[relTest]?.includes(mu.line) ? "survived (marked equivalent)" : outcome;
+      const shown = outcome === "survived" && (state.data.equivalent ?? {})[relTest]?.includes(mu.line) ? "survived (marked equivalent)" : outcome === "stillborn" ? "did not compile (discarded)" : outcome;
       log(`  mutant ${i + 1} (budget ${max}, ${all.length} candidates) line ${mu.line} (${mu.op}): ${shown}`);
     }
   } finally {

@@ -89,7 +89,7 @@ export class SwiftPMAdapter implements Adapter {
     try {
       const d = this.loadDump();
       const ts: DumpTarget[] = d.targets;
-      lines.push(`package: ${d.name} (${ts.filter((x) => x.type === "regular").length} source targets, ${ts.filter((x) => x.type === "test").length} test targets)`);
+      lines.push(`package: ${d.name} (${ts.filter((x) => x.type === "regular").length} library targets, ${ts.filter((x) => x.type === "executable").length} executable targets (not tested), ${ts.filter((x) => x.type === "test").length} test targets)`);
       for (const m of this.modules()) {
         if (!exists(m.dir)) { ok = false; lines.push(`error: source directory of target ${m.name} not found: ${relPath(m.dir, this.root)}`); }
         else if (!this.sourceFiles(m).length) lines.push(`warning: target ${m.name} has no .swift files in ${relPath(m.dir, this.root)}`);
@@ -107,8 +107,18 @@ export class SwiftPMAdapter implements Adapter {
     return { ok, lines };
   }
 
+  /** An `import UIKit` outside any `#if` block (guarded imports build fine on macOS). */
   private hasUIKitOnly(): boolean {
-    return this.modules().some((m) => this.sourceFiles(m).some((f) => /^\s*import\s+UIKit\b/m.test(readFile(f)) && !/canImport\(UIKit\)/.test(readFile(f))));
+    return this.modules().some((m) => this.sourceFiles(m).some((f) => {
+      let depth = 0;
+      for (const l of readFile(f).split("\n")) {
+        const t = l.trim();
+        if (t.startsWith("#if")) depth++;
+        else if (t.startsWith("#endif")) depth = Math.max(0, depth - 1);
+        else if (depth === 0 && /^import\s+UIKit\b/.test(t)) return true;
+      }
+      return false;
+    }));
   }
 
   private targetDir(t: DumpTarget): string {
@@ -174,8 +184,9 @@ export class SwiftPMAdapter implements Adapter {
       "Use parameterized tests (`@Test(arguments: [...])`) for tables of inputs.",
       "Floating point: compare with a tolerance, e.g. `#expect(abs(x - 0.3) < 1e-9)`.",
       "Name clashes: Foundation (macOS 15+) defines types such as `Expression`, `Predicate`, `Measurement`. Only `import Foundation` when needed; if a type annotation is ambiguous, avoid the annotation or qualify it.",
+      t.xctest ? "" : "The package's own XCTest suites cannot run here, but they are the best oracle: grep Tests/ for the API you test and reuse their inputs and expected values (port them to Swift Testing).",
       "Give closures in dictionary/array literals explicit types (`let f: SymbolEvaluator = { args in ... }`) — the type checker cannot infer multi-statement closures there.",
-    ].join("\n");
+    ].filter(Boolean).join("\n");
   }
 
   exampleTests(m: Module, source?: string): string[] {

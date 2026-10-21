@@ -153,7 +153,9 @@ export function verify(adapter: Adapter, state: State, testFile: string, opts: V
 function finish(adapter: Adapter, state: State, r: VerifyResult, opts: VerifyOpts): void {
   if (opts.record === false) return;
   const relTest = relPath(r.testFile, adapter.root);
-  const attempts = opts.attempts ?? state.bumpAttempts(relTest);
+  // Attempts = verify runs until first acceptance; strengthening an accepted file doesn't count.
+  const alreadyAccepted = state.data.accepted.some((a) => a.testFile === relTest);
+  const attempts = opts.attempts ?? (alreadyAccepted ? state.data.attempts?.[relTest] ?? 1 : state.bumpAttempts(relTest));
   state.data.accepted = state.data.accepted.filter((a) => a.testFile !== relTest);
   if (r.verdict === "accepted") {
     state.data.accepted.push({
@@ -207,5 +209,7 @@ export function formatVerify(r: VerifyResult, root: string): string {
   if (r.suspects.length && r.verdict === "accepted") lines.push(`suspected bugs flagged: ${r.suspects.length}`, ...r.suspects.map((s) => `  ${s}`));
   if (r.feedback) lines.push("", r.feedback);
   if (r.logFile) lines.push("", `log: ${r.logFile}`);
+  // Repeat the verdict last: long compiler output pushes the first line out of view.
+  if (r.feedback.split("\n").length > 15) lines.push(`verdict: ${r.verdict.toUpperCase()}`);
   return lines.join("\n");
 }

@@ -60,7 +60,8 @@ All commands accept `-C <root>`; run them from the project root otherwise.
       e.g. an unreachable bound or a value nobody reads) — exclude it with
       `"$UNITGEN" mutate <test-file> --equivalent <line>` and say why in `"$UNITGEN" note "..."`.
       Aim for ≥ 80%. A run samples up to `--max` (default 15) mutants, preferring deleted calls,
-      negated conditions and comparison flips; the output says how many candidates exist.
+      negated conditions and comparison flips; the output says how many candidates exist. Re-runs
+      re-check previous survivors first and then move on to mutants not tried yet.
       Mutants that don't compile are replaced and don't count; the source is always restored.
       Re-verifying after strengthening shows "+0 vs. its previously accepted version" and is
       still ACCEPTED — new assertions don't need new lines.
