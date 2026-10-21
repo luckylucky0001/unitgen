@@ -55,12 +55,16 @@ export function rankTargets(adapter: Adapter, cov: Coverage, opts: { modules?: M
   const out: Target[] = [];
   const haveCoverage = Object.keys(cov).length > 0;
   for (const m of mods) {
-    for (const file of adapter.sourceFiles(m)) {
+    const files = adapter.sourceFiles(m);
+    // The module was measured: files absent from the report have no executable code (interfaces, typealiases).
+    const moduleMeasured = haveCoverage && files.some((f) => cov[f] !== undefined);
+    for (const file of files) {
       if (file.includes(adapter.testFileSuffix.replace(/\.\w+$/, ""))) continue;
       const text = readFile(file);
       const kind = adapter.classify(file, text);
       if (opts.includeKinds ? !opts.includeKinds.includes(kind) : KIND_WEIGHT[kind] === 0) continue;
       const measured = haveCoverage && cov[file] !== undefined;
+      if (moduleMeasured && !measured && adapter.platform === "android") continue;
       let exec: number[];
       let covered: Set<number>;
       if (measured) {

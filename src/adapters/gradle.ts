@@ -112,12 +112,20 @@ export class GradleAdapter implements Adapter {
       if (/: ViewModel\(|extends ViewModel/.test(text)) return "logic";
       return "ui";
     }
-    if (/@Module\b[\s\S]*@InstallIn|@Module\s*\n\s*(abstract |internal )?(object|class|interface)/.test(text)) return "di";
+    if (/@Module\b/.test(text) && /@(Test)?InstallIn\b|@Provides\b|@Binds\b/.test(text)) return "di";
+    if (/^\s*@(Dao|Database)\b/m.test(text)) return "generated"; // Room generates the implementation
+    if (this.isTestSupport(file)) return "test";
     if (/: ViewModel\(/.test(text)) return "logic";
     const funs = (text.match(/\bfun\s+[\w.<>]+\s*\(/g) ?? []).length + (text.match(/\b(public|private|protected)?\s*[\w<>\[\]]+\s+\w+\s*\([^)]*\)\s*(throws [\w, ]+)?\s*\{/g) ?? []).length;
     if (funs === 0) return "model";
     if (/@Dao\b|@Entity\b|@Database\b/.test(text) && funs < 3) return "model";
     return "logic";
+  }
+
+  /** Test-helper and benchmark modules (core:testing, *-test, benchmarks) are not targets. */
+  private isTestSupport(file: string): boolean {
+    const m = this.moduleFor(file);
+    return !!m && /(^|[:-])(testing|test|benchmarks?|baselineprofile|ui-test[\w-]*)$/.test(m.name);
   }
 
   private packageOf(source: string): string | undefined {
@@ -237,11 +245,14 @@ export class GradleAdapter implements Adapter {
     const args = [...this.gradlew(), ...COMPAT, "--continue", "-I", INIT_SCRIPT];
     for (const m of mods) {
       const prefix = m.name === ":" ? ":" : `${m.name}:`;
+      // Task options bind to the task immediately before them, so --tests must follow the test task.
       args.push(`${prefix}${tasks[m.name]}`);
+      // Force execution for generated tests: up-to-date checks / build cache would hide flakiness.
+      if (req.testFiles) args.push("--rerun");
+      if (req.testFiles) for (const f of req.testFiles) if (this.moduleFor(f)?.name === m.name) args.push("--tests", this.fqnOf(f));
       if (req.coverage) args.push(`${prefix}unitgenJacocoReport`);
     }
     if (req.coverage) args.push(`-Punitgen.tasks=${mods.map((m) => `${m.name}=${tasks[m.name]}`).join(",")}`);
-    if (req.testFiles) for (const f of req.testFiles) args.push("--tests", this.fqnOf(f));
     // Clear stale results so we only parse this run.
     for (const m of mods) {
       fs.rmSync(path.join(m.dir, "build", "test-results", tasks[m.name]!), { recursive: true, force: true });
@@ -263,7 +274,7 @@ export class GradleAdapter implements Adapter {
       }
       coverage = mergeCoverage(...covs);
     }
-    const infra = /SDK location not found|Could not resolve all|Could not GET|Unable to locate a Java Runtime|TIMEOUT/.exec(out)?.[0];
+    const infra = /SDK location not found|Could not resolve all|Could not GET|Unable to locate a Java Runtime|TIMEOUT|Problem configuring task|Selection failed/.exec(out)?.[0];
     return {
       ok: r.ok && !noTests,
       compiled: !compileFailed,

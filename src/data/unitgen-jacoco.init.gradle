@@ -17,6 +17,8 @@ gradle.beforeProject { p ->
     p.extensions.add('unitgenConfigured', true)
     p.pluginManager.apply('jacoco')
     p.tasks.withType(Test).configureEach { t ->
+      // unitgen reads pass/fail from the JUnit XML; a failing test must not skip the coverage report.
+      t.ignoreFailures = true
       t.extensions.findByName('jacoco')?.with {
         includeNoLocationClasses = true
         excludes = ['jdk.internal.*']
