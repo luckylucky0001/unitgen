@@ -53,7 +53,13 @@ All commands accept `-C <root>`; run them from the project root otherwise.
       | `NO_ASSERTIONS` / `NO_TESTS` | add real assertions / check suite & class naming |
       | `INFRA_ERROR` | environment problem (missing SDK, uninstalled ohpm packages, ...): report it, pick another target; don't edit tests to dodge it |
 
-   5. Give up on a target after ~4 attempts: `"$UNITGEN" reject <test-file> "<why>"` moves the
+   5. **Check assertion strength:** `"$UNITGEN" mutate <test-file>` flips operators / deletes
+      calls on the lines your test covers and re-runs it. Coverage alone does not prove the
+      assertions check anything. For each *survived* mutant, add an assertion that would fail
+      (then `verify` and `mutate` again), unless the mutant is equivalent (no observable change,
+      e.g. an unreachable bound) — say so in a note. Aim for ≥ 80%. Mutants that don't compile
+      are discarded automatically; the source is always restored.
+   6. Give up on a target after ~4 attempts: `"$UNITGEN" reject <test-file> "<why>"` moves the
       file into `.unitgen/rejected/` (and unregisters it) so the build stays green.
    **Large single files** (one 1000+ line source, e.g. a whole library in one file): build the
    test file up in passes — one feature area per pass (parsing, accessors, operators, errors…),
