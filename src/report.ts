@@ -42,7 +42,9 @@ export function buildReport(adapter: Adapter, state: State): string {
   if (d.accepted.length) {
     lines.push("## Accepted", "", "| test file | target | tests | new lines | attempts | mutation score |", "|---|---|---:|---:|---:|---:|");
     for (const x of d.accepted) {
-      const ms = x.mutation ? `${Math.round(x.mutation.score * 100)}% (${x.mutation.killed}/${x.mutation.killed + x.mutation.survived})` : "—";
+      const ms = x.mutation
+        ? `${x.mutation.first !== undefined && x.mutation.first !== x.mutation.score ? `${Math.round(x.mutation.first * 100)}% → ` : ""}${Math.round(x.mutation.score * 100)}% (${x.mutation.killed}/${x.mutation.killed + x.mutation.survived})`
+        : "—";
       lines.push(`| ${x.testFile} | ${x.target ?? ""} | ${x.tests} | ${x.gainedLines} | ${x.attempts} | ${ms} |`);
     }
     if (d.accepted.some((x) => !x.mutation)) lines.push("", "Mutation score: `unitgen mutate <test-file>` (— = not run). Surviving mutants can be equivalent (no observable change); review them before adding assertions.");

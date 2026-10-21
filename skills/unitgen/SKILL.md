@@ -57,8 +57,12 @@ All commands accept `-C <root>`; run them from the project root otherwise.
       calls on the lines your test covers and re-runs it. Coverage alone does not prove the
       assertions check anything. For each *survived* mutant, add an assertion that would fail
       (then `verify` and `mutate` again), unless the mutant is equivalent (no observable change,
-      e.g. an unreachable bound) — say so in a note. Aim for ≥ 80%. Mutants that don't compile
-      are discarded automatically; the source is always restored.
+      e.g. an unreachable bound) — record it with `"$UNITGEN" note "equivalent mutant: <file>:<line> <why>"`.
+      Aim for ≥ 80%. A run samples up to `--max` (default 15) mutants, preferring deleted calls,
+      negated conditions and comparison flips; the output says how many candidates exist.
+      Mutants that don't compile are replaced and don't count; the source is always restored.
+      Re-verifying after strengthening shows "+0 vs. its previously accepted version" and is
+      still ACCEPTED — new assertions don't need new lines.
    6. Give up on a target after ~4 attempts: `"$UNITGEN" reject <test-file> "<why>"` moves the
       file into `.unitgen/rejected/` (and unregisters it) so the build stays green.
    **Large single files** (one 1000+ line source, e.g. a whole library in one file): build the

@@ -18,6 +18,8 @@ export interface VerifyResult {
   gained: Record<string, number[]>;
   gainedLines: number;
   targetGained: number;
+  /** Target file coverage after accepting (baseline + all accepted tests). */
+  targetCoverage?: { covered: number; executable: number; pct: number };
   /** Lines this version adds over the previously accepted version of the same file. */
   deltaLines?: number;
   suspects: string[];
@@ -136,7 +138,14 @@ export function verify(adapter: Adapter, state: State, testFile: string, opts: V
   if (gainedLines === 0 && !opts.allowNoGain && !prev) {
     return res("no_gain", { tests, logFile: run.logFile, suspects, feedback: "All tests pass but they cover no line that was not already covered. Target the lines marked \"!\" in the brief." });
   }
-  const r = res("accepted", { tests, gained, gainedLines, targetGained, deltaLines, logFile: run.logFile, suspects });
+  let targetCoverage;
+  if (target) {
+    const after = mergeCoverage(known, cand)[target] ?? {};
+    const ex = Object.keys(after).length;
+    const cv = Object.values(after).filter((h) => h > 0).length;
+    targetCoverage = { covered: cv, executable: ex, pct: ex ? (100 * cv) / ex : 0 };
+  }
+  const r = res("accepted", { tests, gained, gainedLines, targetGained, deltaLines, targetCoverage, logFile: run.logFile, suspects });
   if (opts.record !== false) state.setTestCoverage(relTest, cand);
   return r;
 }
@@ -191,6 +200,7 @@ export function formatVerify(r: VerifyResult, root: string): string {
   const lines = [`verdict: ${r.verdict.toUpperCase()}  (${relPath(r.testFile, root)}, ${r.seconds.toFixed(0)}s)`];
   if (r.tests.length) lines.push(`tests: ${r.tests.length} run, ${r.failed.length} failed`);
   if (r.verdict === "accepted") {
+    if (r.targetCoverage) lines.push(`target coverage now: ${r.targetCoverage.covered}/${r.targetCoverage.executable} lines (${r.targetCoverage.pct.toFixed(0)}%)`);
     lines.push(`lines covered only by this file: ${r.gainedLines}${r.target ? ` (in the target: ${r.targetGained})` : ""}${r.deltaLines !== undefined ? `; +${r.deltaLines} vs. its previously accepted version` : ""}`);
     for (const [f, ls] of Object.entries(r.gained)) lines.push(`  ${relPath(f, root)}: ${ranges(ls)}`);
   }

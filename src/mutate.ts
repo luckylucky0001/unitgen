@@ -30,6 +30,8 @@ export interface MutationReport {
   score: number;
   results: MutantResult[];
   feedback: string;
+  /** Total mutants that could be generated for the covered lines (a run samples up to --max). */
+  candidates: number;
 }
 
 // [name, pattern, replacement]. Patterns require surrounding spaces where a token is ambiguous
@@ -103,6 +105,9 @@ export function mutantsFor(text: string, lines: number[]): Mutant[] {
   return out;
 }
 
+const PRIORITY = (op: string): number =>
+  op === "delete statement" ? 0 : op === "negate condition" ? 1 : /[<>=!]=?|&&|\|\|/.test(op.split(" ")[0]) ? 2 : /^[+\-*]/.test(op) ? 3 : 4;
+
 /** Spread picks over distinct lines first (evenly spaced), then second operators per line, deterministically. */
 export function pickMutants(all: Mutant[], max: number): Mutant[] {
   const byLine = new Map<number, Mutant[]>();
@@ -110,6 +115,7 @@ export function pickMutants(all: Mutant[], max: number): Mutant[] {
     if (!byLine.has(m.line)) byLine.set(m.line, []);
     byLine.get(m.line)!.push(m);
   }
+  for (const list of byLine.values()) list.sort((a, b) => PRIORITY(a.op) - PRIORITY(b.op));
   const lines = [...byLine.keys()].sort((a, b) => a - b);
   const picked: Mutant[] = [];
   for (let round = 0; picked.length < max; round++) {
@@ -149,7 +155,9 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
   const lines = Object.entries(cov[absTarget] ?? {}).filter(([, h]) => h > 0).map(([l]) => Number(l));
   if (!lines.length) throw new Error(`${relTest} covers no line of ${relPath(absTarget, adapter.root)}`);
   const original = readFile(absTarget);
-  const candidates = pickMutants(mutantsFor(original, lines), max);
+  const all = mutantsFor(original, lines);
+  // Pick more than needed: mutants that do not compile are replaced by the next candidates.
+  const candidates = pickMutants(all, Math.min(all.length, max * 2));
   if (!candidates.length) {
     throw new Error(`no mutable operators, conditions or call statements on the ${lines.length} lines ${relTest} covers`);
   }
@@ -165,6 +173,7 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
   const timeoutSec = Math.max(60, Math.ceil(clean.seconds * 4) + 30);
   try {
     for (const [i, mu] of candidates.entries()) {
+      if (results.filter((r) => r.outcome !== "stillborn").length >= max) break;
       const lines2 = original.split("\n");
       lines2[mu.line - 1] = mu.mutated;
       fs.writeFileSync(absTarget, lines2.join("\n"));
@@ -180,7 +189,7 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
       }
       else outcome = r.tests.length ? "survived" : "error";
       results.push({ ...mu, outcome });
-      log(`  mutant ${i + 1}/${candidates.length} line ${mu.line} (${mu.op}): ${outcome}`);
+      log(`  mutant ${i + 1} (budget ${max}, ${all.length} candidates) line ${mu.line} (${mu.op}): ${outcome}`);
     }
   } finally {
     fs.writeFileSync(absTarget, original);
@@ -197,10 +206,11 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
     ? `These changes to ${relPath(absTarget, adapter.root)} were NOT detected by any test. Add assertions that would fail for each:\n` +
       surv.map((s) => `- line ${s.line} (${s.op}):\n    ${s.original.trim()}\n  → ${s.mutated.trim()}`).join("\n")
     : "";
-  const report: MutationReport = { testFile: relTest, target: relPath(absTarget, adapter.root), killed, crashes, survived, stillborn, score, results, feedback };
+  const report: MutationReport = { testFile: relTest, target: relPath(absTarget, adapter.root), killed, crashes, survived, stillborn, score, results, feedback, candidates: all.length };
   const acc = state.data.accepted.find((a) => a.testFile === relTest);
   if (acc) {
-    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100 };
+    const first = acc.mutation?.first ?? Math.round(score * 100) / 100;
+    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first };
     state.save();
   }
   writeFile(state.file("mutation", `${path.basename(absTest)}.json`), JSON.stringify(report, null, 2));
@@ -208,6 +218,9 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
 }
 
 export function formatMutation(r: MutationReport): string {
-  const head = `mutation score: ${(r.score * 100).toFixed(0)}%  (killed ${r.killed}${r.crashes ? `, of which ${r.crashes} only by a crash, not an assertion` : ""}, survived ${r.survived}, did not compile ${r.stillborn})  ${r.testFile} -> ${r.target}`;
+  const sampled = r.killed + r.survived + r.stillborn;
+  const note = r.candidates > sampled ? `\nsampled ${sampled} of ${r.candidates} possible mutants; use --max ${r.candidates} for all` : "";
+  const head0 = `mutation score: ${(r.score * 100).toFixed(0)}%  (killed ${r.killed}${r.crashes ? `, of which ${r.crashes} only by a crash, not an assertion` : ""}, survived ${r.survived}, did not compile ${r.stillborn})  ${r.testFile} -> ${r.target}`;
+  const head = head0 + note;
   return r.feedback ? `${head}\n\n${r.feedback}` : head;
 }

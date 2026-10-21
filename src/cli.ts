@@ -70,8 +70,14 @@ async function main(argv: string[]): Promise<number> {
     },
   });
   const [cmd, ...rest] = positionals;
-  if (!cmd || o.help || cmd === "help") {
+  if (!cmd || cmd === "help") {
     process.stdout.write(HELP);
+    return 0;
+  }
+  if (o.help) {
+    // Per-command help: the command's line plus its option line.
+    const own = HELP.split("\n").filter((l) => new RegExp(`^\\s+${cmd}\\b|^${cmd}:`).test(l));
+    process.stdout.write(`${own.length ? own.join("\n") : `unknown command: ${cmd}`}\n\nCommon: -C <dir>  --adapter <id>  --module <name>  --json\n`);
     return 0;
   }
   const root = path.resolve(o.project ?? process.cwd());

@@ -11,7 +11,8 @@ export interface AcceptedTest {
   gained: Record<string, number[]>;
   attempts: number;
   at: string;
-  mutation?: { killed: number; survived: number; stillborn: number; score: number };
+  /** Latest mutation run; `first` keeps the score of the first run (before strengthening). */
+  mutation?: { killed: number; survived: number; stillborn: number; score: number; first?: number };
 }
 
 export interface RejectedTest {
