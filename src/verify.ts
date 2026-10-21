@@ -114,13 +114,14 @@ export function verify(adapter: Adapter, state: State, testFile: string, opts: V
 function finish(adapter: Adapter, state: State, r: VerifyResult, opts: VerifyOpts): void {
   if (opts.record === false) return;
   const relTest = relPath(r.testFile, adapter.root);
+  const attempts = opts.attempts ?? state.bumpAttempts(relTest);
   state.data.accepted = state.data.accepted.filter((a) => a.testFile !== relTest);
   if (r.verdict === "accepted") {
     state.data.accepted.push({
       testFile: relTest, target: r.target ? relPath(r.target, adapter.root) : undefined, tests: r.tests.length,
       gainedLines: r.gainedLines,
       gained: Object.fromEntries(Object.entries(r.gained).map(([f, ls]) => [relPath(f, adapter.root), ls])),
-      attempts: opts.attempts ?? 1, at: state.stamp(),
+      attempts, at: state.stamp(),
     });
     state.data.rejected = state.data.rejected.filter((x) => x.testFile !== relTest);
     for (const s of r.suspects) state.data.notes.push({ at: state.stamp(), kind: "suspect", text: `${relTest}: ${s}` });
@@ -129,14 +130,27 @@ function finish(adapter: Adapter, state: State, r: VerifyResult, opts: VerifyOpt
     state.setTestCoverage(relTest, undefined);
   }
   if (r.verdict !== "accepted" && opts.onFail === "quarantine" && exists(r.testFile)) {
-    const m = adapter.moduleFor(r.testFile);
-    if (m) adapter.forgetTestFile?.(r.testFile, m);
-    const q = state.file("rejected", `${Date.now()}-${path.basename(r.testFile)}`);
-    fs.mkdirSync(path.dirname(q), { recursive: true });
-    fs.renameSync(r.testFile, q);
-    state.data.rejected.push({ testFile: relTest, target: r.target ? relPath(r.target, adapter.root) : undefined, reason: r.verdict, attempts: opts.attempts ?? 1, quarantinedAs: relPath(q, adapter.root), at: state.stamp() });
+    quarantine(adapter, state, r.testFile, r.verdict, attempts, r.target);
   }
   state.save();
+}
+
+/** Move a test file into .unitgen/rejected and undo its registration. */
+export function quarantine(adapter: Adapter, state: State, testFile: string, reason: string, attempts?: number, target?: string): string {
+  const relTest = relPath(testFile, adapter.root);
+  const m = adapter.moduleFor(testFile);
+  if (m) adapter.forgetTestFile?.(testFile, m);
+  const q = state.file("rejected", `${Date.now()}-${path.basename(testFile)}`);
+  fs.mkdirSync(path.dirname(q), { recursive: true });
+  fs.renameSync(testFile, q);
+  state.data.accepted = state.data.accepted.filter((a) => a.testFile !== relTest);
+  state.setTestCoverage(relTest, undefined);
+  state.data.rejected.push({
+    testFile: relTest, target: target ? relPath(target, adapter.root) : undefined, reason,
+    attempts: attempts ?? state.data.attempts?.[relTest] ?? 0, quarantinedAs: relPath(q, adapter.root), at: state.stamp(),
+  });
+  state.save();
+  return q;
 }
 
 export function formatVerify(r: VerifyResult, root: string): string {

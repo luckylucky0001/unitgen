@@ -27,8 +27,18 @@ export function estimateExecutable(text: string): number[] {
   const lines = text.split("\n");
   const out: number[] = [];
   let inBlock = false;
+  let unavailable = false;
   lines.forEach((raw, i) => {
     const l = raw.trim();
+    if (/@available\(\s*\*\s*,\s*unavailable/.test(l)) {
+      unavailable = true;
+      return;
+    }
+    if (unavailable) {
+      // Skip the declaration that follows; a one-line `{ ... }` body ends it, otherwise its first line.
+      if (l && !l.startsWith("@") && !l.startsWith("//")) unavailable = false;
+      return;
+    }
     if (inBlock) {
       if (l.includes("*/")) inBlock = false;
       return;
@@ -39,6 +49,8 @@ export function estimateExecutable(text: string): number[] {
     }
     if (!l || l.startsWith("//") || l.startsWith("*") || l.startsWith("@") || l.startsWith("import ") || l.startsWith("package ")) return;
     if (/^[{}()\[\],;]+$/.test(l)) return;
+    // Field / interface member declarations without an initializer ("name?: string;", "val id: Int").
+    if (/^(public |private |protected |readonly |static |override |val |var |let |declare )*[\w$]+[?!]?\s*:\s*[^=(){}]+[;,]?$/.test(l)) return;
     if (/^(public |private |internal |protected |open |final |abstract |data |sealed |export |static )*(class|struct|enum|protocol|interface|object|extension|namespace)\b/.test(l)) return;
     out.push(i + 1);
   });

@@ -22,7 +22,7 @@ const RULES = `Rules (a test that breaks any of these is rejected):
 4. Derive expected values by reading the code carefully. If the code looks buggy, still assert the CURRENT behaviour and add a comment starting with "// UNITGEN-SUSPECT:" explaining the suspected bug.
 5. Aim at the lines marked "!" (not covered by any existing test): exercise each branch, error path and edge case (empty, nil/null, boundary values, invalid input).
 6. Keep tests small, independent and named after the behaviour they check. Prefer 5-25 focused tests over one giant test.
-7. Only use libraries that are already available (listed above). Do not add dependencies.`;
+7. Only use test libraries named in the Conventions section or imported by the existing tests below. Do not add dependencies.`;
 
 function declarationLines(text: string): string[] {
   const re = /^\s*(public |open |internal |private |fileprivate |protected |export |static |final |abstract |override |data |sealed |inline |suspend |async |mutating |@\w+\s+)*(func|fun|init|class|struct|enum|protocol|interface|object|typealias|val|var|let|case|constructor|function|type)\b/;
@@ -66,6 +66,7 @@ function testDoubles(adapter: Adapter, m: Module, text: string, budget: number):
       if (seen.has(f) || /UnitGen|\.unitgen\./.test(path.basename(f))) continue;
       seen.add(f);
       const t = readFile(f);
+      if (/XCTestCase|@Test\b|@Suite\b|\bdescribe\(|@org\.junit|import org\.junit|import kotlin\.test/.test(t) && !/\b(Fake|Test|Stub|Mock|InMemory)\w*\s*[:(<{]/.test(t.replace(/class\s+\w+Tests?\b/g, ""))) continue;
       const impl = [...t.matchAll(/\b(?:class|object|struct)\s+(\w+)[^{\n]*?(?::|implements|extends)\s*([^{\n]+)/g)]
         .filter((mm) => (mm[2].match(/\b[A-Z]\w+/g) ?? []).some((x) => idents.has(x)));
       if (!impl.length) continue;
@@ -94,6 +95,11 @@ function numbered(text: string, uncovered: Set<number>, executable: Set<number>,
     out.push(`${mark}${String(ln).padStart(5)}| ${l}`);
   });
   return out.join("\n");
+}
+
+/** Drop a leading license/copyright comment block: it costs tokens and carries no signal. */
+function stripLicense(text: string): string {
+  return text.replace(/^\s*(\/\*[\s\S]*?\*\/\s*|(\/\/[^\n]*\n)+\s*)/, (h) => (/copyright|license|licensed/i.test(h) ? "" : h));
 }
 
 function capRanges(lines: number[]): string {
@@ -128,7 +134,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
   }
 
   const examples = adapter.exampleTests(m, abs).map((f) => {
-    const t = readFile(f).split("\n");
+    const t = stripLicense(readFile(f)).split("\n");
     return `// ${relPath(f, adapter.root)}${t.length > 120 ? " (first 120 lines)" : ""}\n${t.slice(0, 120).join("\n")}`;
   });
 
@@ -143,6 +149,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     `- Test suite/class name: \`${place.suiteName}\`${place.packageName ? `  (package \`${place.packageName}\`)` : ""}`,
     place.importHint ? `- Import: \`${place.importHint}\`` : "",
     `- Coverage: ${measured ? `${covered.size}/${exec.size} executable lines covered by existing tests` : "no coverage data for this file (estimated)"}; uncovered lines: ${capRanges(uncovered)}`,
+    ...(adapter.briefWarnings?.(abs) ?? []).map((w) => `- ⚠️ ${w}`),
     "",
     "## Conventions",
     adapter.conventions(m),
@@ -159,6 +166,6 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
   if (examples.length) sections.push("", "## Existing tests in this module (follow their style, imports and fakes/helpers; the framework rules above win if they differ)", "```", examples.join("\n\n"), "```");
   if (existingGenerated) sections.push("", "## Current content of the generated test file (extend it; keep passing tests)", "```", existingGenerated, "```");
   if (opts.feedback) sections.push("", "## Feedback from the last attempt (fix these problems)", "```", opts.feedback, "```");
-  sections.push("", "## Output", `Return the complete test file for \`${path.basename(place.path)}\` in a single fenced code block, nothing else.`);
+  sections.push("", "## Output", `Write the complete test file to \`${place.path}\` (agent mode), or return it in a single fenced code block and nothing else (\`unitgen generate\`).`);
   return { source: abs, testPath: place.path, suiteName: place.suiteName, markdown: sections.filter((s) => s !== undefined).join("\n"), uncovered };
 }

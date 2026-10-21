@@ -32,6 +32,8 @@ export interface TestRun {
   seconds: number;
   /** Environment problem, not the test's fault (missing SDK, timeout, ...). */
   infraError?: string;
+  /** Informational remark for the user (e.g. suites skipped on this toolchain). */
+  note?: string;
 }
 
 export interface RunRequest {
@@ -75,6 +77,8 @@ export interface Adapter {
   exampleTests(m: Module, source?: string): string[];
   /** Called before a new test file is verified (e.g. register a SwiftPM test target). */
   prepareTestFile(testFile: string, m: Module): void;
+  /** Warnings to put at the top of a brief (missing packages, stubbed APIs, ...). */
+  briefWarnings?(source: string): string[];
   /** Undo prepareTestFile side effects when a file is quarantined (optional). */
   forgetTestFile?(testFile: string, m: Module): void;
   runTests(req: RunRequest): TestRun;

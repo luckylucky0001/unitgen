@@ -10,7 +10,7 @@ import { buildReport } from "./report.ts";
 import { State } from "./state.ts";
 import { formatTargets, rankTargets } from "./targets.ts";
 import { exists, log, relPath, writeFile } from "./util.ts";
-import { formatVerify, verify } from "./verify.ts";
+import { formatVerify, quarantine, verify } from "./verify.ts";
 import * as fs from "node:fs";
 
 const HELP = `unitgen — backfill unit tests, keep only the ones that pass and add coverage
@@ -25,6 +25,7 @@ Commands
   brief <source>             Print the generation brief (prompt) for one source file
   verify <test-file>         Gate a generated test file: compile, pass, re-run, assertions, new coverage
   generate                   Automatic loop with a model backend (--llm)
+  reject <test-file> [why]   Quarantine a test file without re-running it (moves it to .unitgen/rejected)
   report                     Write .unitgen/REPORT.md
   note <text>                Attach a note (e.g. a suspected bug) to the report
   status                     Show baseline / accepted / rejected counts
@@ -100,7 +101,7 @@ async function main(argv: string[]): Promise<number> {
         for (const f of Object.keys(prev)) if (!own.has(f) && !cov[f]) cov[f] = prev[f];
       }
       state.baselineCoverage = cov;
-      const note = r.infraError ?? (!r.compiled ? "existing tests did not compile in this environment; baseline treated as 0% for affected modules" : failed ? `${failed} existing tests fail` : undefined);
+      const note = r.infraError ?? r.note ?? (!r.compiled ? "existing tests did not compile in this environment; baseline treated as 0% for affected modules" : failed ? `${failed} existing tests fail` : undefined);
       state.data.adapter = adapter.id;
       state.data.baseline = { at: state.stamp(), ok: r.ok, tests: r.tests.length, failed, note, seconds: r.seconds };
       state.save();
@@ -137,6 +138,12 @@ async function main(argv: string[]): Promise<number> {
       print(formatVerify(r, root), r);
       return r.verdict === "accepted" ? 0 : 2;
     }
+    case "reject": {
+      if (!rest[0] || !exists(rest[0])) throw new Error("usage: unitgen reject <test-file> [reason]");
+      const q = quarantine(adapter, state, path.resolve(rest[0]), rest.slice(1).join(" ") || "rejected by agent", undefined, o.target ? path.resolve(o.target) : undefined);
+      print(`quarantined: ${relPath(q, root)}`, { quarantinedAs: q });
+      return 0;
+    }
     case "generate": {
       const llm = pickBackend(o.llm, o.model);
       const res = await generate(adapter, state, llm, {
@@ -155,8 +162,10 @@ async function main(argv: string[]): Promise<number> {
     case "note": {
       const text = rest.join(" ").trim();
       if (!text) throw new Error("usage: unitgen note <text>");
-      state.data.notes.push({ at: state.stamp(), kind: /bug|suspect/i.test(text) ? "suspect" : "note", text });
+      const kind = /bug|suspect/i.test(text) ? "suspect" : "note";
+      state.data.notes.push({ at: state.stamp(), kind, text });
       state.save();
+      print(`noted (${kind}); it will appear in the report`, { kind, text });
       return 0;
     }
     case "status": {

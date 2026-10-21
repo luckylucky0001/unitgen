@@ -77,6 +77,11 @@ export class HarmonyAdapter implements Adapter {
     }
     const ms = this.modules();
     lines.push(`modules: ${ms.map((m) => `${m.name} (${m.kind})`).join(", ") || "none"}`);
+    const declared = [path.join(this.root, "oh-package.json5"), ...ms.map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists)
+      .some((p) => /"dependencies"\s*:\s*\{\s*"/.test(readFile(p).replace(/\/\/.*$/gm, "")));
+    if (declared && !exists(path.join(this.root, "oh_modules"))) {
+      lines.push("warning: oh-package.json5 declares dependencies but oh_modules/ is missing: run `ohpm install`. Until then files importing those packages are ranked as `platform` and cannot be verified.");
+    }
     const pkgs = [path.join(this.root, "oh-package.json5"), ...ms.map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists);
     if (!pkgs.some((p) => readFile(p).includes("@ohos/hypium"))) {
       lines.push("warning: no oh-package.json5 declares @ohos/hypium; add it to devDependencies before running the generated tests with hvigor/DevEco (the Node shim does not need it)");
@@ -119,7 +124,12 @@ export class HarmonyAdapter implements Adapter {
     const platformImports = (text.match(/from\s+['"]@(kit|ohos|system)\.[^'"]+['"]/g) ?? []).length;
     const fns = (text.match(/\bfunction\s+\w+|\b\w+\s*\([^)]*\)\s*(:\s*[\w<>\[\]|, ]+)?\s*\{|=>\s*\{/g) ?? []).length;
     if (fns === 0) return "model";
-    if (platformImports > 0 && this.mode() === "shim") return "platform";
+    if (this.mode() === "shim") {
+      if (platformImports > 0 || /\b(Color|Alignment|ButtonStyleMode|AppStorage|getContext)\.|\$r\(/.test(text)) return "platform";
+      const ohm = path.join(this.root, "oh_modules");
+      const third = [...text.matchAll(/from\s+['"](@[\w-]+\/[^'"]+|[a-z][^'".]*)['"]/g)].map((m) => m[1]).filter((p) => p !== "@ohos/hypium");
+      if (third.some((p) => !exists(path.join(ohm, p)))) return "platform";
+    }
     return "logic";
   }
 
@@ -130,7 +140,9 @@ export class HarmonyAdapter implements Adapter {
     if (!imp.startsWith(".")) imp = `./${imp}`;
     const ident = base.replace(/[^A-Za-z0-9]+(.)?/g, (_, c: string | undefined) => (c ? c.toUpperCase() : "")).replace(/^[0-9]/, "_$&");
     const suite = `${ident[0].toUpperCase()}${ident.slice(1)}UnitGenTest`;
-    return { path: p, suiteName: suite, importHint: `import { ... } from '${imp}';  // and: export default function ${suite[0].toLowerCase()}${suite.slice(1)}() { describe('${suite}', () => { ... }) }` };
+    // APIs -> apisUnitGenTest, JhUtils -> jhUtilsUnitGenTest, URLParser -> urlParserUnitGenTest
+    const fn = suite.replace(/^([A-Z]+)(?=[A-Z][a-z]|UnitGen)/, (r) => r.toLowerCase()).replace(/^[A-Z]/, (c) => c.toLowerCase());
+    return { path: p, suiteName: suite, importHint: `import { ... } from '${imp}';  // and: export default function ${fn}() { describe('${suite}', () => { ... }) }` };
   }
 
   conventions(m: Module): string {
@@ -229,7 +241,16 @@ export class HarmonyAdapter implements Adapter {
       const roots = mods.flatMap((m) => m.sourceRoots.map((s) => s + path.sep));
       coverage = dropNonCode(parseLcov(readFile(lcov), this.root, (f) => roots.some((s) => f.startsWith(s))));
     }
+    const stubs = readJson<{ modules: string[]; globals: string[] }>(results.replace(/\.json$/, ".stubs.json"), { modules: [], globals: [] });
+    const missing = [...new Set(tests.map((t) => /UNITGEN_MISSING_PACKAGE (\S+)/.exec(t.message ?? "")?.[1]).filter(Boolean))];
+    if (missing.length) {
+      return { ok: false, compiled: false, tests: [], logFile, seconds: (Date.now() - start) / 1000, excerpt: "",
+        infraError: `ohpm packages not installed: ${missing.join(", ")}. Run \`ohpm install\` in ${this.root} (needs the DevEco/ohpm toolchain), then verify again.` };
+    }
     let excerpt = "";
+    if (stubs.modules.length || stubs.globals.length) {
+      excerpt += `Note: stubbed under the Node shim (values are meaningless, do not assert on them): ${[...stubs.modules, ...stubs.globals].join(", ")}\n`;
+    }
     if (lint.length) excerpt += `ArkTS restriction violations (the real ArkTS compiler would reject these):\n${lint.join("\n")}\n`;
     if (loadFail.length) excerpt += loadFail.map((t) => t.message).join("\n");
     if (!r.ok && !excerpt) excerpt = errorExcerpt(r.out);
@@ -263,6 +284,21 @@ export class HarmonyAdapter implements Adapter {
 
   countAssertions(text: string): number {
     return (text.match(/\.assert\w+\s*\(/g) ?? []).length;
+  }
+
+  /** Problems the model should know before writing a test for `source`. */
+  briefWarnings(source: string): string[] {
+    const text = readFile(source);
+    const out: string[] = [];
+    const ohm = path.join(this.root, "oh_modules");
+    const pkgs = [...text.matchAll(/from\s+['"]([^'".][^'"]*)['"]/g)].map((m) => m[1]).filter((p) => p !== "@ohos/hypium");
+    const system = pkgs.filter((p) => /^@(kit|ohos|system|arkts|hms)\./.test(p));
+    const thirdParty = pkgs.filter((p) => !/^@(kit|ohos|system|arkts|hms)\./.test(p));
+    const missing = thirdParty.filter((p) => !exists(path.join(ohm, p)));
+    if (missing.length) out.push(`Imports ohpm packages that are not installed (${missing.join(", ")}): tests will fail with INFRA_ERROR until \`ohpm install\` runs. Pick another target if you cannot install them.`);
+    if (system.length && this.mode() === "shim") out.push(`Imports system APIs that are stubbed under the Node shim (${system.join(", ")}): only test code paths whose results do not come from these APIs.`);
+    if (/\b(Color|Alignment|FlexAlign|FontWeight|ButtonStyleMode|AppStorage|getContext|\$r)\b/.test(text) && this.mode() === "shim") out.push("Uses ArkUI globals (Color, Alignment, $r, AppStorage, ...): they are inert stubs under the shim.");
+    return out;
   }
 }
 

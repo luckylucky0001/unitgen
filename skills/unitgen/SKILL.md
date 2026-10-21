@@ -35,6 +35,8 @@ All commands accept `-C <root>`; run them from the project root otherwise.
 3. **For each target, one at a time:**
    1. `"$UNITGEN" brief <source-file>` and read the whole brief. It names the exact test
       file path and suite/class name to use — keep both, the gate depends on them.
+      Lines starting with ⚠️ at the top (uninstalled packages, stubbed platform APIs) often
+      mean the target cannot be verified here: prefer another target.
    2. Open any other source the brief references but does not include (constructors of
       collaborators, data classes, test-helper modules) before writing assertions.
    3. Write the test file at the given path. Follow the brief's rules; reuse listed test
@@ -45,14 +47,18 @@ All commands accept `-C <root>`; run them from the project root otherwise.
       |---|---|
       | `ACCEPTED` | done; move on |
       | `COMPILE_ERROR` | fix the test using the compiler output |
-      | `TEST_FAILURES` | re-read the production code; fix the *expectation*. If the code is really wrong, assert current behaviour, add `// UNITGEN-SUSPECT: <why>` and `"$UNITGEN" note "suspected bug: ..."` |
+      | `TEST_FAILURES` | re-read the production code; fix the *expectation*. If the code is really wrong, assert current behaviour and add `// UNITGEN-SUSPECT: <why>` (collected into the report automatically) |
       | `FLAKY` | remove the source of nondeterminism (time, ordering, shared state, real dispatchers) |
       | `NO_GAIN` | the tests only hit already-covered lines; aim at the `!` lines in a fresh brief |
       | `NO_ASSERTIONS` / `NO_TESTS` | add real assertions / check suite & class naming |
-      | `INFRA_ERROR` | environment problem: report it to the user, don't edit tests to dodge it |
+      | `INFRA_ERROR` | environment problem (missing SDK, uninstalled ohpm packages, ...): report it, pick another target; don't edit tests to dodge it |
 
-   5. Give up on a target after ~4 attempts: `"$UNITGEN" verify <test-file> --quarantine`
-      moves the file into `.unitgen/rejected/` so the build stays green. Note why.
+   5. Give up on a target after ~4 attempts: `"$UNITGEN" reject <test-file> "<why>"` moves the
+      file into `.unitgen/rejected/` (and unregisters it) so the build stays green.
+   **Large single files** (one 1000+ line source, e.g. a whole library in one file): build the
+   test file up in passes — one feature area per pass (parsing, accessors, operators, errors…),
+   `verify` after each pass. Each pass must add coverage or it is `NO_GAIN`.
+   Use `"$UNITGEN" note "<text>"` only for findings that are not already a `UNITGEN-SUSPECT` comment.
 4. **Finish:** `"$UNITGEN" report` writes `.unitgen/REPORT.md` (coverage before/after,
    accepted/rejected files, suspected bugs). Summarise it for the user, including what you
    could not cover and why (e.g. code paths needing a device, Robolectric, or a real network).

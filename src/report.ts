@@ -8,7 +8,10 @@ export function buildReport(adapter: Adapter, state: State): string {
   const base = state.baselineCoverage;
   const now = mergeCoverage(base, state.acceptedCoverage());
   const files = [...new Set(adapter.modules().flatMap((m) => adapter.sourceFiles(m)))].filter((f) => !f.includes("UnitGen"));
-  const b = summarize(base, files.filter((f) => base[f] || now[f]));
+  // Files the baseline never loaded still have executable lines: count them as 0 covered.
+  const baseFilled = { ...base };
+  for (const f of Object.keys(now)) if (!baseFilled[f]) baseFilled[f] = Object.fromEntries(Object.keys(now[f]).map((l) => [Number(l), 0]));
+  const b = summarize(baseFilled, files.filter((f) => base[f] || now[f]));
   const a = summarize(now, files.filter((f) => base[f] || now[f]));
   const d = state.data;
   const lines: string[] = [

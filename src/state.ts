@@ -29,6 +29,8 @@ export interface StateData {
   accepted: AcceptedTest[];
   rejected: RejectedTest[];
   notes: { at: string; text: string; kind: string }[];
+  /** verify runs per test file (relative path), so the report shows real attempt counts. */
+  attempts?: Record<string, number>;
 }
 
 export class State {
@@ -83,6 +85,12 @@ export class State {
   /** Baseline plus everything unitgen already accepted (optionally excluding one test file). */
   knownCoverage(except?: string): Coverage {
     return mergeCoverage(this.baselineCoverage, this.acceptedCoverage(except));
+  }
+
+  bumpAttempts(testFile: string): number {
+    const a = (this.data.attempts ??= {});
+    a[testFile] = (a[testFile] ?? 0) + 1;
+    return a[testFile];
   }
 
   hasBaseline(): boolean {

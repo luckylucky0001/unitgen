@@ -27,6 +27,7 @@ export class SwiftPMAdapter implements Adapter {
   readonly platform = "ios" as const;
   readonly testFileSuffix = `${SUFFIX}.swift`;
   private dump: any;
+  private resolved: Record<string, string> = {};
   private toolchain?: { clt: boolean; xctest: boolean; frameworksDir?: string; libDir?: string };
 
   readonly root: string;
@@ -51,6 +52,15 @@ export class SwiftPMAdapter implements Adapter {
     const r = run(["swift", "package", "dump-package"], { cwd: this.root, timeoutSec: 600 });
     if (!r.ok) throw new Error(`swift package dump-package failed:\n${errorExcerpt(r.out)}`);
     this.dump = JSON.parse(r.out.slice(r.out.indexOf("{")));
+    // dump-package leaves `path` null for conventional layouts; `describe` has the resolved paths
+    // (Sources/, Source/, src/ or srcs/ for regular targets).
+    const desc = run(["swift", "package", "describe", "--type", "json"], { cwd: this.root, timeoutSec: 600 });
+    if (desc.ok) {
+      try {
+        const dj = JSON.parse(desc.out.slice(desc.out.indexOf("{")));
+        this.resolved = Object.fromEntries((dj.targets ?? []).map((t: any) => [t.name, t.path]));
+      } catch { /* fall back to conventions */ }
+    }
     return this.dump;
   }
 
@@ -80,6 +90,13 @@ export class SwiftPMAdapter implements Adapter {
       const d = this.loadDump();
       const ts: DumpTarget[] = d.targets;
       lines.push(`package: ${d.name} (${ts.filter((x) => x.type === "regular").length} source targets, ${ts.filter((x) => x.type === "test").length} test targets)`);
+      for (const m of this.modules()) {
+        if (!exists(m.dir)) { ok = false; lines.push(`error: source directory of target ${m.name} not found: ${relPath(m.dir, this.root)}`); }
+        else if (!this.sourceFiles(m).length) lines.push(`warning: target ${m.name} has no .swift files in ${relPath(m.dir, this.root)}`);
+      }
+      if (t.clt && ts.some((x) => x.type === "test")) {
+        lines.push("note: existing XCTest suites cannot run without Xcode, so the baseline will be 0% here");
+      }
       if (this.hasUIKitOnly()) {
         lines.push("warning: sources import UIKit; `swift test` on macOS cannot build them. Use an Xcode project/scheme with an iOS Simulator instead.");
       }
@@ -96,8 +113,10 @@ export class SwiftPMAdapter implements Adapter {
 
   private targetDir(t: DumpTarget): string {
     if (t.path) return path.resolve(this.root, t.path);
-    const base = t.type === "test" ? "Tests" : "Sources";
-    return path.join(this.root, base, t.name);
+    if (this.resolved[t.name]) return path.resolve(this.root, this.resolved[t.name]);
+    const bases = t.type === "test" ? ["Tests", "Sources", "Source", "src", "srcs"] : ["Sources", "Source", "src", "srcs"];
+    for (const b of bases) if (exists(path.join(this.root, b, t.name))) return path.join(this.root, b, t.name);
+    return path.join(this.root, bases[0], t.name);
   }
 
   modules(): Module[] {
@@ -263,10 +282,16 @@ export class SwiftPMAdapter implements Adapter {
           if (process.env.UNITGEN_KEEP_COV !== "1") fs.unlinkSync(p);
         }
       }
-      const infraError = r.timedOut ? "timeout" : /no such module 'XCTest'/.test(out) && !ours ? "XCTest unavailable" : undefined;
+      const infraError = r.timedOut ? "timeout" : undefined;
+      if (!ours && !t.xctest) {
+        // Baseline on the CLT: XCTest targets were dropped by the runtime manifest.
+        writeFile(logFile + ".note", "xctest-skipped");
+      }
+      const noTests = /error: no tests found/.test(out);
       return {
-        ok: r.ok, compiled, tests, coverage, logFile, seconds: (Date.now() - start) / 1000,
-        excerpt: r.ok ? "" : errorExcerpt(out), infraError,
+        ok: r.ok || (noTests && !ours), compiled, tests, coverage, logFile, seconds: (Date.now() - start) / 1000,
+        excerpt: r.ok || (noTests && !ours) ? "" : errorExcerpt(out), infraError,
+        note: !ours && !t.xctest ? "existing XCTest suites skipped: XCTest needs Xcode (only the Command Line Tools are installed)" : undefined,
       };
     } finally {
       restore();
