@@ -1,5 +1,5 @@
 // Injected by unitgen with `-I`. Adds JaCoCo to every JVM/Android project and registers
-// `unitgenJacocoReport`, which reports the test task named by -Punitgen.testTask.
+// `unitgenJacocoReport`, which reports the test task named in -Punitgen.tasks=":a=testDebugUnitTest,:b=test".
 // Uses beforeProject (not allprojects) so it also works with isolated projects disabled per-run.
 import org.gradle.testing.jacoco.tasks.JacocoReport
 
@@ -23,8 +23,14 @@ gradle.beforeProject { p ->
       }
     }
     p.tasks.register('unitgenJacocoReport', JacocoReport) { r ->
-      def tn = p.findProperty('unitgen.testTask') ?: 'test'
-      def v = p.findProperty('unitgen.variant') ?: 'main'
+      def map = [:]
+      (p.findProperty('unitgen.tasks') ?: '').toString().split(',').each { e ->
+        def kv = e.split('=')
+        if (kv.length == 2) map[kv[0]] = kv[1]
+      }
+      def tn = map[p.path] ?: 'test'
+      def mv = (tn =~ /^test(\w+)UnitTest$/)
+      def v = mv.matches() ? (mv.group(1)[0].toLowerCase() + mv.group(1).substring(1)) : 'main'
       def tt = p.tasks.findByName(tn)
       if (tt != null) {
         r.dependsOn(tt)
@@ -45,7 +51,7 @@ gradle.beforeProject { p ->
       }
     }
   }
-  ['java', 'org.jetbrains.kotlin.jvm', 'com.android.library', 'com.android.application'].each { id ->
+  ['java', 'org.jetbrains.kotlin.jvm', 'com.android.library', 'com.android.application', 'com.android.dynamic-feature', 'com.android.test'].each { id ->
     p.pluginManager.withPlugin(id) { setup() }
   }
 }

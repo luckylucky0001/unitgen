@@ -190,10 +190,10 @@ export class GradleAdapter implements Adapter {
   }
 
   /** Map module -> preferred unit-test task (cached `tasks --all` output). */
-  private testTasks(): Record<string, string> {
+  private testTasks(): Record<string, string | undefined> {
     const cache = path.join(this.stateDir, "gradle-test-tasks.json");
     const settingsMtime = this.modules().map((m) => fs.statSync(m.meta!.buildFile).mtimeMs).join(",");
-    const c = readJson<{ key: string; tasks: Record<string, string> } | null>(cache, null);
+    const c = readJson<{ key: string; tasks: Record<string, string | undefined> } | null>(cache, null);
     if (c && c.key === settingsMtime) return c.tasks;
     const r = run([...this.gradlew(), "-q", "tasks", "--all", ...COMPAT], { cwd: this.root, timeoutSec: 1800, logFile: path.join(this.stateDir, "logs", "gradle-tasks.log") });
     const byMod: Record<string, string[]> = {};
@@ -203,20 +203,16 @@ export class GradleAdapter implements Adapter {
       const mod = m[1] ? `:${m[1]}` : ":";
       (byMod[mod] ??= []).push(m[2]);
     }
-    const tasks: Record<string, string> = {};
+    const tasks: Record<string, string | undefined> = {};
+    const listed = Object.keys(byMod).length > 0;
     for (const mod of this.modules()) {
       const ts = byMod[mod.name] ?? [];
       const unit = ts.filter((t) => /^test\w*DebugUnitTest$/.test(t)).sort((a, b) => a.length - b.length || a.localeCompare(b));
-      tasks[mod.name] = unit[0] ?? (ts.includes("test") || mod.kind === "jvm" ? "test" : "testDebugUnitTest");
+      // Modules without a unit-test task (e.g. com.android.test benchmarks) are skipped.
+      tasks[mod.name] = unit[0] ?? (ts.includes("test") && mod.kind === "jvm" ? "test" : listed ? undefined : mod.kind === "jvm" ? "test" : "testDebugUnitTest");
     }
     writeJson(cache, { key: settingsMtime, tasks });
     return tasks;
-  }
-
-  private variantOf(task: string): string {
-    const m = /^test(\w+)UnitTest$/.exec(task);
-    if (!m) return "main";
-    return m[1][0].toLowerCase() + m[1].slice(1);
   }
 
   private fqnOf(testFile: string): string {
@@ -234,43 +230,28 @@ export class GradleAdapter implements Adapter {
       mods = this.modules().filter((m) => owners.has(m.name));
     }
     const tasks = this.testTasks();
+    mods = mods.filter((m) => tasks[m.name]);
+    if (!mods.length) {
+      return { ok: false, compiled: true, tests: [], logFile, excerpt: "no unit-test task found for the selected module(s)", seconds: 0, infraError: "no unit-test task" };
+    }
     const args = [...this.gradlew(), ...COMPAT, "--continue", "-I", INIT_SCRIPT];
-    // One Gradle invocation; per-project test task is passed via project property only when unique.
-    const taskNames = new Set(mods.map((m) => tasks[m.name]));
     for (const m of mods) {
       const prefix = m.name === ":" ? ":" : `${m.name}:`;
       args.push(`${prefix}${tasks[m.name]}`);
       if (req.coverage) args.push(`${prefix}unitgenJacocoReport`);
     }
-    if (req.coverage) {
-      // The report task reads one variant; modules on other variants get a second pass below.
-      const t = [...taskNames][0];
-      args.push(`-Punitgen.testTask=${t}`, `-Punitgen.variant=${this.variantOf(t)}`);
-    }
+    if (req.coverage) args.push(`-Punitgen.tasks=${mods.map((m) => `${m.name}=${tasks[m.name]}`).join(",")}`);
     if (req.testFiles) for (const f of req.testFiles) args.push("--tests", this.fqnOf(f));
     // Clear stale results so we only parse this run.
     for (const m of mods) {
-      fs.rmSync(path.join(m.dir, "build", "test-results", tasks[m.name]), { recursive: true, force: true });
+      fs.rmSync(path.join(m.dir, "build", "test-results", tasks[m.name]!), { recursive: true, force: true });
       fs.rmSync(path.join(m.dir, "build", "unitgen"), { recursive: true, force: true });
     }
-    let out = "";
-    let r = run(args, { cwd: this.root, timeoutSec: 3600, logFile });
-    out += r.out;
-    // Mixed variants: re-run report for the modules whose task differs.
-    if (req.coverage && taskNames.size > 1) {
-      for (const t of [...taskNames].slice(1)) {
-        const ms = mods.filter((m) => tasks[m.name] === t);
-        const a2 = [...this.gradlew(), ...COMPAT, "--continue", "-I", INIT_SCRIPT, `-Punitgen.testTask=${t}`, `-Punitgen.variant=${this.variantOf(t)}`,
-          ...ms.map((m) => `${m.name === ":" ? ":" : m.name + ":"}unitgenJacocoReport`)];
-        if (req.testFiles) for (const f of req.testFiles) a2.push("--tests", this.fqnOf(f));
-        const r2 = run(a2, { cwd: this.root, timeoutSec: 3600, logFile: logFile.replace(/\.log$/, `-${t}.log`) });
-        out += r2.out;
-        if (!r2.ok) r = r2;
-      }
-    }
+    const r = run(args, { cwd: this.root, timeoutSec: 3600, logFile });
+    let out = r.out;
     out = stripAnsi(out);
     const tests: TestCase[] = [];
-    for (const m of mods) tests.push(...parseJUnitXmlDir(path.join(m.dir, "build", "test-results", tasks[m.name])));
+    for (const m of mods) tests.push(...parseJUnitXmlDir(path.join(m.dir, "build", "test-results", tasks[m.name]!)));
     const compileFailed = /Compilation error|e: file:|error: |compile\w*Kotlin' FAILED|compile\w*JavaWithJavac' FAILED|Execution failed for task '.*compile/i.test(out) && /BUILD FAILED/.test(out);
     const noTests = /No tests found for given includes/.test(out);
     let coverage: Coverage | undefined;

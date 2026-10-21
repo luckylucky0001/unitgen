@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseLcov } from "../coverage.ts";
+import { type Coverage, parseLcov } from "../coverage.ts";
 import { errorExcerpt, exists, json5Parse, readFile, readJson, relPath, run, walkFiles, which, writeFile } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
@@ -124,7 +124,9 @@ export class HarmonyAdapter implements Adapter {
     const p = path.join(m.testRoot, `${base}${SUFFIX}`);
     let imp = relPath(source, path.dirname(p)).replace(/\.(ets|ts)$/, "");
     if (!imp.startsWith(".")) imp = `./${imp}`;
-    return { path: p, suiteName: `${base}UnitGenTest`, importHint: `import { ... } from '${imp}';` };
+    const ident = base.replace(/[^A-Za-z0-9]+(.)?/g, (_, c: string | undefined) => (c ? c.toUpperCase() : "")).replace(/^[0-9]/, "_$&");
+    const suite = `${ident[0].toUpperCase()}${ident.slice(1)}UnitGenTest`;
+    return { path: p, suiteName: suite, importHint: `import { ... } from '${imp}';  // and: export default function ${suite[0].toLowerCase()}${suite.slice(1)}() { describe('${suite}', () => { ... }) }` };
   }
 
   conventions(m: Module): string {
@@ -155,7 +157,9 @@ export class HarmonyAdapter implements Adapter {
 
   exampleTests(m: Module): string[] {
     const dirs = [path.join(m.dir, "src", "test"), path.join(m.dir, "src", "ohosTest", "ets", "test")];
-    const files = dirs.flatMap((d) => walkFiles(d, [".ets", ".ts"])).filter((f) => !f.endsWith(SUFFIX) && !/List\.test\.ets$/.test(f));
+    // Skip DevEco's generated boilerplate (LocalUnit.test.ets / Ability.test.ets templates).
+    const files = dirs.flatMap((d) => walkFiles(d, [".ets", ".ts"]))
+      .filter((f) => !f.endsWith(SUFFIX) && !/List\.test\.ets$/.test(f) && !/Defines a test suite|Presets an action/.test(readFile(f)));
     return files.filter((f) => fs.statSync(f).size > 300).sort((a, b) => fs.statSync(a).size - fs.statSync(b).size).slice(0, 2);
   }
 
@@ -199,7 +203,7 @@ export class HarmonyAdapter implements Adapter {
     const ohm = path.join(this.root, "oh_modules");
     const lint = files.flatMap((f) => arktsLint(readFile(f)).map((x) => `${relPath(f, this.root)}:${x}`));
     const args = ["node", c8, "--reporter=lcov", `--report-dir=${path.join(work, "cov")}`, `--temp-directory=${path.join(work, "tmp")}`,
-      "--exclude-after-remap", "--exclude=**/*.test.ets", "--exclude=**/*.test.ts", "--exclude=**/harmony-shim/**", "--exclude=**/oh_modules/**", "--exclude-node-modules",
+      "--exclude-after-remap", "--extension=.ets", "--extension=.ts", "--exclude=**/*.test.ets", "--exclude=**/*.test.ts", "--exclude=**/harmony-shim/**", "--exclude=**/oh_modules/**", "--exclude-node-modules",
       "node", path.join(work, "runner.cjs"), tsDir, results, exists(ohm) ? ohm : "-", ...files];
     const r = run(args, { cwd: this.root, timeoutSec: 900, logFile });
     const tests: TestCase[] = readJson<any[]>(results, []).map((t) => ({ name: t.name, status: t.status, message: t.message, file: t.file }));
@@ -209,7 +213,7 @@ export class HarmonyAdapter implements Adapter {
     const lcov = path.join(work, "cov", "lcov.info");
     if (req.coverage && exists(lcov)) {
       const roots = mods.flatMap((m) => m.sourceRoots.map((s) => s + path.sep));
-      coverage = parseLcov(readFile(lcov), this.root, (f) => roots.some((s) => f.startsWith(s)));
+      coverage = dropNonCode(parseLcov(readFile(lcov), this.root, (f) => roots.some((s) => f.startsWith(s))));
     }
     let excerpt = "";
     if (lint.length) excerpt += `ArkTS restriction violations (the real ArkTS compiler would reject these):\n${lint.join("\n")}\n`;
@@ -246,6 +250,35 @@ export class HarmonyAdapter implements Adapter {
   countAssertions(text: string): number {
     return (text.match(/\.assert\w+\s*\(/g) ?? []).length;
   }
+}
+
+/** V8 line coverage counts blank and comment lines; keep only lines with code on them. */
+function dropNonCode(cov: Coverage): Coverage {
+  const out: Coverage = {};
+  for (const [file, lines] of Object.entries(cov)) {
+    let inBlock = false;
+    const code = new Set<number>();
+    readFile(file).split("\n").forEach((raw, i) => {
+      let l = raw.trim();
+      if (inBlock) {
+        const end = l.indexOf("*/");
+        if (end < 0) return;
+        inBlock = false;
+        l = l.slice(end + 2).trim();
+      }
+      if (l.startsWith("/*")) {
+        const end = l.indexOf("*/");
+        if (end < 0) {
+          inBlock = true;
+          return;
+        }
+        l = l.slice(end + 2).trim();
+      }
+      if (l && !l.startsWith("//")) code.add(i + 1);
+    });
+    out[file] = Object.fromEntries(Object.entries(lines).filter(([ln]) => code.has(Number(ln))));
+  }
+  return out;
 }
 
 /** Approximate the ArkTS linter for the most common violations in generated tests. */
