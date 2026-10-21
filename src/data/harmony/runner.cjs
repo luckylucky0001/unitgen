@@ -8,6 +8,11 @@ const path = require("node:path");
 const Module = require("node:module");
 
 const [tsDir, resultsFile, ohModules, ...testFiles] = process.argv.slice(2);
+// Transpiled JS is written here and executed from there, so V8 coverage is exact for the JS;
+// unitgen maps JS lines back to .ets lines itself (c8's range remapping through source maps
+// misattributes the end of uncovered blocks, e.g. whole switch statements).
+const genDir = path.join(path.dirname(resultsFile), "gen");
+const lineMaps = {};
 const ts = require(tsDir);
 const hypium = require("./hypium.cjs");
 const stubPath = path.join(__dirname, "stub.cjs");
@@ -112,7 +117,7 @@ function compile(module, filename) {
     reportDiagnostics: true,
     compilerOptions: {
       module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, experimentalDecorators: true,
-      inlineSourceMap: true, inlineSources: true, esModuleInterop: true, useDefineForClassFields: false,
+      sourceMap: true, esModuleInterop: true, useDefineForClassFields: false,
     },
   });
   const syntax = (out.diagnostics || []).filter((d) => d.category === ts.DiagnosticCategory.Error);
@@ -121,7 +126,49 @@ function compile(module, filename) {
     const pos = d.file ? d.file.getLineAndCharacterOfPosition(d.start) : { line: 0, character: 0 };
     throw new SyntaxError(`${filename}:${pos.line + 1}:${pos.character + 1}: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`);
   }
-  module._compile(out.outputText, filename);
+  // Mirror relative to the project root, without dot-directories (c8's globs skip them).
+  const rel = path.relative(process.env.UNITGEN_ROOT || "/", filename).split(path.sep).map((p) => (p.startsWith(".") ? "_" + p.slice(1) : p)).join(path.sep);
+  const genPath = path.join(genDir, rel) + ".js";
+  fs.mkdirSync(path.dirname(genPath), { recursive: true });
+  const js = out.outputText.replace(/\n\/\/# sourceMappingURL=.*$/, "");
+  fs.writeFileSync(genPath, js);
+  lineMaps[genPath] = { source: filename, lines: genToSourceLines(JSON.parse(out.sourceMapText).mappings) };
+  module._compile(js, genPath);
+}
+
+/** Decode source-map VLQ mappings into generated line -> lowest original line (1-based). */
+function genToSourceLines(mappings) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const out = [];
+  let srcLine = 0;
+  mappings.split(";").forEach((lineStr, genLine) => {
+    let best;
+    for (const seg of lineStr.split(",")) {
+      if (!seg) continue;
+      const vals = [];
+      let shift = 0, value = 0;
+      for (const ch of seg) {
+        const digit = chars.indexOf(ch);
+        value += (digit & 31) << shift;
+        if (digit & 32) shift += 5;
+        else { vals.push(value & 1 ? -(value >> 1) : value >> 1); value = 0; shift = 0; }
+      }
+      if (vals.length >= 4) {
+        srcLine += vals[2];
+        if (best === undefined || srcLine < best) best = srcLine;
+      }
+    }
+    if (best !== undefined) out[genLine + 1] = best + 1;
+  });
+  return out;
+}
+
+/** Rewrite "<gen>.js:L:C" in stack traces to the original "<file>.ets:L". */
+function mapStack(text) {
+  return String(text).replace(/(\/[^\s():]+\.js):(\d+)(?::\d+)?/g, (all, file, line) => {
+    const m = lineMaps[file];
+    return m && m.lines[Number(line)] ? `${m.source}:${m.lines[Number(line)]}` : all;
+  });
 }
 require.extensions[".ets"] = compile;
 require.extensions[".ts"] = compile;
@@ -134,10 +181,11 @@ require.extensions[".ts"] = compile;
       const fn = typeof mod.default === "function" ? mod.default : typeof mod === "function" ? mod : undefined;
       if (fn) fn();
     } catch (e) {
-      loadErrors.push({ name: `load ${path.basename(f)}`, status: "failed", message: String(e && e.stack ? e.stack.split("\n").slice(0, 8).join("\n") : e), file: f, load: true });
+      loadErrors.push({ name: `load ${path.basename(f)}`, status: "failed", message: mapStack(String(e && e.stack ? e.stack.split("\n").slice(0, 8).join("\n") : e)), file: f, load: true });
     }
   }
-  const results = [...loadErrors, ...(await hypium.runAll())];
+  const results = [...loadErrors, ...(await hypium.runAll())].map((r) => (r.message ? { ...r, message: mapStack(r.message) } : r));
+  fs.writeFileSync(path.join(path.dirname(resultsFile), "linemaps.json"), JSON.stringify(lineMaps));
   fs.writeFileSync(resultsFile, JSON.stringify(results, null, 2));
   fs.writeFileSync(resultsFile.replace(/\.json$/, ".stubs.json"), JSON.stringify({ modules: [...stubbed], globals: [...usedGlobals] }));
   for (const r of results) process.stdout.write(`${r.status === "passed" ? "PASS" : "FAIL"} ${r.name}${r.message ? "\n    " + r.message.replace(/\n/g, "\n    ") : ""}\n`);

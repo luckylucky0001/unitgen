@@ -135,3 +135,20 @@ test("statement deletion and condition negation", async () => {
   assert.ok(ops.includes("3:negate condition"));
   assert.ok(!ops.some((o) => o.startsWith("2:delete") || o.startsWith("4:delete")));
 });
+
+test("v8LineCoverage: a line is covered only if all its code ran (switch cases after early return)", async () => {
+  const { v8LineCoverage } = await import("../src/adapters/harmony.ts");
+  const js = ["function f(v) {", "  if (typeof v === 'string') return 'S';", "  switch (v) {", "    case 1: return 'one';", "  }", "}"].join("\n");
+  const at = (line: number, col = 0) => js.split("\n").slice(0, line - 1).reduce((n, l) => n + l.length + 1, 0) + col;
+  // V8 shape: whole function count 1; continuation after the early return count 0; case body count 0.
+  const fns = [{ ranges: [
+    { startOffset: 0, endOffset: js.length, count: 1 },
+    { startOffset: at(2, 40), endOffset: at(6), count: 0 },
+    { startOffset: at(4, 12), endOffset: at(4, 25), count: 0 },
+  ] }];
+  const cov = v8LineCoverage(js, fns);
+  assert.equal(cov[1], 1);
+  assert.equal(cov[3], 0);
+  assert.equal(cov[4], 0);
+  assert.equal(cov[2], 1);
+});

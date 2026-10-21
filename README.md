@@ -40,7 +40,7 @@ unitgen 采用的就是调研结论推荐的路线：平台无关的 LLM 闭环 
 ## 快速开始
 
 ```bash
-cd ~/Documents/unitgen && npm install        # 只为类型检查和鸿蒙 shim（typescript、c8）
+cd ~/Documents/unitgen && npm install        # 只为类型检查和鸿蒙 shim（typescript）
 export PATH="$HOME/Documents/unitgen/bin:$PATH"
 
 cd <你的工程>
@@ -78,7 +78,7 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 |---|---|---|---|
 | iOS | `Package.swift` | `swift test --enable-code-coverage`，解析 llvm-cov 导出（与 `llvm-cov export -format=lcov` 逐行一致） | 独立 test target `<Target>UnitGenTests`（Package.swift 末尾带标记的块） |
 | Android | `settings.gradle(.kts)` | 自动发现每个模块的单测任务（含 flavor），`-I` 注入 JaCoCo init script，**不改任何构建文件**；兼容 configuration cache / isolated projects | `src/test/<kotlin|java>/<包路径>/<类>UnitGenTest.kt`，`--tests` 只跑这一个类，`--rerun` 防缓存 |
-| 鸿蒙 | `build-profile.json5` | 有 hvigor 用 hvigor；否则 Node shim：TS 转译 .ets + hypium 兼容实现 + c8 覆盖率（映射回 .ets 行）+ ArkTS 语法限制 lint | `<module>/src/test/<文件>.unitgen.test.ets`，自动登记到 `List.test.ets` |
+| 鸿蒙 | `build-profile.json5` | 有 hvigor 用 hvigor；否则 Node shim：TS 转译 .ets + hypium 兼容实现 + 直接读 V8 块覆盖并自行映射回 .ets 行（比 c8 的行规则严格：一行里有没执行的代码就算未覆盖）+ ArkTS 语法限制 lint | `<module>/src/test/<文件>.unitgen.test.ets`，自动登记到 `List.test.ets` |
 
 ## 验证结果（2026-10-21，本机：macOS + Command Line Tools，无 Xcode / DevEco）
 
@@ -97,9 +97,9 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 | Android | android/architecture-samples | DefaultTaskRepository | 78% → 100% | 7 |
 | Android | android/architecture-samples ★ | AddEditTaskViewModel | 82% → 99% | 10 |
 | Android | android/architecture-samples ★ | TaskDetailViewModel | 85% → 98% | 6+ |
-| 鸿蒙 | LinysBrowser_NEXT | url-ext.ets（手写 Punycode） | 全覆盖 | 8（RFC 3492 向量） |
+| 鸿蒙 | LinysBrowser_NEXT | url-ext.ets（手写 Punycode） | 0% → 98% | 8（RFC 3492 向量） |
 | 鸿蒙 | LinysBrowser_NEXT ★ | colors.ets（HSV/RGB 转换） | 0% → 100% | 14 |
-| 鸿蒙 | LinysBrowser_NEXT ★ | keyshortcuts helpers / meowKeyBind | 0% → 76% / 全覆盖 | 9 / 8 |
+| 鸿蒙 | LinysBrowser_NEXT ★ | keyshortcuts helpers / meowKeyBind | 0% → 76% / 77% | 9 / 8 |
 | 鸿蒙 | JhHarmonyDemo ★ | UserModel / APIs | 0% → 100% | 8 |
 | 鸿蒙 | interview-handbook-project ★ | base.ets 等 3 个文件 | 全仓 0% → 6%（估算） | 20 |
 
@@ -130,7 +130,7 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 
 - iOS：只支持 SwiftPM 包；纯 Xcode 工程（xcodeproj + 模拟器）尚未实现。只有 Command Line Tools 时 XCTest 不可用，已有 XCTest 用例跑不了（baseline 为 0%），只能用 Swift Testing。
 - Android：只覆盖 JVM 本地单测（src/test）；`android.util.Log` 等在没有 Robolectric / `isReturnDefaultValues` 时会抛异常，相应分支不会被覆盖。
-- 鸿蒙：没有 hvigor 时的 shim 只对纯逻辑可信；`@kit.*`/`@ohos.*` 系统 API、ArkUI 全局量/装饰器、UI 组件（struct）文件都是空桩；未安装的 ohpm 包、shim 解析不了的语法、缺失的全局量都报 `INFRA_ERROR`（不会被当成测试错误）。shim 下的覆盖率在 switch/case 上可能偏高（V8 块覆盖 + source map 的局限）。ArkTS lint 只覆盖常见限制，最终仍需在 DevEco/hvigor 跑一遍。hvigor 原生路径已实现但未在真机工具链上验证。
+- 鸿蒙：没有 hvigor 时的 shim 只对纯逻辑可信；`@kit.*`/`@ohos.*` 系统 API、ArkUI 全局量/装饰器、UI 组件（struct）文件都是空桩；未安装的 ohpm 包、shim 解析不了的语法、缺失的全局量都报 `INFRA_ERROR`（不会被当成测试错误）。shim 的覆盖率按「行内所有代码都执行才算覆盖」计，比 c8 严格（c8 会把提前 return 之后的 case 行误算为已覆盖，已修正）。ArkTS lint 只覆盖常见限制，最终仍需在 DevEco/hvigor 跑一遍。hvigor 原生路径已实现但未在真机工具链上验证。
 
 ## 开发
 

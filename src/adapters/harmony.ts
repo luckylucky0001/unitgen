@@ -1,7 +1,7 @@
 // HarmonyOS / OpenHarmony (ArkTS) via hvigor when available, otherwise the Node "shim" runner.
 //
 // Shim mode transpiles .ets with TypeScript, runs hypium-style tests against a compatible API
-// and collects coverage with c8. It is faithful for pure logic (utils, models, view-models without
+// and collects V8 block coverage itself. It is faithful for pure logic (utils, models, view-models without
 // platform calls); anything touching @kit.* / @ohos.* APIs is stubbed and should be verified with
 // hvigor on a real toolchain. Because the shim does not run the ArkTS compiler, generated tests are
 // also linted against the ArkTS language restrictions (arkts-no-any-unknown, ...).
@@ -84,23 +84,13 @@ export class HarmonyAdapter implements Adapter {
     return undefined;
   }
 
-  private c8(): string | undefined {
-    const req = createRequire(import.meta.url);
-    try {
-      return path.join(path.dirname(req.resolve("c8/package.json", { paths: [path.join(HERE, "..", "..")] })), "bin", "c8.js");
-    } catch {
-      return undefined;
-    }
-  }
-
   doctor(): Doctor {
     const lines: string[] = [];
     let ok = true;
     const mode = this.mode();
-    lines.push(`runner: ${mode}${mode === "shim" ? " (Node + TypeScript + c8; hvigorw not found. Pure-logic code only; platform APIs are stubbed)" : ` (${this.hvigor()})`}`);
+    lines.push(`runner: ${mode}${mode === "shim" ? " (Node + TypeScript + V8 coverage; hvigorw not found. Pure-logic code only; platform APIs are stubbed)" : ` (${this.hvigor()})`}`);
     if (mode === "shim") {
       if (!this.tsDir()) { ok = false; lines.push("typescript not found: run `npm install` in the unitgen directory"); }
-      if (!this.c8()) { ok = false; lines.push("c8 not found: run `npm install` in the unitgen directory"); }
     }
     const ms = this.modules();
     lines.push(`modules: ${ms.map((m) => `${m.name} (${m.kind})`).join(", ") || "none"}`);
@@ -248,9 +238,8 @@ export class HarmonyAdapter implements Adapter {
     const mods = req.modules ?? this.modules();
     const files = req.testFiles ?? mods.flatMap((m) => walkFiles(m.testRoot, [".test.ets", ".test.ts"]).filter((f) => !/List\.test\.ets$/.test(f)));
     const tsDir = this.tsDir();
-    const c8 = this.c8();
-    if (!tsDir || !c8) {
-      return { ok: false, compiled: false, tests: [], logFile, excerpt: "", seconds: 0, infraError: "typescript/c8 missing: run `npm install` in the unitgen directory" };
+    if (!tsDir) {
+      return { ok: false, compiled: false, tests: [], logFile, excerpt: "", seconds: 0, infraError: "typescript missing: run `npm install` in the unitgen directory" };
     }
     if (!files.length) {
       writeFile(logFile, "no test files");
@@ -265,10 +254,13 @@ export class HarmonyAdapter implements Adapter {
     const results = path.join(work, "results.json");
     const ohm = path.join(this.root, "oh_modules");
     const lint = files.flatMap((f) => arktsLint(readFile(f)).map((x) => `${relPath(f, this.root)}:${x}`));
-    const args = ["node", c8, "--reporter=lcov", `--report-dir=${path.join(work, "cov")}`, `--temp-directory=${path.join(work, "tmp")}`,
-      "--exclude-after-remap", "--extension=.ets", "--extension=.ts", "--exclude=**/*.test.ets", "--exclude=**/*.test.ts", "--exclude=**/harmony-shim/**", "--exclude=**/oh_modules/**", "--exclude-node-modules",
-      "node", "--enable-source-maps", path.join(work, "runner.cjs"), tsDir, results, exists(ohm) ? ohm : "-", ...files];
-    const r = run(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 900, logFile, env: { UNITGEN_LOCAL_DEPS: JSON.stringify(this.localDeps()) } });
+    // Coverage comes straight from V8 (NODE_V8_COVERAGE) on the transpiled JS under <work>/gen and is
+    // mapped back to .ets lines here; see v8LineCoverage for why c8's line rule is not used.
+    const args = ["node", path.join(work, "runner.cjs"), tsDir, results, exists(ohm) ? ohm : "-", ...files];
+    const r = run(args, { cwd: work, timeoutSec: req.timeoutSec ?? 900, logFile, env: {
+      UNITGEN_LOCAL_DEPS: JSON.stringify(this.localDeps()), UNITGEN_ROOT: this.root,
+      ...(req.coverage ? { NODE_V8_COVERAGE: path.join(work, "tmp") } : {}),
+    } });
     const tests: TestCase[] = readJson<any[]>(results, []).map((t) => ({ name: t.name, status: t.status, message: t.message, file: t.file }));
     const loadFail = tests.filter((t: any) => t.name.startsWith("load ") && t.status === "failed");
     // A syntax error inside production code (not the test file) is a shim limitation, not the test's fault.
@@ -279,10 +271,26 @@ export class HarmonyAdapter implements Adapter {
     }
     const compiled = loadFail.length === 0 && lint.length === 0;
     let coverage;
-    const lcov = path.join(work, "cov", "lcov.info");
-    if (req.coverage && exists(lcov)) {
+    const v8dir = path.join(work, "tmp");
+    if (req.coverage && exists(v8dir)) {
       const roots = mods.flatMap((m) => m.sourceRoots.map((s) => s + path.sep));
-      coverage = dropNonCode(parseLcov(readFile(lcov), this.root, (f) => roots.some((s) => f.startsWith(s))));
+      const maps = readJson<Record<string, { source: string; lines: (number | null)[] }>>(path.join(work, "linemaps.json"), {});
+      const mapped: Coverage = {};
+      for (const f of fs.readdirSync(v8dir).filter((x) => x.endsWith(".json"))) {
+        for (const script of readJson<any>(path.join(v8dir, f), { result: [] }).result) {
+          const gen = script.url.startsWith("file://") ? fileURLToPath(script.url) : script.url;
+          const m = maps[gen];
+          if (!m || !roots.some((s) => m.source.startsWith(s)) || /\.test\.(ets|ts)$/.test(m.source)) continue;
+          const dst = (mapped[m.source] ??= {});
+          for (const [ln, hits] of Object.entries(v8LineCoverage(readFile(gen), script.functions))) {
+            const src = m.lines[Number(ln)];
+            if (!src) continue;
+            // Several JS lines can come from one .ets line: the line counts as covered only if all ran.
+            dst[src] = dst[src] === undefined ? hits : Math.min(dst[src], hits);
+          }
+        }
+      }
+      coverage = dropNonCode(mapped);
     }
     const stubs = readJson<{ modules: string[]; globals: string[] }>(results.replace(/\.json$/, ".stubs.json"), { modules: [], globals: [] });
     const missing = [...new Set(tests.map((t) => /UNITGEN_MISSING_PACKAGE (\S+)/.exec(t.message ?? "")?.[1]).filter(Boolean))];
@@ -356,6 +364,32 @@ export class HarmonyAdapter implements Adapter {
   }
 }
 
+/**
+ * Line hits from raw V8 block coverage: a line's count is the lowest count of the innermost range
+ * covering each of its non-blank characters. c8/v8-to-istanbul instead treat a line as uncovered only
+ * when one zero-count range spans the whole line, which marks `case X: return y;` lines as covered
+ * when only the `return` part's range is zero.
+ */
+export function v8LineCoverage(js: string, functions: { ranges: { startOffset: number; endOffset: number; count: number }[] }[]): Record<number, number> {
+  const ranges = functions.flatMap((f) => f.ranges).sort((a, b) => (b.endOffset - b.startOffset) - (a.endOffset - a.startOffset));
+  const out: Record<number, number> = {};
+  let offset = 0;
+  js.split("\n").forEach((line, i) => {
+    let min: number | undefined;
+    for (let c = 0; c < line.length; c++) {
+      if (line[c] === " " || line[c] === "\t" || line[c] === "\r") continue;
+      const o = offset + c;
+      // Ranges are sorted outermost first: the last match is the innermost.
+      let count: number | undefined;
+      for (const r of ranges) if (r.startOffset <= o && o < r.endOffset) count = r.count;
+      if (count !== undefined) min = min === undefined ? count : Math.min(min, count);
+    }
+    if (min !== undefined && line.trim()) out[i + 1] = min;
+    offset += line.length + 1;
+  });
+  return out;
+}
+
 /** V8 line coverage counts blank and comment lines; keep only lines with code on them. */
 function dropNonCode(cov: Coverage): Coverage {
   const out: Coverage = {};
@@ -388,7 +422,8 @@ function dropNonCode(cov: Coverage): Coverage {
         }
         l = l.slice(end + 2).trim();
       }
-      if (l && !l.startsWith("//")) code.add(i + 1);
+      // Lines with only closing brackets carry no logic of their own.
+      if (l && !l.startsWith("//") && !/^[})\];,]+$/.test(l)) code.add(i + 1);
     });
     out[file] = Object.fromEntries(Object.entries(lines).filter(([ln]) => code.has(Number(ln))));
   }
