@@ -111,4 +111,4 @@ npm test            # node --test（解析器、门禁相关单测）
 
 调试：`UNITGEN_VERBOSE=1` 打印执行的命令；`UNITGEN_KEEP_COV=1` 保留 SwiftPM 的覆盖率 JSON。
 
-安全性：`mutate` 临时改被测源码，写日志 `.unitgen/mutation-in-progress.json`，任何 unitgen 命令启动时都会自动还原（已用 kill -9 验证）；iOS 隔离验证时临时挪开的同 target 测试文件同理。
+安全性：`mutate` 临时改被测源码，写日志 `.unitgen/mutation-in-progress.json`，任何 unitgen 命令启动时都会自动还原（已验证：运行中直接杀掉进程，下次启动即还原）；iOS 隔离验证时临时挪开的同 target 测试文件同理。
