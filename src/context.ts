@@ -56,7 +56,7 @@ function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: 
 /** Existing fakes/stubs in the module's test sources that implement types the target uses. */
 function testDoubles(adapter: Adapter, m: Module, text: string, budget: number): string {
   const idents = new Set(text.match(/\b[A-Z][A-Za-z0-9_]{2,}\b/g) ?? []);
-  const roots = [...new Set([path.dirname(m.testRoot), m.testRoot])].filter(exists);
+  const roots = [...new Set([path.dirname(m.testRoot), m.testRoot, ...(adapter.testSupportDirs?.(m) ?? [])])].filter(exists);
   const exts = [".kt", ".java", ".swift", ".ets", ".ts"];
   const parts: string[] = [];
   let used = 0;

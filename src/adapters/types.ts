@@ -77,6 +77,8 @@ export interface Adapter {
   exampleTests(m: Module, source?: string): string[];
   /** Called before a new test file is verified (e.g. register a SwiftPM test target). */
   prepareTestFile(testFile: string, m: Module): void;
+  /** Extra directories holding test helpers/fakes the module's tests can use (e.g. a :shared-test module). */
+  testSupportDirs?(m: Module): string[];
   /** Warnings to put at the top of a brief (missing packages, stubbed APIs, ...). */
   briefWarnings?(source: string): string[];
   /** Undo prepareTestFile side effects when a file is quarantined (optional). */

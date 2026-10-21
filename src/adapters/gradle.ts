@@ -122,6 +122,15 @@ export class GradleAdapter implements Adapter {
     return "logic";
   }
 
+  testSupportDirs(m: Module): string[] {
+    const bt: string = m.meta?.buildText ?? "";
+    const names = new Set<string>();
+    for (const d of bt.matchAll(/testImplementation\s*\(\s*project\(\s*["']([:\w-]+)["']\s*\)|testImplementation\s*\(\s*projects\.([\w.]+)/g)) {
+      names.add(d[1] ?? ":" + d[2].replace(/([A-Z])/g, "-$1").toLowerCase().replace(/\./g, ":"));
+    }
+    return this.modules().filter((x) => names.has(x.name) || [...names].some((n) => n.replace(/-/g, "") === x.name.replace(/-/g, ""))).flatMap((x) => x.sourceRoots);
+  }
+
   /** Test-helper and benchmark modules (core:testing, *-test, benchmarks) are not targets. */
   private isTestSupport(file: string): boolean {
     const m = this.moduleFor(file);
