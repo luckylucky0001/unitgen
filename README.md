@@ -11,6 +11,7 @@ baseline（跑现有测试 + 覆盖率）
    → 写测试
    → verify（编译 → 全部通过 → 重跑防 flaky → 有断言 → 新增覆盖行 > 0）
    → 失败把编译/断言信息回喂，重试；放弃则隔离到 .unitgen/rejected
+   → mutate（变异测试：改被测代码已覆盖的行，看断言能否发现，衡量测试强度）
    → report
 ```
 
@@ -25,7 +26,9 @@ unitgen doctor        # 识别工程类型、检查工具链
 unitgen baseline      # 跑现有测试 + 覆盖率（一次）
 unitgen targets       # 看最该补的文件
 unitgen brief <源文件>               # 生成该文件的 brief
-unitgen verify <测试文件> --target <源文件>
+unitgen verify <测试文件>             # --target 可省略，按文件名自动推断
+unitgen mutate <测试文件>             # 变异测试，给出没被发现的改动
+unitgen reject <测试文件> "原因"       # 放弃并隔离
 unitgen report        # .unitgen/REPORT.md
 ```
 
@@ -57,21 +60,41 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 
 ## 验证结果（2026-10-21，本机：macOS + Command Line Tools，无 Xcode / DevEco）
 
-| 平台 | 工程 | 目标文件 | 覆盖率 | 测试数 |
+两轮共 5 个独立子代理只读 Skill 完成了大部分目标（标 ★），其余由我按同一流程完成。
+
+| 平台 | 工程 | 目标 | 覆盖率 | 测试数 |
 |---|---|---|---|---|
 | iOS | nicklockwood/Expression | Expression.swift（1.5k 行解析器） | 0% → 82% | 38 |
-| iOS | SwiftyJSON（独立子代理按 Skill 完成） | SwiftyJSON.swift | 0% → 97.1% | 40 |
+| iOS | nicklockwood/Expression ★ | AnyExpression.swift（1.1k 行，Any 类型求值器） | 0% → 99% | 106 |
+| iOS | SwiftyJSON ★ | SwiftyJSON.swift | 0% → 97% | 40 |
 | Android | android/nowinandroid（34 模块，AGP 9） | NiaPreferencesDataSource | 35% → 91% | 18 |
 | Android | android/nowinandroid | DefaultSearchContentsRepository | 0% → 100% | 7 |
-| Android | android/architecture-samples | DefaultTaskRepository | 78% → 100% | 6 |
-| 鸿蒙 | LinysBrowser_NEXT | url-ext.ets（手写 Punycode） | 0% → 全覆盖 | 8（RFC 3492 向量） |
-| 鸿蒙 | JhHarmonyDemo（独立子代理） | UserModel / APIs | 0% → 100% | 8 |
+| Android | android/nowinandroid ★ | SearchViewModel（SavedStateHandle + Flow） | 75% → 100% | 12 |
+| Android | android/nowinandroid ★ | GetSearchContentsUseCase | 0% → 100% | 7 |
+| Android | android/nowinandroid ★ | MainActivityViewModel（:app，Hilt 字节码改写） | 0% → 100% | 11 |
+| Android | android/architecture-samples | DefaultTaskRepository | 78% → 100% | 7 |
+| 鸿蒙 | LinysBrowser_NEXT | url-ext.ets（手写 Punycode） | 全覆盖 | 8（RFC 3492 向量） |
+| 鸿蒙 | JhHarmonyDemo ★ | UserModel / APIs | 0% → 100% | 8 |
+| 鸿蒙 | interview-handbook-project ★ | base.ets 等 3 个文件 | 全仓 0% → 6%（估算） | 20 |
 
-门禁本身也做了「变异」验证：故意改错断言 → `TEST_FAILURES` 并给出差异；故意写类型错误 → `COMPILE_ERROR` 并给出编译器原文；三端均如此。
+**门禁验证**：三端都故意改错断言 → `TEST_FAILURES`（附断言差异）、故意写类型错误 → `COMPILE_ERROR`（附编译器原文）。
+**覆盖率口径**：SwiftPM 的逐行结果与 `llvm-cov export -format=lcov` 完全一致（966/1179）。
 
-发现的疑似 bug（测试按现行为断言并标注 `UNITGEN-SUSPECT`）：
+**变异测试**（`unitgen mutate`）：
+
+| 测试 | 得分 | 说明 |
+|---|---|---|
+| Expression.swift | 100%（9/9） | 1 个变异体编译不过，自动丢弃 |
+| url-ext.ets（Punycode） | 92%（11/12） | 唯一幸存者是等价变异（越界读 `undefined` 后走同一分支） |
+| DefaultTaskRepository | 67% → **100%** | 揪出 `deleteAllTasks` 的测试其实什么都没验证（删掉 `deleteAll()` 也通过）；补一条断言后全杀。**覆盖率没变，只有变异测试能发现这种弱测试** |
+
+**发现的疑似 bug**（测试按现行为断言并标注 `UNITGEN-SUSPECT`，均已对照源码确认或有可复现证据）：
 - SwiftyJSON：两个 bool 的 `<=` / `>=` 退化为相等比较（`JSON(true) >= JSON(false)` 为 false）。
+- Expression：`AnyExpression("true + 1")` 得 2（Bool 桥接成 NSNumber 落入数值加法；源码里也有 TODO 质疑）。
 - JhHarmonyDemo：`JhPreferencesUtils` 的 bool/number/model 方法调用了 `JhAESPreferencesUtils.saveString/getString`，疑似复制粘贴错误。
+- interview-handbook：`getPercentText` 未处理 `total === 0`，返回 `'Infinity%'` / `'NaN%'`。
+
+**迭代过程**：每轮试用的子代理都把 CLI/Skill 的问题按「最重要」列出，共修复约 40 处，例如 SwiftPM `Source/` 目录、Gradle `--tests` 绑定到错误任务、Hilt 改写字节码导致 JaCoCo 丢数据、`src/testDemo` 测试源集、鸿蒙三方包被误桩、iOS 同 target 测试互相串覆盖率、报告中的重复/截断等。
 
 ## 已知限制
 
@@ -87,3 +110,5 @@ npm test            # node --test（解析器、门禁相关单测）
 ```
 
 调试：`UNITGEN_VERBOSE=1` 打印执行的命令；`UNITGEN_KEEP_COV=1` 保留 SwiftPM 的覆盖率 JSON。
+
+安全性：`mutate` 临时改被测源码，写日志 `.unitgen/mutation-in-progress.json`，任何 unitgen 命令启动时都会自动还原（已用 kill -9 验证）；iOS 隔离验证时临时挪开的同 target 测试文件同理。
