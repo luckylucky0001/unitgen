@@ -55,6 +55,7 @@ export function verify(adapter: Adapter, state: State, testFile: string, opts: V
     return r;
   };
   if (!exists(abs)) throw new Error(`test file not found: ${testFile}`);
+  if (target && !exists(target)) throw new Error(`target source not found: ${opts.target}`);
   const text = readFile(abs);
   const m = adapter.moduleFor(abs) ?? (target ? adapter.moduleFor(target) : undefined);
   if (!m) throw new Error(`cannot determine module for ${testFile}`);
@@ -123,7 +124,13 @@ function finish(adapter: Adapter, state: State, r: VerifyResult, opts: VerifyOpt
     });
     state.data.rejected = state.data.rejected.filter((x) => x.testFile !== relTest);
     for (const s of r.suspects) state.data.notes.push({ at: state.stamp(), kind: "suspect", text: `${relTest}: ${s}` });
-  } else if (opts.onFail === "quarantine" && exists(r.testFile)) {
+  } else {
+    // A previously accepted file that no longer passes stops counting.
+    state.setTestCoverage(relTest, undefined);
+  }
+  if (r.verdict !== "accepted" && opts.onFail === "quarantine" && exists(r.testFile)) {
+    const m = adapter.moduleFor(r.testFile);
+    if (m) adapter.forgetTestFile?.(r.testFile, m);
     const q = state.file("rejected", `${Date.now()}-${path.basename(r.testFile)}`);
     fs.mkdirSync(path.dirname(q), { recursive: true });
     fs.renameSync(r.testFile, q);

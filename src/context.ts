@@ -104,6 +104,7 @@ function capRanges(lines: number[]): string {
 
 export function buildBrief(adapter: Adapter, state: State, source: string, opts: { maxSourceChars?: number; feedback?: string } = {}): Brief {
   const abs = path.resolve(source);
+  if (!exists(abs)) throw new Error(`source file not found: ${source}`);
   const m = adapter.moduleFor(abs);
   if (!m) throw new Error(`${source} is not inside any detected module`);
   const text = readFile(abs);

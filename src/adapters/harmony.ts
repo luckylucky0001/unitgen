@@ -77,6 +77,10 @@ export class HarmonyAdapter implements Adapter {
     }
     const ms = this.modules();
     lines.push(`modules: ${ms.map((m) => `${m.name} (${m.kind})`).join(", ") || "none"}`);
+    const pkgs = [path.join(this.root, "oh-package.json5"), ...ms.map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists);
+    if (!pkgs.some((p) => readFile(p).includes("@ohos/hypium"))) {
+      lines.push("warning: no oh-package.json5 declares @ohos/hypium; add it to devDependencies before running the generated tests with hvigor/DevEco (the Node shim does not need it)");
+    }
     return { ok, lines };
   }
 
@@ -175,6 +179,16 @@ export class HarmonyAdapter implements Adapter {
     if (text.includes(imp)) return;
     text = `${imp}\n${text}`.replace(/(export\s+default\s+function\s+\w+\s*\(\s*\)\s*\{)/, `$1\n  ${fnName}();`);
     writeFile(list, text);
+  }
+
+  forgetTestFile(testFile: string, m: Module): void {
+    const list = path.join(m.testRoot, "List.test.ets");
+    if (!exists(list)) return;
+    const mod = path.basename(testFile).replace(/\.ets$/, "");
+    const text = readFile(list);
+    const imp = new RegExp(`^import\\s+(\\w+)\\s+from\\s+'\\./${mod.replace(/[.]/g, "\\.")}';\\n`, "m").exec(text);
+    if (!imp) return;
+    writeFile(list, text.replace(imp[0], "").replace(new RegExp(`^\\s*${imp[1]}\\(\\);\\n`, "m"), ""));
   }
 
   runTests(req: RunRequest): TestRun {

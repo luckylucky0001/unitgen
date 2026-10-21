@@ -75,6 +75,8 @@ export interface Adapter {
   exampleTests(m: Module, source?: string): string[];
   /** Called before a new test file is verified (e.g. register a SwiftPM test target). */
   prepareTestFile(testFile: string, m: Module): void;
+  /** Undo prepareTestFile side effects when a file is quarantined (optional). */
+  forgetTestFile?(testFile: string, m: Module): void;
   runTests(req: RunRequest): TestRun;
   /** Language-level hints: does the test file contain at least one real assertion? */
   countAssertions(text: string): number;
