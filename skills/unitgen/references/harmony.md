@@ -13,6 +13,10 @@
     by a compatible implementation, every other `@kit.*`/`@ohos.*` import becomes an inert
     stub, and c8 measures coverage against the original `.ets` lines. Faithful for pure
     logic only. Files importing platform kits are ranked as `platform` (low priority).
+- Shim limits come back as `INFRA_ERROR`, never as a test problem: uninstalled ohpm packages,
+  ArkTS syntax TypeScript cannot parse, ArkUI/system globals the shim lacks. Do not edit the
+  test to dodge them — pick another target. If most of a module hits them, say so and stop:
+  that module needs hvigor/DevEco (`UNITGEN_HARMONY_MODE=hvigor`).
 - The shim does not run the ArkTS compiler, so generated tests are linted against the most
   common ArkTS restrictions; violations come back as `COMPILE_ERROR`. Before shipping,
   run the tests once in DevEco / hvigor.

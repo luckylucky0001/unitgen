@@ -149,7 +149,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     `- Write the test file to: \`${place.path}\``,
     `- Test suite/class name: \`${place.suiteName}\`${place.packageName ? `  (package \`${place.packageName}\`)` : ""}`,
     place.importHint ? `- Import: \`${place.importHint}\`` : "",
-    `- Coverage: ${measured ? `${covered.size}/${exec.size} executable lines covered by existing tests` : "no coverage data for this file (estimated)"}; uncovered lines: ${capRanges(uncovered)}`,
+    `- Coverage: ${measured ? `${covered.size}/${exec.size} executable lines covered by existing tests` : `0% (no existing test loads this file; ~${exec.size} executable lines estimated)`}; uncovered lines: ${capRanges(uncovered)}`,
     ...(adapter.briefWarnings?.(abs) ?? []).map((w) => `- ⚠️ ${w}`),
     "",
     "## Conventions",

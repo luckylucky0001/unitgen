@@ -194,7 +194,7 @@ export function formatVerify(r: VerifyResult, root: string): string {
     lines.push(`lines covered only by this file: ${r.gainedLines}${r.target ? ` (in the target: ${r.targetGained})` : ""}${r.deltaLines !== undefined ? `; +${r.deltaLines} vs. its previously accepted version` : ""}`);
     for (const [f, ls] of Object.entries(r.gained)) lines.push(`  ${relPath(f, root)}: ${ranges(ls)}`);
   }
-  if (r.suspects.length) lines.push(`suspected bugs flagged: ${r.suspects.length}`, ...r.suspects.map((s) => `  ${s}`));
+  if (r.suspects.length && r.verdict === "accepted") lines.push(`suspected bugs flagged: ${r.suspects.length}`, ...r.suspects.map((s) => `  ${s}`));
   if (r.feedback) lines.push("", r.feedback);
   if (r.logFile) lines.push("", `log: ${r.logFile}`);
   return lines.join("\n");

@@ -163,7 +163,13 @@ export class HarmonyAdapter implements Adapter {
   }
 
   placement(source: string, m: Module): TestPlacement {
-    const base = path.basename(source).replace(/\.(ets|ts)$/, "");
+    let base = path.basename(source).replace(/\.(ets|ts)$/, "");
+    // Several modules dirs often have a helpers.ets / utils.ets: prefix the parent dir(s) to keep names unique.
+    const same = this.sourceFiles(m).filter((f) => path.basename(f).replace(/\.(ets|ts)$/, "") === base);
+    if (same.length > 1) {
+      const parts = path.dirname(source).split(path.sep).filter((p) => !["scripts", "utils", "src", "main", "ets"].includes(p));
+      base = `${parts[parts.length - 1] ?? "x"}-${base}`;
+    }
     const p = path.join(m.testRoot, `${base}${SUFFIX}`);
     let imp = relPath(source, path.dirname(p)).replace(/\.(ets|ts)$/, "");
     if (!imp.startsWith(".")) imp = `./${imp}`;
@@ -250,19 +256,27 @@ export class HarmonyAdapter implements Adapter {
       writeFile(logFile, "no test files");
       return { ok: true, compiled: true, tests: [], coverage: {}, logFile, excerpt: "", seconds: 0 };
     }
+    // One run at a time per project: clear leftovers from earlier runs (coverage JSONs are large).
+    if (process.env.UNITGEN_KEEP_COV !== "1") fs.rmSync(path.join(this.stateDir, "harmony-shim"), { recursive: true, force: true });
     const work = path.join(this.stateDir, "harmony-shim", req.label);
     fs.rmSync(work, { recursive: true, force: true });
     fs.mkdirSync(work, { recursive: true });
-    for (const f of ["hypium.cjs", "runner.cjs", "stub.cjs"]) fs.copyFileSync(path.join(SHIM_DIR, f), path.join(work, f));
+    for (const f of ["hypium.cjs", "runner.cjs", "stub.cjs", "buildprofile.cjs"]) fs.copyFileSync(path.join(SHIM_DIR, f), path.join(work, f));
     const results = path.join(work, "results.json");
     const ohm = path.join(this.root, "oh_modules");
     const lint = files.flatMap((f) => arktsLint(readFile(f)).map((x) => `${relPath(f, this.root)}:${x}`));
     const args = ["node", c8, "--reporter=lcov", `--report-dir=${path.join(work, "cov")}`, `--temp-directory=${path.join(work, "tmp")}`,
       "--exclude-after-remap", "--extension=.ets", "--extension=.ts", "--exclude=**/*.test.ets", "--exclude=**/*.test.ts", "--exclude=**/harmony-shim/**", "--exclude=**/oh_modules/**", "--exclude-node-modules",
-      "node", path.join(work, "runner.cjs"), tsDir, results, exists(ohm) ? ohm : "-", ...files];
+      "node", "--enable-source-maps", path.join(work, "runner.cjs"), tsDir, results, exists(ohm) ? ohm : "-", ...files];
     const r = run(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 900, logFile, env: { UNITGEN_LOCAL_DEPS: JSON.stringify(this.localDeps()) } });
     const tests: TestCase[] = readJson<any[]>(results, []).map((t) => ({ name: t.name, status: t.status, message: t.message, file: t.file }));
     const loadFail = tests.filter((t: any) => t.name.startsWith("load ") && t.status === "failed");
+    // A syntax error inside production code (not the test file) is a shim limitation, not the test's fault.
+    const prodSyntax = loadFail.map((t) => /SyntaxError: (\S+\.(?:ets|ts)):\d+/.exec(t.message ?? "")?.[1]).filter((f): f is string => !!f && !files.includes(f));
+    if (prodSyntax.length) {
+      return { ok: false, compiled: false, tests: [], logFile, seconds: (Date.now() - start) / 1000, excerpt: loadFail.map((t) => t.message).join("\n"),
+        infraError: `the Node shim cannot parse ${[...new Set(prodSyntax)].map((f) => relPath(f, this.root)).join(", ")} (ArkTS syntax TypeScript does not support). Verify with hvigor/DevEco or pick another target.` };
+    }
     const compiled = loadFail.length === 0 && lint.length === 0;
     let coverage;
     const lcov = path.join(work, "cov", "lcov.info");
@@ -276,6 +290,14 @@ export class HarmonyAdapter implements Adapter {
       return { ok: false, compiled: false, tests: [], logFile, seconds: (Date.now() - start) / 1000, excerpt: "",
         infraError: `ohpm packages not installed: ${missing.join(", ")}. Run \`ohpm install\` in ${this.root} (needs the DevEco/ohpm toolchain), then verify again.` };
     }
+    // A ReferenceError for a global the project never declares is an ArkUI/system global the shim lacks.
+    const projectText = mods.flatMap((m) => this.sourceFiles(m)).map((f) => readFile(f)).join("\n");
+    const missingGlobals = [...new Set(tests.flatMap((t) => [...(t.message ?? "").matchAll(/ReferenceError: ([A-Za-z_$][\w$]*) is not defined/g)].map((m) => m[1])))]
+      .filter((g) => !new RegExp(`\\b(class|enum|interface|function|const|let|var|namespace|struct)\\s+${g.replace(/\$/g, "\\$")}\\b`).test(projectText));
+    if (missingGlobals.length) {
+      return { ok: false, compiled: false, tests: [], logFile, seconds: (Date.now() - start) / 1000, excerpt: "",
+        infraError: `the code under test uses ArkUI/system globals the Node shim does not provide: ${missingGlobals.join(", ")}. Test only paths that avoid them, verify with hvigor/DevEco, or pick another target.` };
+    }
     let excerpt = "";
     if (stubs.modules.length || stubs.globals.length) {
       excerpt += `Note: stubbed under the Node shim (values are meaningless, do not assert on them): ${[...stubs.modules, ...stubs.globals].join(", ")}\n`;
@@ -283,6 +305,7 @@ export class HarmonyAdapter implements Adapter {
     if (lint.length) excerpt += `ArkTS restriction violations (the real ArkTS compiler would reject these):\n${lint.join("\n")}\n`;
     if (loadFail.length) excerpt += loadFail.map((t) => t.message).join("\n");
     if (!r.ok && !excerpt) excerpt = errorExcerpt(r.out);
+    if (process.env.UNITGEN_KEEP_COV !== "1") fs.rmSync(work, { recursive: true, force: true });
     return {
       ok: r.ok && compiled, compiled, tests: tests.filter((t) => !t.name.startsWith("load ")), coverage, logFile,
       excerpt, seconds: (Date.now() - start) / 1000, infraError: r.timedOut ? "timeout" : undefined,
@@ -327,6 +350,7 @@ export class HarmonyAdapter implements Adapter {
     const missing = thirdParty.filter((p) => !exists(path.join(ohm, p)) && !local[p]);
     if (missing.length) out.push(`Imports ohpm packages that are not installed (${missing.join(", ")}): tests will fail with INFRA_ERROR until \`ohpm install\` runs. Pick another target if you cannot install them.`);
     if (system.length && this.mode() === "shim") out.push(`Imports system APIs that are stubbed under the Node shim (${system.join(", ")}): only test code paths whose results do not come from these APIs.`);
+    if (/@(ObservedV2|Trace|Observed|Track|Local|Param|Monitor|Computed)\b/.test(text) && this.mode() === "shim") out.push("Uses ArkUI state-management decorators: they are no-ops under the shim (no change tracking), so test plain logic, not reactivity.");
     if (/(\b(Color|Alignment|FlexAlign|FontWeight|ButtonStyleMode|AppStorage|getContext)\b|\$r\s*\(|\$rawfile\s*\()/.test(text) && this.mode() === "shim") out.push("Uses ArkUI globals (Color, Alignment, $r, AppStorage, ...): they are inert stubs under the shim, so do not assert on their values.");
     return out;
   }

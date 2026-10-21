@@ -41,7 +41,7 @@ Common options
 targets:   --limit <n> (20)  --all-kinds
 brief:     --out <file>      --feedback <file>
 verify:    --target <source> --reruns <n> (1)  --allow-no-gain  --quarantine
-mutate:    --target <source> --max <n> (10)
+mutate:    --target <source> --max <n> (15)
 generate:  --llm anthropic|claude|cmd:<sh> --model <id> --limit <n> (5) --attempts <n> (3) [files...]
 `;
 
@@ -149,7 +149,7 @@ async function main(argv: string[]): Promise<number> {
       const relTest = relPath(path.resolve(rest[0]), root);
       const tgt = o.target ?? state.data.accepted.find((a) => a.testFile === relTest)?.target;
       if (!tgt) throw new Error("pass --target <source> (no accepted target recorded for this test file)");
-      const r = mutate(adapter, state, rest[0], path.resolve(root, tgt), Number(o.max ?? 10));
+      const r = mutate(adapter, state, rest[0], path.resolve(root, tgt), Number(o.max ?? 15));
       print(formatMutation(r), r);
       return 0;
     }

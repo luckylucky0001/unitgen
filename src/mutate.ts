@@ -16,13 +16,15 @@ export interface Mutant {
 }
 
 export interface MutantResult extends Mutant {
-  outcome: "killed" | "survived" | "stillborn" | "error";
+  outcome: "killed" | "killed-crash" | "survived" | "stillborn" | "error";
 }
 
 export interface MutationReport {
   testFile: string;
   target: string;
   killed: number;
+  /** Of `killed`: detected only because the code crashed, not by an assertion. */
+  crashes: number;
   survived: number;
   stillborn: number;
   score: number;
@@ -135,7 +137,7 @@ export function recover(state: State): void {
   fs.unlinkSync(journal(state));
 }
 
-export function mutate(adapter: Adapter, state: State, testFile: string, target: string, max = 10): MutationReport {
+export function mutate(adapter: Adapter, state: State, testFile: string, target: string, max = 15): MutationReport {
   recover(state);
   const absTest = path.resolve(testFile);
   const absTarget = path.resolve(target);
@@ -171,7 +173,11 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
       if (r.infraError === "timeout" || /TIMEOUT after/.test(r.excerpt)) outcome = "killed";
       else if (r.infraError) outcome = "error";
       else if (!r.compiled) outcome = "stillborn";
-      else if (!r.ok || r.tests.some((t) => t.status === "failed")) outcome = "killed";
+      else if (!r.ok || r.tests.some((t) => t.status === "failed")) {
+        // Killed by a crash (ReferenceError/TypeError) rather than an assertion: still a detected change, but flag it.
+        const msgs = r.tests.filter((t) => t.status === "failed").map((t) => t.message ?? "").join("\n");
+        outcome = msgs && !/assert|expect|Expectation|AssertionError|expected/i.test(msgs) ? "killed-crash" : "killed";
+      }
       else outcome = r.tests.length ? "survived" : "error";
       results.push({ ...mu, outcome });
       log(`  mutant ${i + 1}/${candidates.length} line ${mu.line} (${mu.op}): ${outcome}`);
@@ -181,7 +187,8 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
     fs.unlinkSync(backup);
     fs.unlinkSync(journal(state));
   }
-  const killed = results.filter((r) => r.outcome === "killed").length;
+  const killed = results.filter((r) => r.outcome === "killed" || r.outcome === "killed-crash").length;
+  const crashes = results.filter((r) => r.outcome === "killed-crash").length;
   const survived = results.filter((r) => r.outcome === "survived").length;
   const stillborn = results.filter((r) => r.outcome === "stillborn").length;
   const score = killed + survived ? killed / (killed + survived) : 0;
@@ -190,7 +197,7 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
     ? `These changes to ${relPath(absTarget, adapter.root)} were NOT detected by any test. Add assertions that would fail for each:\n` +
       surv.map((s) => `- line ${s.line} (${s.op}):\n    ${s.original.trim()}\n  → ${s.mutated.trim()}`).join("\n")
     : "";
-  const report: MutationReport = { testFile: relTest, target: relPath(absTarget, adapter.root), killed, survived, stillborn, score, results, feedback };
+  const report: MutationReport = { testFile: relTest, target: relPath(absTarget, adapter.root), killed, crashes, survived, stillborn, score, results, feedback };
   const acc = state.data.accepted.find((a) => a.testFile === relTest);
   if (acc) {
     acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100 };
@@ -201,6 +208,6 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
 }
 
 export function formatMutation(r: MutationReport): string {
-  const head = `mutation score: ${(r.score * 100).toFixed(0)}%  (killed ${r.killed}, survived ${r.survived}, did not compile ${r.stillborn})  ${r.testFile} -> ${r.target}`;
+  const head = `mutation score: ${(r.score * 100).toFixed(0)}%  (killed ${r.killed}${r.crashes ? `, of which ${r.crashes} only by a crash, not an assertion` : ""}, survived ${r.survived}, did not compile ${r.stillborn})  ${r.testFile} -> ${r.target}`;
   return r.feedback ? `${head}\n\n${r.feedback}` : head;
 }
