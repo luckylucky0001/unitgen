@@ -57,6 +57,21 @@ function maskStrings(line: string): string {
   return line.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, (s) => "\u0000".repeat(s.length));
 }
 
+const KEYWORD_START = /^(return|val|var|let|const|if|else|for|while|do|throw|try|catch|finally|case|default|guard|defer|import|package|func|fun|class|struct|enum|interface|object|switch|when|break|continue|super|this\s*\(|init|override|private|public|internal|protected|static|export|function|async|await|yield|@)/;
+
+/** A standalone call statement, balanced on one line: `foo.bar(x)`, `save()`, `list.add(y);`. */
+function isCallStatement(t: string): boolean {
+  if (KEYWORD_START.test(t) || /[=:{}]$/.test(t) || !/\)\s*;?$/.test(t) || /^[)\]]/.test(t)) return false;
+  if (!/^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*(<[^>]*>)?\(/.test(t)) return false;
+  let depth = 0;
+  for (const c of maskStrings(t)) {
+    if (c === "(") depth++;
+    if (c === ")") depth--;
+    if (depth < 0) return false;
+  }
+  return depth === 0 && !/[^=!<>]=[^=]/.test(maskStrings(t));
+}
+
 export function mutantsFor(text: string, lines: number[]): Mutant[] {
   const src = text.split("\n");
   const out: Mutant[] = [];
@@ -71,6 +86,16 @@ export function mutantsFor(text: string, lines: number[]): Mutant[] {
       if (!m) continue;
       const mutated = original.slice(0, m.index) + rep + original.slice(m.index + m[0].length);
       out.push({ line: ln, op, original, mutated });
+    }
+    // Negate a simple condition: if (flag) / if (a.b) -> if (!(...)).
+    const cond = /\bif\s*\(\s*(!?[A-Za-z_$][\w$.]*)\s*\)/.exec(masked);
+    if (cond) {
+      const inner = original.slice(cond.index, cond.index + cond[0].length).replace(/\(\s*(!?[A-Za-z_$][\w$.]*)\s*\)/, (_, x: string) => (x.startsWith("!") ? `(${x.slice(1)})` : `(!${x})`));
+      out.push({ line: ln, op: "negate condition", original, mutated: original.slice(0, cond.index) + inner + original.slice(cond.index + cond[0].length) });
+    }
+    // Statement deletion: does any test notice the call never happens?
+    if (isCallStatement(t)) {
+      out.push({ line: ln, op: "delete statement", original, mutated: original.replace(t, "/* unitgen: statement deleted */") });
     }
   }
   return out;
@@ -123,6 +148,9 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
   if (!lines.length) throw new Error(`${relTest} covers no line of ${relPath(absTarget, adapter.root)}`);
   const original = readFile(absTarget);
   const candidates = pickMutants(mutantsFor(original, lines), max);
+  if (!candidates.length) {
+    throw new Error(`no mutable operators, conditions or call statements on the ${lines.length} lines ${relTest} covers`);
+  }
   const backup = state.file("mutation.backup");
   fs.copyFileSync(absTarget, backup);
   writeFile(journal(state), JSON.stringify({ target: absTarget, backup }));

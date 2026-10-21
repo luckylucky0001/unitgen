@@ -125,3 +125,13 @@ test("collectSuspects joins continuation comment lines and dedupes", async () =>
   const t = ["// UNITGEN-SUSPECT: true + 1 is 2 because Bool", "// bridges to NSNumber", "x()", "// UNITGEN-SUSPECT: true + 1 is 2 because Bool", "// bridges to NSNumber"].join("\n");
   assert.deepEqual(collectSuspects(t), ["true + 1 is 2 because Bool bridges to NSNumber"]);
 });
+
+test("statement deletion and condition negation", async () => {
+  const { mutantsFor } = await import("../src/mutate.ts");
+  const src = ["    localDataSource.upsert(task.toLocal())", "    val x = foo(1)", "    if (followed) {", "    return bar()", "    saveTasksToNetwork()"].join("\n");
+  const ops = mutantsFor(src, [1, 2, 3, 4, 5]).map((m) => `${m.line}:${m.op}`);
+  assert.ok(ops.includes("1:delete statement"));
+  assert.ok(ops.includes("5:delete statement"));
+  assert.ok(ops.includes("3:negate condition"));
+  assert.ok(!ops.some((o) => o.startsWith("2:delete") || o.startsWith("4:delete")));
+});
