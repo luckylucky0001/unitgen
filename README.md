@@ -60,7 +60,7 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 
 ## 验证结果（2026-10-21，本机：macOS + Command Line Tools，无 Xcode / DevEco）
 
-两轮共 5 个独立子代理只读 Skill 完成了大部分目标（标 ★），其余由我按同一流程完成。
+三轮共 7 个独立子代理只读 Skill 完成了大部分目标（标 ★），其余由我按同一流程完成。
 
 | 平台 | 工程 | 目标 | 覆盖率 | 测试数 |
 |---|---|---|---|---|
@@ -73,7 +73,11 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 | Android | android/nowinandroid ★ | GetSearchContentsUseCase | 0% → 100% | 7 |
 | Android | android/nowinandroid ★ | MainActivityViewModel（:app，Hilt 字节码改写） | 0% → 100% | 11 |
 | Android | android/architecture-samples | DefaultTaskRepository | 78% → 100% | 7 |
+| Android | android/architecture-samples ★ | AddEditTaskViewModel | 82% → 99% | 10 |
+| Android | android/architecture-samples ★ | TaskDetailViewModel | 85% → 98% | 6+ |
 | 鸿蒙 | LinysBrowser_NEXT | url-ext.ets（手写 Punycode） | 全覆盖 | 8（RFC 3492 向量） |
+| 鸿蒙 | LinysBrowser_NEXT ★ | colors.ets（HSV/RGB 转换） | 0% → 100% | 14 |
+| 鸿蒙 | LinysBrowser_NEXT ★ | keyshortcuts helpers / meowKeyBind | 0% → 76% / 全覆盖 | 9 / 8 |
 | 鸿蒙 | JhHarmonyDemo ★ | UserModel / APIs | 0% → 100% | 8 |
 | 鸿蒙 | interview-handbook-project ★ | base.ets 等 3 个文件 | 全仓 0% → 6%（估算） | 20 |
 
@@ -86,6 +90,9 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 |---|---|---|
 | Expression.swift | 100%（9/9） | 1 个变异体编译不过，自动丢弃 |
 | url-ext.ets（Punycode） | 92%（11/12） | 唯一幸存者是等价变异（越界读 `undefined` 后走同一分支） |
+| colors.ets ★ | 80% → 100% | 两个幸存者都是真漏洞（NaN 色相、非纯色），补测试后全杀 |
+| AddEditTaskViewModel ★ | 75% → 100% | 发现「整体比较默认 UiState」的断言永远不会失败（变异后默认值也跟着变） |
+| TaskDetailViewModel ★ | 90% → 100% | |
 | DefaultTaskRepository | 67% → **100%** | 揪出 `deleteAllTasks` 的测试其实什么都没验证（删掉 `deleteAll()` 也通过）；补一条断言后全杀。**覆盖率没变，只有变异测试能发现这种弱测试** |
 
 **发现的疑似 bug**（测试按现行为断言并标注 `UNITGEN-SUSPECT`，均已对照源码确认或有可复现证据）：
@@ -93,14 +100,15 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 - Expression：`AnyExpression("true + 1")` 得 2（Bool 桥接成 NSNumber 落入数值加法；源码里也有 TODO 质疑）。
 - JhHarmonyDemo：`JhPreferencesUtils` 的 bool/number/model 方法调用了 `JhAESPreferencesUtils.saveString/getString`，疑似复制粘贴错误。
 - interview-handbook：`getPercentText` 未处理 `total === 0`，返回 `'Infinity%'` / `'NaN%'`。
+- LinysBrowser：`isFn('foo')` 返回 true（只判断长度 > 1 且以 F 开头）。
 
-**迭代过程**：每轮试用的子代理都把 CLI/Skill 的问题按「最重要」列出，共修复约 40 处，例如 SwiftPM `Source/` 目录、Gradle `--tests` 绑定到错误任务、Hilt 改写字节码导致 JaCoCo 丢数据、`src/testDemo` 测试源集、鸿蒙三方包被误桩、iOS 同 target 测试互相串覆盖率、报告中的重复/截断等。
+**迭代过程**：每轮试用的子代理都把 CLI/Skill 的问题按「最重要」列出，共修复约 60 处，例如 SwiftPM `Source/` 目录、Gradle `--tests` 绑定到错误任务、Hilt 改写字节码导致 JaCoCo 丢数据、`src/testDemo` 测试源集、鸿蒙三方包被误桩、iOS 同 target 测试互相串覆盖率、报告中的重复/截断等。
 
 ## 已知限制
 
 - iOS：只支持 SwiftPM 包；纯 Xcode 工程（xcodeproj + 模拟器）尚未实现。只有 Command Line Tools 时 XCTest 不可用，已有 XCTest 用例跑不了（baseline 为 0%），只能用 Swift Testing。
 - Android：只覆盖 JVM 本地单测（src/test）；`android.util.Log` 等在没有 Robolectric / `isReturnDefaultValues` 时会抛异常，相应分支不会被覆盖。
-- 鸿蒙：没有 hvigor 时的 shim 只对纯逻辑可信；`@kit.*`/`@ohos.*` 系统 API 与 ArkUI 全局量是空桩；未安装的 ohpm 包直接报 `INFRA_ERROR`（需要 `ohpm install`）。ArkTS lint 只覆盖常见限制，最终仍需在 DevEco/hvigor 跑一遍。hvigor 原生路径已实现但未在真机工具链上验证。
+- 鸿蒙：没有 hvigor 时的 shim 只对纯逻辑可信；`@kit.*`/`@ohos.*` 系统 API、ArkUI 全局量/装饰器、UI 组件（struct）文件都是空桩；未安装的 ohpm 包、shim 解析不了的语法、缺失的全局量都报 `INFRA_ERROR`（不会被当成测试错误）。shim 下的覆盖率在 switch/case 上可能偏高（V8 块覆盖 + source map 的局限）。ArkTS lint 只覆盖常见限制，最终仍需在 DevEco/hvigor 跑一遍。hvigor 原生路径已实现但未在真机工具链上验证。
 
 ## 开发
 
