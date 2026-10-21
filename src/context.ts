@@ -5,7 +5,7 @@ import { ranges } from "./coverage.ts";
 import type { State } from "./state.ts";
 import { estimateExecutable } from "./targets.ts";
 import { coveredLines, executableLines } from "./coverage.ts";
-import { exists, readFile, relPath } from "./util.ts";
+import { exists, readFile, relPath, walkFiles } from "./util.ts";
 
 export interface Brief {
   source: string;
@@ -53,6 +53,31 @@ function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: 
   return parts.join("\n\n");
 }
 
+/** Existing fakes/stubs in the module's test sources that implement types the target uses. */
+function testDoubles(adapter: Adapter, m: Module, text: string, budget: number): string {
+  const idents = new Set(text.match(/\b[A-Z][A-Za-z0-9_]{2,}\b/g) ?? []);
+  const roots = [...new Set([path.dirname(m.testRoot), m.testRoot])].filter(exists);
+  const exts = [".kt", ".java", ".swift", ".ets", ".ts"];
+  const parts: string[] = [];
+  let used = 0;
+  const seen = new Set<string>();
+  for (const root of roots) {
+    for (const f of walkFiles(root, exts)) {
+      if (seen.has(f) || /UnitGen|\.unitgen\./.test(path.basename(f))) continue;
+      seen.add(f);
+      const t = readFile(f);
+      const impl = [...t.matchAll(/\b(?:class|object|struct)\s+(\w+)[^{\n]*?(?::|implements|extends)\s*([^{\n]+)/g)]
+        .filter((mm) => (mm[2].match(/\b[A-Z]\w+/g) ?? []).some((x) => idents.has(x)));
+      if (!impl.length) continue;
+      const chunk = `// ${relPath(f, adapter.root)}\n${declarationLines(t).join("\n")}`;
+      if (used + chunk.length > budget) return parts.join("\n\n");
+      parts.push(chunk);
+      used += chunk.length;
+    }
+  }
+  return parts.join("\n\n");
+}
+
 function numbered(text: string, uncovered: Set<number>, executable: Set<number>, keep?: (ln: number) => boolean): string {
   const lines = text.split("\n");
   const out: string[] = [];
@@ -69,6 +94,12 @@ function numbered(text: string, uncovered: Set<number>, executable: Set<number>,
     out.push(`${mark}${String(ln).padStart(5)}| ${l}`);
   });
   return out.join("\n");
+}
+
+function capRanges(lines: number[]): string {
+  if (!lines.length) return "none";
+  const parts = ranges(lines).split(", ");
+  return parts.length > 40 ? `${parts.slice(0, 40).join(", ")}, … (${lines.length} lines, marked "!" below)` : parts.join(", ");
 }
 
 export function buildBrief(adapter: Adapter, state: State, source: string, opts: { maxSourceChars?: number; feedback?: string } = {}): Brief {
@@ -95,13 +126,14 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     src = numbered(text, unc, exec, (ln) => declSet.has(ln) || uncovered.some((u) => Math.abs(u - ln) <= 4));
   }
 
-  const examples = adapter.exampleTests(m).map((f) => {
+  const examples = adapter.exampleTests(m, abs).map((f) => {
     const t = readFile(f).split("\n");
     return `// ${relPath(f, adapter.root)}${t.length > 120 ? " (first 120 lines)" : ""}\n${t.slice(0, 120).join("\n")}`;
   });
 
   const existingGenerated = exists(place.path) ? readFile(place.path) : "";
   const related = relatedDeclarations(adapter, m, abs, text, 12000);
+  const doubles = testDoubles(adapter, m, text, 8000);
   const sections: string[] = [
     `# unitgen brief: ${relPath(abs, adapter.root)}`,
     "",
@@ -109,7 +141,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     `- Write the test file to: \`${place.path}\``,
     `- Test suite/class name: \`${place.suiteName}\`${place.packageName ? `  (package \`${place.packageName}\`)` : ""}`,
     place.importHint ? `- Import: \`${place.importHint}\`` : "",
-    `- Coverage: ${measured ? `${covered.size}/${exec.size} executable lines covered by existing tests` : "no coverage data for this file (estimated)"}; uncovered lines: ${ranges(uncovered) || "none"}`,
+    `- Coverage: ${measured ? `${covered.size}/${exec.size} executable lines covered by existing tests` : "no coverage data for this file (estimated)"}; uncovered lines: ${capRanges(uncovered)}`,
     "",
     "## Conventions",
     adapter.conventions(m),
@@ -122,7 +154,8 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     "```",
   ];
   if (related) sections.push("", "## Related declarations in the same module", "```", related, "```");
-  if (examples.length) sections.push("", "## Existing tests in this module (follow their style and reuse their fakes/helpers)", "```", examples.join("\n\n"), "```");
+  if (doubles) sections.push("", "## Existing test doubles for types used by the target (prefer these over mocks)", "```", doubles, "```");
+  if (examples.length) sections.push("", "## Existing tests in this module (follow their style, imports and fakes/helpers; the framework rules above win if they differ)", "```", examples.join("\n\n"), "```");
   if (existingGenerated) sections.push("", "## Current content of the generated test file (extend it; keep passing tests)", "```", existingGenerated, "```");
   if (opts.feedback) sections.push("", "## Feedback from the last attempt (fix these problems)", "```", opts.feedback, "```");
   sections.push("", "## Output", `Return the complete test file for \`${path.basename(place.path)}\` in a single fenced code block, nothing else.`);

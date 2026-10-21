@@ -71,8 +71,8 @@ export interface Adapter {
   placement(source: string, m: Module): TestPlacement;
   /** Prompt text describing framework, conventions and available test libraries for a module. */
   conventions(m: Module): string;
-  /** Existing tests to show the model as a style reference (absolute paths). */
-  exampleTests(m: Module): string[];
+  /** Existing tests to show the model as a style reference (absolute paths); the source's own test first. */
+  exampleTests(m: Module, source?: string): string[];
   /** Called before a new test file is verified (e.g. register a SwiftPM test target). */
   prepareTestFile(testFile: string, m: Module): void;
   runTests(req: RunRequest): TestRun;

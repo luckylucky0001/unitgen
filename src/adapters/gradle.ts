@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Coverage, mergeCoverage, parseJacocoXml } from "../coverage.ts";
-import { errorExcerpt, exists, readFile, readJson, relPath, run, stripAnsi, walkFiles, writeJson } from "../util.ts";
+import { errorExcerpt, exists, preferOwnTest, readFile, readJson, relPath, run, stripAnsi, walkFiles, writeJson } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const INIT_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data", "unitgen-jacoco.init.gradle");
@@ -140,26 +140,31 @@ export class GradleAdapter implements Adapter {
     return { path: path.join(dir, `${base}${SUFFIX}${ext}`), suiteName: `${base}${SUFFIX}`, packageName: pkg };
   }
 
-  /** Test libraries visible to the module's unit tests (best effort, from build files + catalog). */
-  private testDeps(m: Module): string[] {
-    const texts = [m.meta?.buildText ?? ""];
+  /** Test libraries visible to the module's unit tests (best effort). Direct = module build file, else via convention plugins. */
+  private testDeps(m: Module): { direct: string[]; indirect: string[] } {
+    const direct = [m.meta?.buildText ?? ""];
+    const indirect: string[] = [];
     const catalog = path.join(this.root, "gradle", "libs.versions.toml");
     const cat = exists(catalog) ? readFile(catalog) : "";
-    // Convention plugins (build-logic/buildSrc) often add test deps for every module.
     for (const dir of ["build-logic", "buildSrc"]) {
       const d = path.join(this.root, dir);
-      if (exists(d)) for (const f of walkFiles(d, [".kt", ".kts", ".gradle"])) texts.push(readFile(f));
+      if (exists(d)) for (const f of walkFiles(d, [".kt", ".kts", ".gradle"])) indirect.push(readFile(f));
     }
     // Local test-helper modules (e.g. :core:testing) re-export their deps via `api(...)`.
-    for (const dep of texts.join("\n").matchAll(/testImplementation\s*\(\s*(?:project\()?\s*projects\.([\w.]+)|testImplementation\s*\(\s*project\(\s*["']([:\w-]+)["']/g)) {
+    for (const dep of direct[0].matchAll(/testImplementation\s*\(\s*(?:project\()?\s*projects\.([\w.]+)|testImplementation\s*\(\s*project\(\s*["']([:\w-]+)["']/g)) {
       const name = dep[1] ? ":" + dep[1].replace(/([A-Z])/g, "-$1").toLowerCase().replace(/\./g, ":") : dep[2];
       const mod = this.modules().find((x) => x.name === name || x.name.replace(/-/g, "") === name.replace(/-/g, ""));
-      if (mod?.meta?.buildText) texts.push(mod.meta.buildText);
+      if (mod?.meta?.buildText) direct.push(mod.meta.buildText);
     }
-    const all = texts.join("\n") + "\n" + cat;
+    // Expand `libs.foo.bar` aliases to their Maven coordinates so the patterns below can match.
+    const expand = (t: string) => t.replace(/libs\.([\w.]+)/g, (all, alias: string) => {
+      const key = alias.replace(/\./g, "[-._]");
+      const line = new RegExp(`^${key}\\s*=.*$`, "m").exec(cat)?.[0];
+      return line ? `${all} ${line}` : all;
+    });
     const known: [RegExp, string][] = [
       [/junit-jupiter|junit5|org\.junit\.jupiter/i, "JUnit 5 (org.junit.jupiter.api.*)"],
-      [/junit:junit|libs\.junit\b|junit4|\bjunit = /i, "JUnit 4 (org.junit.Test, org.junit.Assert.*)"],
+      [/junit:junit|libs\.junit\b|junit4|\bjunit = |"junit"/i, "JUnit 4 (org.junit.Test, org.junit.Assert.*)"],
       [/kotlin-test|kotlin\("test"\)|kotlin\.test/i, "kotlin.test (kotlin.test.assertEquals ...)"],
       [/mockk/i, "MockK (io.mockk.*)"],
       [/mockito/i, "Mockito / mockito-kotlin"],
@@ -170,27 +175,34 @@ export class GradleAdapter implements Adapter {
       [/robolectric/i, "Robolectric (@RunWith(RobolectricTestRunner::class))"],
       [/kotest/i, "Kotest assertions"],
     ];
-    return known.filter(([re]) => re.test(all)).map(([, s]) => s);
+    const d = expand(direct.join("\n"));
+    const i = expand(indirect.join("\n"));
+    const directHits = known.filter(([re]) => re.test(d)).map(([, s]) => s);
+    return { direct: directHits, indirect: known.filter(([re]) => !re.test(d) && re.test(i)).map(([, s]) => s) };
   }
 
   conventions(m: Module): string {
-    const deps = this.testDeps(m);
+    const { direct, indirect } = this.testDeps(m);
     const lang = m.meta?.kotlin ? "Kotlin" : "Java";
     return [
       `Platform: ${m.kind === "android" ? "Android library/app" : "JVM"} module \`${m.name}\`, local JVM unit tests (src/test), language ${lang}.`,
-      `Test libraries detected on the classpath (use ONLY these; do not add dependencies): ${deps.length ? deps.join("; ") : "JUnit 4 only (assume org.junit.Test + org.junit.Assert)"}.`,
+      `Test libraries declared by this module (use ONLY these; do not add dependencies): ${direct.length ? direct.join("; ") : "none found directly"}.`,
+      indirect.length ? `Possibly added by convention plugins (only use if the existing tests above import them): ${indirect.join("; ")}.` : "",
+      "Check the imports of the existing tests below: they show exactly what is on the test classpath.",
       m.kind === "android"
         ? "These are local unit tests on the JVM: android.* classes are stubs that throw unless Robolectric is used. Prefer testing pure logic; mock or fake Android types; never use Context unless Robolectric is available."
         : "Pure JVM tests: no Android APIs.",
       "Suspend functions / Flows: use kotlinx-coroutines-test `runTest { }` if available. Never use Thread.sleep or real dispatchers with delays.",
       "Prefer the project's own test doubles (look for Test*Repository / Fake* classes in the examples or test-helper modules) over mocking frameworks.",
       "The file must declare the same `package` as the class under test so internal members are accessible.",
-    ].join("\n");
+      "android.util.Log and other android.* calls throw \"Method ... not mocked\" in local tests unless `unitTests.isReturnDefaultValues = true` or Robolectric is used: do not drive code paths that log via android.util.Log.",
+    ].filter(Boolean).join("\n");
   }
 
-  exampleTests(m: Module): string[] {
+  exampleTests(m: Module, source?: string): string[] {
     const tests = walkFiles(path.join(m.dir, "src", "test"), [".kt", ".java"]).filter((f) => !f.includes(SUFFIX));
-    return tests.filter((f) => fs.statSync(f).size > 400).sort((a, b) => fs.statSync(a).size - fs.statSync(b).size).slice(0, 2);
+    const small = tests.filter((f) => fs.statSync(f).size > 400).sort((a, b) => fs.statSync(a).size - fs.statSync(b).size);
+    return preferOwnTest(tests, source, small);
   }
 
   prepareTestFile(testFile: string): void {

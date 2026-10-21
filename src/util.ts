@@ -187,3 +187,11 @@ export function errorExcerpt(out: string, maxLines = 80): string {
   if (uniq.length === 0) return tailLines(out, Math.min(maxLines, 40));
   return uniq.slice(0, maxLines).join("\n");
 }
+
+/** Put the existing test of `source` (FooTest, FooTests, Foo.test) first, then the given fallbacks. */
+export function preferOwnTest(all: string[], source: string | undefined, fallback: string[], limit = 2): string[] {
+  if (!source) return fallback.slice(0, limit);
+  const base = path.basename(source).replace(/\.[^.]+$/, "");
+  const own = all.filter((f) => new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(Test|Tests|Spec)?(\.test)?\.[^.]+$`).test(path.basename(f)) && !/UnitGen|\.unitgen\./.test(path.basename(f)));
+  return [...new Set([...own, ...fallback])].slice(0, limit);
+}

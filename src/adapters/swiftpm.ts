@@ -7,7 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseLlvmCovJson } from "../coverage.ts";
-import { errorExcerpt, exists, readFile, relPath, run, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
+import { errorExcerpt, exists, preferOwnTest, readFile, relPath, run, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const BEGIN = "// unitgen:begin (generated test targets, managed by unitgen)";
@@ -159,11 +159,11 @@ export class SwiftPMAdapter implements Adapter {
     ].join("\n");
   }
 
-  exampleTests(m: Module): string[] {
+  exampleTests(m: Module, source?: string): string[] {
     const d = this.loadDump();
     const tests = (d.targets as DumpTarget[]).filter((t) => t.type === "test" && (t.dependencies ?? []).some((dep) => JSON.stringify(dep).includes(`"${m.name}"`)));
     const files = tests.flatMap((t) => walkFiles(this.targetDir(t), [".swift"]));
-    return files.sort((a, b) => fs.statSync(a).size - fs.statSync(b).size).filter((f) => fs.statSync(f).size > 300).slice(0, 2);
+    return preferOwnTest(files, source, files.sort((a, b) => fs.statSync(a).size - fs.statSync(b).size).filter((f) => fs.statSync(f).size > 300));
   }
 
   prepareTestFile(testFile: string, m: Module): void {

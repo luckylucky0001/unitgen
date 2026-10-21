@@ -10,7 +10,7 @@ import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Coverage, parseLcov } from "../coverage.ts";
-import { errorExcerpt, exists, json5Parse, readFile, readJson, relPath, run, walkFiles, which, writeFile } from "../util.ts";
+import { errorExcerpt, exists, json5Parse, preferOwnTest, readFile, readJson, relPath, run, walkFiles, which, writeFile } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -155,12 +155,12 @@ export class HarmonyAdapter implements Adapter {
     ].join("\n");
   }
 
-  exampleTests(m: Module): string[] {
+  exampleTests(m: Module, source?: string): string[] {
     const dirs = [path.join(m.dir, "src", "test"), path.join(m.dir, "src", "ohosTest", "ets", "test")];
     // Skip DevEco's generated boilerplate (LocalUnit.test.ets / Ability.test.ets templates).
     const files = dirs.flatMap((d) => walkFiles(d, [".ets", ".ts"]))
       .filter((f) => !f.endsWith(SUFFIX) && !/List\.test\.ets$/.test(f) && !/Defines a test suite|Presets an action/.test(readFile(f)));
-    return files.filter((f) => fs.statSync(f).size > 300).sort((a, b) => fs.statSync(a).size - fs.statSync(b).size).slice(0, 2);
+    return preferOwnTest(files, source, files.filter((f) => fs.statSync(f).size > 300).sort((a, b) => fs.statSync(a).size - fs.statSync(b).size));
   }
 
   /** Register the file in src/test/List.test.ets so hvigor runs it too. */
