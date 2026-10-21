@@ -1,0 +1,51 @@
+// Injected by unitgen with `-I`. Adds JaCoCo to every JVM/Android project and registers
+// `unitgenJacocoReport`, which reports the test task named by -Punitgen.testTask.
+// Uses beforeProject (not allprojects) so it also works with isolated projects disabled per-run.
+import org.gradle.testing.jacoco.tasks.JacocoReport
+
+def unitgenExcludes = [
+  '**/R.class', '**/R$*.class', '**/BuildConfig.*', '**/Manifest*.*', '**/*_Factory*.*',
+  '**/*_MembersInjector*.*', '**/Hilt_*.*', '**/*_HiltModules*.*', '**/*_HiltComponents*.*',
+  '**/Dagger*.*', '**/*Module_Provide*.*', '**/hilt_aggregated_deps/**', '**/dagger/hilt/**',
+  '**/*ComposableSingletons*.*', '**/*$$serializer*.*', '**/*_Impl*.*', '**/*Test*.*',
+  '**/*$special$$inlined*.*'
+]
+
+gradle.beforeProject { p ->
+  def setup = {
+    if (p.extensions.findByName('unitgenConfigured') != null) return
+    p.extensions.add('unitgenConfigured', true)
+    p.pluginManager.apply('jacoco')
+    p.tasks.withType(Test).configureEach { t ->
+      t.extensions.findByName('jacoco')?.with {
+        includeNoLocationClasses = true
+        excludes = ['jdk.internal.*']
+      }
+    }
+    p.tasks.register('unitgenJacocoReport', JacocoReport) { r ->
+      def tn = p.findProperty('unitgen.testTask') ?: 'test'
+      def v = p.findProperty('unitgen.variant') ?: 'main'
+      def tt = p.tasks.findByName(tn)
+      if (tt != null) {
+        r.dependsOn(tt)
+        r.executionData.from(tt.extensions.getByName('jacoco').destinationFile)
+      }
+      def b = p.layout.buildDirectory.get().asFile
+      r.classDirectories.from(p.fileTree(b) {
+        include "tmp/kotlin-classes/${v}/**", "intermediates/javac/${v}/**/classes/**",
+                "intermediates/built_in_kotlinc/${v}/**/classes/**", "classes/kotlin/${v}/**", "classes/java/${v}/**"
+        exclude unitgenExcludes
+      })
+      r.sourceDirectories.from(p.files('src/main/java', 'src/main/kotlin'))
+      r.reports {
+        xml.required = true
+        html.required = false
+        csv.required = false
+        xml.outputLocation = p.layout.buildDirectory.file('unitgen/jacoco.xml')
+      }
+    }
+  }
+  ['java', 'org.jetbrains.kotlin.jvm', 'com.android.library', 'com.android.application'].each { id ->
+    p.pluginManager.withPlugin(id) { setup() }
+  }
+}
