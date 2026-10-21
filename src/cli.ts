@@ -11,6 +11,7 @@ import { State } from "./state.ts";
 import { formatTargets, rankTargets } from "./targets.ts";
 import { exists, log, relPath, writeFile } from "./util.ts";
 import { formatVerify, quarantine, verify } from "./verify.ts";
+import { formatMutation, mutate, recover } from "./mutate.ts";
 import * as fs from "node:fs";
 
 const HELP = `unitgen — backfill unit tests, keep only the ones that pass and add coverage
@@ -25,6 +26,7 @@ Commands
   brief <source>             Print the generation brief (prompt) for one source file
   verify <test-file>         Gate a generated test file: compile, pass, re-run, assertions, new coverage
   generate                   Automatic loop with a model backend (--llm)
+  mutate <test-file>         Mutation check of an accepted test: do its assertions catch changed behaviour?
   reject <test-file> [why]   Quarantine a test file without re-running it (moves it to .unitgen/rejected)
   report                     Write .unitgen/REPORT.md
   note <text>                Attach a note (e.g. a suspected bug) to the report
@@ -39,6 +41,7 @@ Common options
 targets:   --limit <n> (20)  --all-kinds
 brief:     --out <file>      --feedback <file>
 verify:    --target <source> --reruns <n> (1)  --allow-no-gain  --quarantine
+mutate:    --target <source> --max <n> (10)
 generate:  --llm anthropic|claude|cmd:<sh> --model <id> --limit <n> (5) --attempts <n> (3) [files...]
 `;
 
@@ -62,6 +65,7 @@ async function main(argv: string[]): Promise<number> {
       llm: { type: "string" },
       model: { type: "string" },
       attempts: { type: "string" },
+      max: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -73,6 +77,7 @@ async function main(argv: string[]): Promise<number> {
   const root = path.resolve(o.project ?? process.cwd());
   const adapter = detectAdapter(root, o.adapter);
   const state = new State(adapter.root);
+  recover(state); // a crashed `mutate` must never leave production code modified
   const mods = o.module ? adapter.modules().filter((m) => m.name === o.module) : undefined;
   if (o.module && !mods?.length) throw new Error(`unknown module ${o.module}; see \`unitgen modules\``);
   const print = (human: string, data: unknown) => process.stdout.write((o.json ? JSON.stringify(data, null, 2) : human) + "\n");
@@ -137,6 +142,15 @@ async function main(argv: string[]): Promise<number> {
       });
       print(formatVerify(r, root), r);
       return r.verdict === "accepted" ? 0 : 2;
+    }
+    case "mutate": {
+      if (!rest[0]) throw new Error("usage: unitgen mutate <test-file> [--target <source>] [--max 10]");
+      const relTest = relPath(path.resolve(rest[0]), root);
+      const tgt = o.target ?? state.data.accepted.find((a) => a.testFile === relTest)?.target;
+      if (!tgt) throw new Error("pass --target <source> (no accepted target recorded for this test file)");
+      const r = mutate(adapter, state, rest[0], path.resolve(root, tgt), Number(o.max ?? 10));
+      print(formatMutation(r), r);
+      return 0;
     }
     case "reject": {
       if (!rest[0] || !exists(rest[0])) throw new Error("usage: unitgen reject <test-file> [reason]");

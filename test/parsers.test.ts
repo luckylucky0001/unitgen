@@ -107,3 +107,14 @@ test("preferOwnTest puts the matching test first", () => {
   const all = ["/t/OtherTest.kt", "/t/FooTest.kt", "/t/FooUnitGenTest.kt"];
   assert.deepEqual(preferOwnTest(all, "/src/Foo.kt", ["/t/OtherTest.kt"]), ["/t/FooTest.kt", "/t/OtherTest.kt"]);
 });
+
+test("mutants skip strings/comments/generics and spread across lines", async () => {
+  const { mutantsFor, pickMutants } = await import("../src/mutate.ts");
+  const src = ["if (a < b && c == 1) {", "  let s = \"x == y\" // a == b", "  return List<Int>()", "  x = y + 2", "}"].join("\n");
+  const ms = mutantsFor(src, [1, 2, 3, 4]);
+  assert.deepEqual(ms.filter((m) => m.line === 1).map((m) => m.op), ["== -> !=", "< -> <=", "&& -> ||", "1 -> 0"]);
+  assert.equal(ms.filter((m) => m.line === 2 || m.line === 3).length, 0);
+  assert.deepEqual(ms.filter((m) => m.line === 4).map((m) => m.mutated), ["  x = y - 2"]);
+  const picked = pickMutants(ms, 2);
+  assert.deepEqual(picked.map((m) => m.line), [1, 4]);
+});

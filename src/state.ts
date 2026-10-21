@@ -11,6 +11,7 @@ export interface AcceptedTest {
   gained: Record<string, number[]>;
   attempts: number;
   at: string;
+  mutation?: { killed: number; survived: number; stillborn: number; score: number };
 }
 
 export interface RejectedTest {

@@ -32,6 +32,8 @@ export interface TestRun {
   seconds: number;
   /** Environment problem, not the test's fault (missing SDK, timeout, ...). */
   infraError?: string;
+  /** Coverage-tool warnings that make the numbers unreliable (e.g. JaCoCo class mismatch). */
+  coverageWarnings?: string[];
   /** Informational remark for the user (e.g. suites skipped on this toolchain). */
   note?: string;
 }
@@ -43,6 +45,8 @@ export interface RunRequest {
   modules?: Module[];
   coverage: boolean;
   label: string;
+  /** Hard limit for the whole run (default: adapter-specific, long). */
+  timeoutSec?: number;
 }
 
 export type FileKind = "logic" | "ui" | "generated" | "di" | "model" | "test" | "entry" | "platform";

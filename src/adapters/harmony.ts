@@ -231,7 +231,7 @@ export class HarmonyAdapter implements Adapter {
     const args = ["node", c8, "--reporter=lcov", `--report-dir=${path.join(work, "cov")}`, `--temp-directory=${path.join(work, "tmp")}`,
       "--exclude-after-remap", "--extension=.ets", "--extension=.ts", "--exclude=**/*.test.ets", "--exclude=**/*.test.ts", "--exclude=**/harmony-shim/**", "--exclude=**/oh_modules/**", "--exclude-node-modules",
       "node", path.join(work, "runner.cjs"), tsDir, results, exists(ohm) ? ohm : "-", ...files];
-    const r = run(args, { cwd: this.root, timeoutSec: 900, logFile });
+    const r = run(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 900, logFile });
     const tests: TestCase[] = readJson<any[]>(results, []).map((t) => ({ name: t.name, status: t.status, message: t.message, file: t.file }));
     const loadFail = tests.filter((t: any) => t.name.startsWith("load ") && t.status === "failed");
     const compiled = loadFail.length === 0 && lint.length === 0;
@@ -256,7 +256,7 @@ export class HarmonyAdapter implements Adapter {
     if (!r.ok && !excerpt) excerpt = errorExcerpt(r.out);
     return {
       ok: r.ok && compiled, compiled, tests: tests.filter((t) => !t.name.startsWith("load ")), coverage, logFile,
-      excerpt, seconds: (Date.now() - start) / 1000,
+      excerpt, seconds: (Date.now() - start) / 1000, infraError: r.timedOut ? "timeout" : undefined,
     };
   }
 

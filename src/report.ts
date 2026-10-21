@@ -24,8 +24,11 @@ export function buildReport(adapter: Adapter, state: State): string {
     "",
   ];
   if (d.accepted.length) {
-    lines.push("## Accepted", "", "| test file | target | tests | new lines | attempts |", "|---|---|---:|---:|---:|");
-    for (const x of d.accepted) lines.push(`| ${x.testFile} | ${x.target ?? ""} | ${x.tests} | ${x.gainedLines} | ${x.attempts} |`);
+    lines.push("## Accepted", "", "| test file | target | tests | new lines | attempts | mutation score |", "|---|---|---:|---:|---:|---:|");
+    for (const x of d.accepted) {
+      const ms = x.mutation ? `${Math.round(x.mutation.score * 100)}% (${x.mutation.killed}/${x.mutation.killed + x.mutation.survived})` : "—";
+      lines.push(`| ${x.testFile} | ${x.target ?? ""} | ${x.tests} | ${x.gainedLines} | ${x.attempts} | ${ms} |`);
+    }
     lines.push("");
   }
   const perFile = a.files

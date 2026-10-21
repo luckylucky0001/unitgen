@@ -39,11 +39,20 @@ gradle.beforeProject { p ->
         r.executionData.from(tt.extensions.getByName('jacoco').destinationFile)
       }
       def b = p.layout.buildDirectory.get().asFile
-      r.classDirectories.from(p.fileTree(b) {
-        include "tmp/kotlin-classes/${v}/**", "intermediates/javac/${v}/**/classes/**",
-                "intermediates/built_in_kotlinc/${v}/**/classes/**", "classes/kotlin/${v}/**", "classes/java/${v}/**"
-        exclude unitgenExcludes
-      })
+      def V = v.capitalize()
+      // Bytecode-transforming plugins (Hilt, ASM instrumentation) run tests against rewritten classes;
+      // JaCoCo must analyze exactly those or it drops the data ("Execution data ... does not match").
+      r.classDirectories.from(p.files({
+        def asm = new File(b, "intermediates/classes/${v}/transform${V}ClassesWithAsm")
+        if (asm.exists()) {
+          return p.fileTree(asm) { include 'dirs/**', 'jars/**/*.jar'; exclude unitgenExcludes }
+        }
+        return p.fileTree(b) {
+          include "tmp/kotlin-classes/${v}/**", "intermediates/javac/${v}/**/classes/**",
+                  "intermediates/built_in_kotlinc/${v}/**/classes/**", "classes/kotlin/${v}/**", "classes/java/${v}/**"
+          exclude unitgenExcludes
+        }
+      }))
       r.sourceDirectories.from(p.files('src/main/java', 'src/main/kotlin'))
       r.reports {
         xml.required = true

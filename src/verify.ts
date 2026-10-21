@@ -103,6 +103,10 @@ export function verify(adapter: Adapter, state: State, testFile: string, opts: V
   const gained = newlyCovered(known, cand);
   const gainedLines = Object.values(gained).reduce((a, b) => a + b.length, 0);
   const targetGained = target ? (gained[target]?.length ?? 0) : gainedLines;
+  const mismatch = (run.coverageWarnings ?? []).filter(Boolean);
+  if (gainedLines === 0 && mismatch.length) {
+    return res("infra_error", { tests, logFile: run.logFile, suspects, feedback: `Tests pass, but the coverage tool discarded data for: ${mismatch.slice(0, 5).join(", ")} (class files do not match the executed bytecode). This is a unitgen/build-setup problem, not your test.` });
+  }
   if (gainedLines === 0 && !opts.allowNoGain) {
     return res("no_gain", { tests, logFile: run.logFile, suspects, feedback: "All tests pass but they cover no line that was not already covered. Target the lines marked \"!\" in the brief." });
   }

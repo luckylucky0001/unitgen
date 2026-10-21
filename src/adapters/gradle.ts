@@ -81,8 +81,16 @@ export class GradleAdapter implements Adapter {
         .filter(exists);
       if (!sourceRoots.length) continue;
       const usesKotlin = sourceRoots.some((r) => walkFiles(r, [".kt"]).length > 0);
-      const testRoot = path.join(dir, "src", "test", usesKotlin ? "kotlin" : "java");
-      const altTestRoot = path.join(dir, "src", "test", usesKotlin ? "java" : "kotlin");
+      // Use the test source set where the module's tests actually live: src/test, or a flavor set
+      // like src/testDemo when the test helpers are only on testDemoImplementation.
+      const testSets = srcDirs.filter((d) => /^test([A-Z]\w*)?$/.test(d));
+      const counts = testSets.map((d) => ({ d, n: walkFiles(path.join(dir, "src", d), [".kt", ".java"]).length }));
+      const plain = counts.find((c) => c.d === "test");
+      const flavored = counts.filter((c) => c.d !== "test").sort((a, b) => b.n - a.n)[0];
+      const flavorOnlyHelpers = /test[A-Z]\w*Implementation\s*\(\s*projects\.core\.testing|test[A-Z]\w*Implementation\s*\(\s*project\(\s*["']:[\w:-]*test/.test(bt);
+      const set = flavored && flavored.n > 0 && (!plain || plain.n === 0 || (flavorOnlyHelpers && flavored.n >= plain.n)) ? flavored.d : "test";
+      const testRoot = path.join(dir, "src", set, usesKotlin ? "kotlin" : "java");
+      const altTestRoot = path.join(dir, "src", set, usesKotlin ? "java" : "kotlin");
       out.push({
         name, dir, sourceRoots,
         testRoot: exists(testRoot) || !exists(altTestRoot) ? testRoot : altTestRoot,
@@ -113,6 +121,9 @@ export class GradleAdapter implements Adapter {
       return "ui";
     }
     if (/@Module\b/.test(text) && /@(Test)?InstallIn\b|@Provides\b|@Binds\b/.test(text)) return "di";
+    if (/PreviewParameterProvider|@Preview\b/.test(text)) return "ui";
+    // Thin wrappers over framework services (notifications, connectivity, broadcasts, WorkManager).
+    if (/import android\.(app\.Notification|net\.Connectivity|content\.BroadcastReceiver|content\.Context\b|os\.Build)|import androidx\.(work|core\.app\.Notification)/.test(text) && !/: ViewModel\(/.test(text)) return "platform";
     if (/^\s*@(Dao|Database)\b/m.test(text)) return "generated"; // Room generates the implementation
     if (this.isTestSupport(file)) return "test";
     if (/: ViewModel\(/.test(text)) return "logic";
@@ -125,7 +136,7 @@ export class GradleAdapter implements Adapter {
   testSupportDirs(m: Module): string[] {
     const bt: string = m.meta?.buildText ?? "";
     const names = new Set<string>();
-    for (const d of bt.matchAll(/testImplementation\s*\(\s*project\(\s*["']([:\w-]+)["']\s*\)|testImplementation\s*\(\s*projects\.([\w.]+)/g)) {
+    for (const d of bt.matchAll(/test\w*Implementation\s*\(\s*project\(\s*["']([:\w-]+)["']\s*\)|test\w*Implementation\s*\(\s*projects\.([\w.]+)/g)) {
       names.add(d[1] ?? ":" + d[2].replace(/([A-Z])/g, "-$1").toLowerCase().replace(/\./g, ":"));
     }
     return this.modules().filter((x) => names.has(x.name) || [...names].some((n) => n.replace(/-/g, "") === x.name.replace(/-/g, ""))).flatMap((x) => x.sourceRoots);
@@ -209,7 +220,9 @@ export class GradleAdapter implements Adapter {
   }
 
   exampleTests(m: Module, source?: string): string[] {
-    const tests = walkFiles(path.join(m.dir, "src", "test"), [".kt", ".java"]).filter((f) => !f.includes(SUFFIX));
+    const srcDir = path.join(m.dir, "src");
+    const sets = exists(srcDir) ? fs.readdirSync(srcDir).filter((d) => /^test([A-Z]\w*)?$/.test(d)) : [];
+    const tests = sets.flatMap((d) => walkFiles(path.join(srcDir, d), [".kt", ".java"])).filter((f) => !f.includes(SUFFIX));
     const small = tests.filter((f) => fs.statSync(f).size > 400).sort((a, b) => fs.statSync(a).size - fs.statSync(b).size);
     return preferOwnTest(tests, source, small);
   }
@@ -279,7 +292,7 @@ export class GradleAdapter implements Adapter {
       fs.rmSync(path.join(m.dir, "build", "test-results", tasks[m.name]!), { recursive: true, force: true });
       fs.rmSync(path.join(m.dir, "build", "unitgen"), { recursive: true, force: true });
     }
-    const r = run(args, { cwd: this.root, timeoutSec: 3600, logFile });
+    const r = run(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
     let out = r.out;
     out = stripAnsi(out);
     const tests: TestCase[] = [];
@@ -295,13 +308,14 @@ export class GradleAdapter implements Adapter {
       }
       coverage = mergeCoverage(...covs);
     }
+    const coverageWarnings = [...new Set([...out.matchAll(/Execution data for class (\S+) does not match/g)].map((m) => m[1]))];
     const infra = /SDK location not found|Could not resolve all|Could not GET|Unable to locate a Java Runtime|TIMEOUT|Problem configuring task|Selection failed/.exec(out)?.[0];
     return {
       ok: r.ok && !noTests,
       compiled: !compileFailed,
-      tests, coverage, logFile, seconds: (Date.now() - start) / 1000,
+      tests, coverage, logFile, seconds: (Date.now() - start) / 1000, coverageWarnings,
       excerpt: r.ok && !noTests ? "" : noTests ? "No tests found for given includes (class name / package mismatch?)" : errorExcerpt(out),
-      infraError: infra && !compileFailed ? infra : undefined,
+      infraError: r.timedOut ? "timeout" : infra && !compileFailed ? infra : undefined,
     };
   }
 

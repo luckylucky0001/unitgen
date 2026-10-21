@@ -269,7 +269,7 @@ export class SwiftPMAdapter implements Adapter {
       // No --filter: with the CLT toolchain Swift Testing ignores SwiftPM's filter ("No matching test
       // cases"). Isolated runs already drop every non-generated test target via the runtime manifest,
       // and coverage gains are computed against baseline + accepted, so co-running accepted files is harmless.
-      const r = run(args, { cwd: this.root, timeoutSec: 3600, logFile });
+      const r = run(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
       const out = stripAnsi(r.out);
       const tests = parseSwiftTestOutput(out);
       const compiled = !/error: (emit-module|compile|link)|error: fatalError|: error: /.test(out) || tests.length > 0;
