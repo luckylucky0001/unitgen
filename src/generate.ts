@@ -20,7 +20,7 @@ export async function generate(adapter: Adapter, state: State, llm: LlmBackend, 
   const mods = opts.module ? adapter.modules().filter((m) => m.name === opts.module) : undefined;
   const targets = opts.files?.length
     ? opts.files.map((f) => path.resolve(f))
-    : rankTargets(adapter, state.knownCoverage, { modules: mods }).slice(0, opts.limit).map((t) => t.file);
+    : rankTargets(adapter, state.knownCoverage(), { modules: mods }).slice(0, opts.limit).map((t) => t.file);
   const results: VerifyResult[] = [];
   for (const [i, src] of targets.entries()) {
     log(`[${i + 1}/${targets.length}] ${relPath(src, adapter.root)} (model: ${llm.name})`);

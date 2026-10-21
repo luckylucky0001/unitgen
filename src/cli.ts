@@ -113,7 +113,7 @@ async function main(argv: string[]): Promise<number> {
     }
     case "targets": {
       if (!state.hasBaseline()) log("no baseline yet: line counts are estimates. Run `unitgen baseline` first for real coverage.");
-      const ts = rankTargets(adapter, state.knownCoverage, { modules: mods, includeKinds: o["all-kinds"] ? ["logic", "model", "di", "ui", "entry", "platform"] : undefined });
+      const ts = rankTargets(adapter, state.knownCoverage(), { modules: mods, includeKinds: o["all-kinds"] ? ["logic", "model", "di", "ui", "entry", "platform"] : undefined });
       const lim = Number(o.limit ?? 20);
       print(formatTargets(ts.slice(0, lim), root), ts.slice(0, lim).map(({ uncoveredLines, ...t }) => t));
       return 0;

@@ -6,7 +6,7 @@ import { relPath } from "./util.ts";
 
 export function buildReport(adapter: Adapter, state: State): string {
   const base = state.baselineCoverage;
-  const now = mergeCoverage(base, state.acceptedCoverage);
+  const now = mergeCoverage(base, state.acceptedCoverage());
   const files = [...new Set(adapter.modules().flatMap((m) => adapter.sourceFiles(m)))].filter((f) => !f.includes("UnitGen"));
   const b = summarize(base, files.filter((f) => base[f] || now[f]));
   const a = summarize(now, files.filter((f) => base[f] || now[f]));

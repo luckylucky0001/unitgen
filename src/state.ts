@@ -62,17 +62,27 @@ export class State {
     writeJson(this.file("baseline.cov.json"), c);
   }
 
-  get acceptedCoverage(): Coverage {
-    return readJson<Coverage>(this.file("accepted.cov.json"), {});
+  /** Covered lines contributed by each accepted test file (key: test file relative to root). */
+  get perTestCoverage(): Record<string, Coverage> {
+    return readJson<Record<string, Coverage>>(this.file("accepted.cov.json"), {});
   }
 
-  set acceptedCoverage(c: Coverage) {
-    writeJson(this.file("accepted.cov.json"), c);
+  setTestCoverage(testFile: string, c: Coverage | undefined): void {
+    const all = this.perTestCoverage;
+    if (c) all[testFile] = c;
+    else delete all[testFile];
+    writeJson(this.file("accepted.cov.json"), all);
   }
 
-  /** Baseline plus everything unitgen already accepted. */
-  get knownCoverage(): Coverage {
-    return mergeCoverage(this.baselineCoverage, this.acceptedCoverage);
+  /** Union of what every accepted test file covers, optionally leaving one file out. */
+  acceptedCoverage(except?: string): Coverage {
+    const all = this.perTestCoverage;
+    return mergeCoverage(...Object.entries(all).filter(([k]) => k !== except).map(([, v]) => v));
+  }
+
+  /** Baseline plus everything unitgen already accepted (optionally excluding one test file). */
+  knownCoverage(except?: string): Coverage {
+    return mergeCoverage(this.baselineCoverage, this.acceptedCoverage(except));
   }
 
   hasBaseline(): boolean {

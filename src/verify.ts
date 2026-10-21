@@ -3,7 +3,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Adapter, TestCase, TestRun } from "./adapters/types.ts";
-import { type Coverage, mergeCoverage, newlyCovered, ranges } from "./coverage.ts";
+import { type Coverage, newlyCovered, ranges } from "./coverage.ts";
 import type { State } from "./state.ts";
 import { exists, readFile, relPath } from "./util.ts";
 
@@ -35,9 +35,10 @@ export interface VerifyOpts {
 }
 
 function suiteTests(run: TestRun, adapter: Adapter, testFile: string): TestCase[] {
-  const base = path.basename(testFile).replace(/\.\w+$/, "").replace(/\.test$/, "");
-  const mine = run.tests.filter((t) => t.name.includes(base) || t.file === testFile);
-  // Swift Testing reports bare function names when tests are not wrapped in a suite.
+  const base = path.basename(testFile).replace(/\.\w+$/, "").replace(/\.test$/, "").replace(/\.unitgen$/, "");
+  const re = new RegExp(`(^|[.\\s/>])${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([.\\s/>]|$)`);
+  const mine = run.tests.filter((t) => t.file === testFile || re.test(t.name));
+  // Swift Testing reports bare function names (no suite), so fall back to everything that ran.
   return mine.length ? mine : run.tests;
 }
 
@@ -95,7 +96,8 @@ export function verify(adapter: Adapter, state: State, testFile: string, opts: V
     }
   }
   const cand: Coverage = run.coverage ?? {};
-  const known = state.knownCoverage;
+  const relTest = relPath(abs, adapter.root);
+  const known = state.knownCoverage(relTest);
   // Gains of the generated file itself: don't count lines our previously accepted tests already hit.
   const gained = newlyCovered(known, cand);
   const gainedLines = Object.values(gained).reduce((a, b) => a + b.length, 0);
@@ -104,19 +106,8 @@ export function verify(adapter: Adapter, state: State, testFile: string, opts: V
     return res("no_gain", { tests, logFile: run.logFile, suspects, feedback: "All tests pass but they cover no line that was not already covered. Target the lines marked \"!\" in the brief." });
   }
   const r = res("accepted", { tests, gained, gainedLines, targetGained, logFile: run.logFile, suspects });
-  if (opts.record !== false) {
-    state.acceptedCoverage = mergeCoverage(state.acceptedCoverage, filterCovered(cand));
-  }
+  if (opts.record !== false) state.setTestCoverage(relTest, cand);
   return r;
-}
-
-function filterCovered(c: Coverage): Coverage {
-  const out: Coverage = {};
-  for (const [f, lines] of Object.entries(c)) {
-    const hit = Object.entries(lines).filter(([, h]) => h > 0);
-    if (hit.length) out[f] = Object.fromEntries(hit.map(([l, h]) => [Number(l), h]));
-  }
-  return out;
 }
 
 function finish(adapter: Adapter, state: State, r: VerifyResult, opts: VerifyOpts): void {

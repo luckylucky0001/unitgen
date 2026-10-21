@@ -76,7 +76,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
   const m = adapter.moduleFor(abs);
   if (!m) throw new Error(`${source} is not inside any detected module`);
   const text = readFile(abs);
-  const cov = state.knownCoverage;
+  const cov = state.knownCoverage();
   const measured = cov[abs] !== undefined;
   const exec = measured ? executableLines(cov, abs) : new Set(estimateExecutable(text));
   const covered = measured ? coveredLines(cov, abs) : new Set<number>();

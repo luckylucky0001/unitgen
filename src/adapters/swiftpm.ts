@@ -154,6 +154,8 @@ export class SwiftPMAdapter implements Adapter {
       "Tests run on macOS via `swift test`: do not use UIKit/AppKit, the network, the real file system outside a temporary directory, or timers.",
       "Use parameterized tests (`@Test(arguments: [...])`) for tables of inputs.",
       "Floating point: compare with a tolerance, e.g. `#expect(abs(x - 0.3) < 1e-9)`.",
+      "Name clashes: Foundation (macOS 15+) defines types such as `Expression`, `Predicate`, `Measurement`. Only `import Foundation` when needed; if a type annotation is ambiguous, avoid the annotation or qualify it.",
+      "Give closures in dictionary/array literals explicit types (`let f: SymbolEvaluator = { args in ... }`) — the type checker cannot infer multi-statement closures there.",
     ].join("\n");
   }
 
@@ -245,11 +247,9 @@ export class SwiftPMAdapter implements Adapter {
         args.push("-Xswiftc", `-F${t.frameworksDir}`, "-Xlinker", `-F${t.frameworksDir}`,
           "-Xlinker", "-rpath", "-Xlinker", t.frameworksDir, "-Xlinker", "-rpath", "-Xlinker", t.libDir!);
       }
-      if (ours) {
-        const suites = [...new Set(req.testFiles!.map((f) => path.basename(f, ".swift")))];
-        // Swift Testing / XCTest both accept a regex filter over "<Target>.<Suite>/<test>".
-        args.push("--filter", suites.map((s) => `\\b${s}\\b`).join("|"));
-      }
+      // No --filter: with the CLT toolchain Swift Testing ignores SwiftPM's filter ("No matching test
+      // cases"). Isolated runs already drop every non-generated test target via the runtime manifest,
+      // and coverage gains are computed against baseline + accepted, so co-running accepted files is harmless.
       const r = run(args, { cwd: this.root, timeoutSec: 3600, logFile });
       const out = stripAnsi(r.out);
       const tests = parseSwiftTestOutput(out);
@@ -282,20 +282,22 @@ export class SwiftPMAdapter implements Adapter {
 export function parseSwiftTestOutput(out: string): TestCase[] {
   const byName = new Map<string, TestCase>();
   for (const line of out.split("\n")) {
-    let m = /^[✔✘􁁛􀢄◇↳]?\s*Test (.+?) (passed|failed|skipped)\b/.exec(line.trim());
-    if (m && !/^run with/.test(m[1])) {
-      const name = m[1].replace(/\s+(with \d+ (test cases|issues?)|after [\d.]+ seconds).*$/, "");
-      const prev = byName.get(name);
-      byName.set(name, { name, status: m[2] as TestCase["status"], message: prev?.message });
-      continue;
-    }
-    m = /^[✘􀢄]\s*Test (.+?) recorded an issue(?: with \d+ arguments? .*?)? at (.+?): (.+)$/.exec(line.trim());
+    // Issue lines first: "✘ Test foo() recorded an issue at F.swift:12:3: Expectation failed: ..." also contains "failed".
+    let m = /^[✘􀢄]\s*Test (.+?) recorded an issue(?: with \d+ arguments? .*?)? at (\S+?:\d+:\d+): (.+)$/.exec(line.trim());
     if (m) {
       const name = m[1];
       const prev = byName.get(name) ?? { name, status: "failed" as const };
       prev.status = "failed";
       prev.message = ((prev.message ? prev.message + "\n" : "") + `${m[2]}: ${m[3]}`).slice(0, 2000);
       byName.set(name, prev);
+      continue;
+    }
+    m = /^[✔✘􁁛􀢄↷]\s*Test (?!run with|case )(.+?) (passed|failed|skipped)(?: after| with|\.|$)/.exec(line.trim());
+    if (m) {
+      const name = m[1];
+      const prev = byName.get(name);
+      const status = prev?.status === "failed" ? "failed" : (m[2] as TestCase["status"]);
+      byName.set(name, { name, status, message: prev?.message });
       continue;
     }
     m = /^Test Case '-\[(\S+) (\S+)\]' (passed|failed|skipped)/.exec(line.trim());
