@@ -105,7 +105,7 @@ export function parseLlvmCovJson(json: any, keep: (file: string) => boolean = ()
         const isStartOfRegion = (s: Seg) => s[3] && s[4] && !s[5];
         const minRegionCount = starts.filter(isStartOfRegion).length;
         const startOfSkipped = starts.length > 0 && !starts[0][3] && starts[0][4];
-        const mapped = !startOfSkipped && ((wrapped !== undefined && wrapped[3] && !wrapped[5]) || minRegionCount > 0);
+        const mapped = !startOfSkipped && ((wrapped !== undefined && wrapped[3]) || minRegionCount > 0);
         if (mapped) {
           let count = wrapped && wrapped[3] ? wrapped[2] : 0;
           for (const s of starts) if (isStartOfRegion(s)) count = Math.max(count, s[2]);

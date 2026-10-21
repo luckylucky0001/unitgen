@@ -260,7 +260,7 @@ export class SwiftPMAdapter implements Adapter {
         if (exists(p)) {
           const dirs = mods.map((m) => m.dir + path.sep);
           coverage = parseLlvmCovJson(JSON.parse(readFile(p)), (f) => dirs.some((d) => f.startsWith(d)));
-          fs.unlinkSync(p);
+          if (process.env.UNITGEN_KEEP_COV !== "1") fs.unlinkSync(p);
         }
       }
       const infraError = r.timedOut ? "timeout" : /no such module 'XCTest'/.test(out) && !ours ? "XCTest unavailable" : undefined;
@@ -294,7 +294,7 @@ export function parseSwiftTestOutput(out: string): TestCase[] {
     }
     m = /^[✔✘􁁛􀢄↷]\s*Test (?!run with|case )(.+?) (passed|failed|skipped)(?: after| with|\.|$)/.exec(line.trim());
     if (m) {
-      const name = m[1];
+      const name = m[1].replace(/ with \d+ test cases?$/, "");
       const prev = byName.get(name);
       const status = prev?.status === "failed" ? "failed" : (m[2] as TestCase["status"]);
       byName.set(name, { name, status, message: prev?.message });

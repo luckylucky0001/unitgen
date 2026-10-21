@@ -324,12 +324,14 @@ export function parseJUnitXmlDir(dir: string): TestCase[] {
     const xml = readFile(path.join(dir, f));
     for (const m of xml.matchAll(/<testcase name="([^"]*)" classname="([^"]*)"[^>]*?(\/>|>([\s\S]*?)<\/testcase>)/g)) {
       const body = m[4] ?? "";
-      const fail = /<(failure|error)[^>]*?(?:message="([^"]*)")?[^>]*>([\s\S]*?)<\/(failure|error)>/.exec(body) ?? /<(failure|error)[^>]*message="([^"]*)"/.exec(body);
+      const fail = /<(failure|error)\b([^>]*)>([\s\S]*?)<\/(?:failure|error)>|<(failure|error)\b([^>]*)\/>/.exec(body);
+      const attrs = fail ? (fail[2] ?? fail[5] ?? "") : "";
+      const msgAttr = /message="([^"]*)"/.exec(attrs)?.[1] ?? "";
       const skipped = /<skipped/.test(body);
       out.push({
         name: `${m[2]}.${m[1]}`,
         status: fail ? "failed" : skipped ? "skipped" : "passed",
-        message: fail ? decodeXml((fail[2] ?? "") + "\n" + (fail[3] ?? "")).trim().split("\n").slice(0, 12).join("\n") : undefined,
+        message: fail ? decodeXml(`${msgAttr}\n${fail[3] ?? ""}`).trim().split("\n").slice(0, 12).join("\n") : undefined,
       });
     }
   }
