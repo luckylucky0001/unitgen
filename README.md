@@ -41,7 +41,7 @@ unitgen 采用的就是调研结论推荐的路线：平台无关的 LLM 闭环 
 
 ```bash
 cd ~/Documents/unitgen && npm install        # 只为类型检查和鸿蒙 shim（typescript）
-export PATH="$HOME/Documents/unitgen/bin:$PATH"
+ln -sfn ~/Documents/unitgen/bin/unitgen ~/.local/bin/unitgen   # 确保 ~/.local/bin 在 PATH 里
 
 cd <你的工程>
 unitgen doctor        # 识别工程类型、检查工具链
@@ -54,7 +54,7 @@ unitgen reject <测试文件> "原因"       # 放弃并隔离
 unitgen report        # .unitgen/REPORT.md
 ```
 
-需要 Node ≥ 22.18（直接运行 TypeScript 源码，无构建步骤）。
+需要 Node ≥ 22.18（直接运行 TypeScript 源码，无构建步骤）。如果仓库旁边有 `unitgen-env/env.sh`（本机就是），`bin/unitgen` 会自动用里面的 Node 24 / JDK 17 / Android SDK 路径，只对 unitgen 进程生效。
 
 ### 作为 Claude Code Skill 使用
 

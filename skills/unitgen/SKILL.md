@@ -13,11 +13,12 @@ doubles and example tests), then runs a strict gate on every test file you write
 ## Setup
 
 ```bash
-UNITGEN="${UNITGEN:-$HOME/Documents/unitgen/bin/unitgen}"   # adjust if installed elsewhere
+UNITGEN="${UNITGEN:-$(command -v unitgen || echo "$HOME/Documents/unitgen/bin/unitgen")}"
 "$UNITGEN" doctor -C <project-root>
 ```
 
-Needs Node >= 22.18 (runs the TypeScript sources directly). `doctor` checks the platform
+Needs Node >= 22.18 (runs the TypeScript sources directly); `bin/unitgen` uses the Node/JDK in
+`../unitgen-env` automatically when present, so no extra environment setup is needed. `doctor` checks the platform
 toolchain: Swift (Xcode or Command Line Tools), JDK 17+ and Android SDK, or hvigor (falls back
 to a Node shim for ArkTS pure logic). Fix whatever it reports before continuing; do not
 work around a missing toolchain by skipping verification.

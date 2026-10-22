@@ -1,4 +1,16 @@
 #!/bin/sh
 # Runs the TypeScript sources directly via Node's built-in type stripping (Node >= 22.18).
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# If unitgen-env exists next to the checkout (Node/JDK installed for unitgen), use it for this
+# process only, so no shell profile changes are needed.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+done
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+ENV_SH="${UNITGEN_ENV:-$DIR/../unitgen-env/env.sh}"
+if [ -f "$ENV_SH" ]; then
+  # shellcheck disable=SC1090
+  . "$ENV_SH"
+fi
 exec node --disable-warning=ExperimentalWarning "$DIR/src/cli.ts" "$@"
