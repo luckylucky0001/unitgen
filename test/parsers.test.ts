@@ -152,3 +152,39 @@ test("v8LineCoverage: a line is covered only if all its code ran (switch cases a
   assert.equal(cov[4], 0);
   assert.equal(cov[2], 1);
 });
+
+test("xcresult test tree -> cases", async () => {
+  const { parseXcresultNodes } = await import("../src/adapters/xcode.ts");
+  const nodes = [{ nodeType: "Test Plan", children: [{ nodeType: "Unit test bundle", name: "AppTests", children: [{ nodeType: "Test Suite", name: "FooUnitGenTests", children: [
+    { nodeType: "Test Case", name: "testA()", result: "Passed" },
+    { nodeType: "Test Case", name: "testB()", result: "Failed", children: [{ nodeType: "Failure Message", name: "Foo.swift:12: XCTAssertEqual failed: (\"1\") is not equal to (\"2\")" }] },
+  ] }] }] }];
+  const t = parseXcresultNodes(nodes);
+  assert.deepEqual(t.map((x) => [x.name, x.status]), [["FooUnitGenTests.testA()", "passed"], ["FooUnitGenTests.testB()", "failed"]]);
+  assert.match(t[1].message!, /XCTAssertEqual failed/);
+});
+
+test("pbxproj: add and remove a test file round-trips", async () => {
+  const { Pbxproj } = await import("../src/adapters/pbxproj.ts");
+  const txt = [
+    "// !$*UTF8*$!", "{", "\tobjects = {", "",
+    "/* Begin PBXBuildFile section */",
+    "\t\tDD0000000000000000000001 /* ATests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000001 /* ATests.swift */; };",
+    "/* End PBXBuildFile section */", "",
+    "/* Begin PBXFileReference section */",
+    "\t\tEE0000000000000000000001 /* ATests.swift */ = {isa = PBXFileReference; path = ATests.swift; sourceTree = \"<group>\"; };",
+    "/* End PBXFileReference section */", "",
+    "\t\tAA0000000000000000000000 = {", "\t\t\tisa = PBXGroup;", "\t\t\tchildren = (", "\t\t\t\tAA0000000000000000000001 /* Tests */,", "\t\t\t);", "\t\t\tsourceTree = \"<group>\";", "\t\t};",
+    "\t\tAA0000000000000000000001 /* Tests */ = {", "\t\t\tisa = PBXGroup;", "\t\t\tchildren = (", "\t\t\t\tEE0000000000000000000001 /* ATests.swift */,", "\t\t\t);", "\t\t\tpath = Tests;", "\t\t\tsourceTree = \"<group>\";", "\t\t};",
+    "\t\tBB0000000000000000000001 /* Sources */ = {", "\t\t\tisa = PBXSourcesBuildPhase;", "\t\t\tfiles = (", "\t\t\t\tDD0000000000000000000001 /* ATests.swift in Sources */,", "\t\t\t);", "\t\t};",
+    "\t\tCC0000000000000000000001 /* ATests */ = {", "\t\t\tisa = PBXNativeTarget;", "\t\t\tbuildPhases = (", "\t\t\t\tBB0000000000000000000001 /* Sources */,", "\t\t\t);", "\t\t\tname = ATests;", "\t\t\tproductType = \"com.apple.product-type.bundle.unit-test\";", "\t\t};",
+    "\t};", "}",
+  ].join("\n");
+  const p = new Pbxproj(txt, "/proj");
+  const t = p.targets()[0];
+  assert.deepEqual(t.files, ["/proj/Tests/ATests.swift"]);
+  const ids = p.addSourceFile(t, "/proj/Tests/BUnitGenTests.swift")!;
+  assert.deepEqual(p.targets()[0].files, ["/proj/Tests/ATests.swift", "/proj/Tests/BUnitGenTests.swift"]);
+  p.removeIds([ids.fileRef, ids.buildFile]);
+  assert.equal(p.text, txt);
+});
