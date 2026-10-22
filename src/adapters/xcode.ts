@@ -86,7 +86,10 @@ export class XcodeAdapter implements Adapter {
       const files = t.files.filter((f) => f.endsWith(".swift"));
       const dirs = [...t.syncedDirs, ...commonDirs(files)];
       if (!dirs.length) continue;
-      const test = tests.find((x) => x.name === `${t.name}Tests`) ?? tests.find((x) => x.files.some((f) => exists(f) && new RegExp(`@testable\\s+import\\s+${t.name}\\b`).test(readFile(f))));
+      const imports = (f: string) => f.endsWith(".swift") && exists(f) && new RegExp(`@testable\\s+import\\s+${productModule(t.name)}\\b`).test(readFile(f));
+      const test = tests.find((x) => x.name === `${t.name}Tests`)
+        ?? tests.find((x) => [...x.files, ...x.syncedDirs.flatMap((d) => walkFiles(d, [".swift"]))].some(imports))
+        ?? (tests.length === 1 && code.length === 1 ? tests[0] : undefined);
       const testDir = test ? (test.syncedDirs[0] ?? commonDirs(test.files.filter((f) => f.endsWith(".swift")))[0]) : undefined;
       out.push({
         name: t.name, dir: dirs[0], sourceRoots: dirs, testRoot: testDir ?? path.join(this.root, `${t.name}Tests`),
@@ -126,11 +129,14 @@ export class XcodeAdapter implements Adapter {
   }
 
   conventions(m: Module): string {
-    const existing = (this.project().targets().find((t) => t.name === m.meta?.testTarget)?.files ?? []).filter((f) => f.endsWith(".swift") && exists(f));
+    const existing = this.exampleTests(m).concat((this.project().targets().find((t) => t.name === m.meta?.testTarget)?.syncedDirs ?? []).flatMap((d) => walkFiles(d, [".swift"])));
     const usesXCTest = existing.some((f) => /import XCTest/.test(readFile(f)));
+    const usesTesting = existing.some((f) => /import Testing\b/.test(readFile(f)));
     return [
       `Platform: Xcode target \`${m.name}\` (${m.kind}); tests go into the unit-test target \`${m.meta?.testTarget}\` (${relPath(m.testRoot, this.root)}).`,
-      usesXCTest
+      usesTesting
+        ? "Use Swift Testing like the existing tests (`import Testing`, `@Suite struct`, `@Test`, `#expect`, `#require`)."
+        : usesXCTest
         ? "Use XCTest like the existing tests (`final class FooUnitGenTests: XCTestCase`, `func testX()`, XCTAssert*). Swift Testing also works if you prefer it."
         : "Use Swift Testing (`import Testing`, `@Suite struct`, `@Test`, `#expect`) or XCTest.",
       `Import the module with \`@testable import ${productModule(m.name)}\`.`,
