@@ -36,6 +36,12 @@ export interface MutationReport {
   candidates: number;
 }
 
+export function mutationGate(r: MutationReport, minimum = 80): { status: "PASSED" | "FAILED" | "NOT_APPLICABLE"; minimum: number } {
+  const status = r.candidates === 0 || (r.results.length > 0 && r.results.every((x) => x.outcome === "equivalent")) ? "NOT_APPLICABLE"
+    : r.results.some((x) => x.outcome === "error") || r.killed + r.survived === 0 || r.score * 100 < minimum ? "FAILED" : "PASSED";
+  return { status, minimum };
+}
+
 // [name, pattern, replacement]. Patterns require surrounding spaces where a token is ambiguous
 // (generics `<T>`, arrows `->`/`=>`, unary minus, `++`).
 const OPERATORS: [string, RegExp, string][] = [
@@ -163,7 +169,7 @@ export function recover(state: State): void {
   fs.unlinkSync(journal(state));
 }
 
-export function mutate(adapter: Adapter, state: State, testFile: string, target: string, max = 15): MutationReport {
+export async function mutate(adapter: Adapter, state: State, testFile: string, target: string, max = 15): Promise<MutationReport> {
   recover(state);
   const absTest = path.resolve(testFile);
   const absTarget = path.resolve(target);
@@ -200,19 +206,19 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
   fs.copyFileSync(absTarget, backup);
   writeFile(journal(state), JSON.stringify({ target: absTarget, backup }));
   const results: MutantResult[] = [];
-  const clean = adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: "mutant-0-clean" });
-  if (!clean.ok || clean.tests.some((t) => t.status === "failed")) {
-    throw new Error(`${relTest} does not pass on the unmodified code; fix it (unitgen verify) before mutating`);
-  }
-  // Mutants can loop forever (e.g. a binary search bound): cap each run and count a timeout as killed.
-  const timeoutSec = Math.max(60, Math.ceil(clean.seconds * 4) + 30);
   try {
+    const clean = await adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: "mutant-0-clean" });
+    if (!clean.ok || clean.tests.some((t) => t.status === "failed")) {
+      throw new Error(`${relTest} does not pass on the unmodified code; fix it (unitgen verify) before mutating`);
+    }
+    // Mutants can loop forever (e.g. a binary search bound): cap each run and count a timeout as killed.
+    const timeoutSec = Math.max(60, Math.ceil(clean.seconds * 4) + 30);
     for (const [i, mu] of candidates.entries()) {
       if (results.filter((r) => r.outcome !== "stillborn").length >= max) break;
       const lines2 = original.split("\n");
       lines2.splice(mu.line - 1, (mu.endLine ?? mu.line) - mu.line + 1, mu.mutated);
       fs.writeFileSync(absTarget, lines2.join("\n"));
-      const r = adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: `mutant-${i + 1}`, timeoutSec });
+      const r = await adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: `mutant-${i + 1}`, timeoutSec });
       let outcome: MutantResult["outcome"];
       if (r.infraError === "timeout" || /TIMEOUT after/.test(r.excerpt)) outcome = "killed";
       else if (r.infraError) outcome = "error";
@@ -258,6 +264,7 @@ export function mutate(adapter: Adapter, state: State, testFile: string, target:
 }
 
 export function formatMutation(r: MutationReport): string {
+  if (!r.candidates) return `mutation: NOT_APPLICABLE — ${r.feedback}`;
   const sampled = r.results.length;
   const note = r.candidates > sampled ? `\nsampled ${sampled} of ${r.candidates} possible mutants; use --max ${r.candidates} for all` : "";
   const head0 = `mutation score: ${(r.score * 100).toFixed(0)}%  (killed ${r.killed}${r.crashes ? `, of which ${r.crashes} only by a crash, not an assertion` : ""}, survived ${r.survived}, did not compile ${r.stillborn})  ${r.testFile} -> ${r.target}`;

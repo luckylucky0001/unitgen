@@ -1,3 +1,4 @@
+import { runAsync } from "../util.ts";
 // iOS / macOS Xcode projects (.xcodeproj / .xcworkspace) via `xcodebuild test` + xccov.
 //
 // Generated tests go into the module's existing unit-test target. Targets that use Xcode 16
@@ -224,7 +225,7 @@ export class XcodeAdapter implements Adapter {
     return sim ? `platform=iOS Simulator,id=${sim.udid}` : undefined;
   }
 
-  runTests(req: RunRequest): TestRun {
+  async runTests(req: RunRequest): Promise<TestRun> {
     const start = Date.now();
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
     let mods = req.modules ?? this.modules();
@@ -249,13 +250,13 @@ export class XcodeAdapter implements Adapter {
     } else if (m.meta?.testTarget) {
       for (const x of mods) if (x.meta?.testTarget) args.push(`-only-testing:${x.meta.testTarget}`);
     }
-    const r = run(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
+    const r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
     const out = stripAnsi(r.out);
     const tests = exists(bundle) ? xcresultTests(bundle) : [];
     const compiled = !/error: |\*\* BUILD FAILED \*\*|Testing cancelled because the build failed/.test(out) || tests.length > 0;
     let coverage;
     if (req.coverage && exists(bundle)) {
-      const c = run(["xcrun", "xccov", "view", "--archive", "--json", bundle], { timeoutSec: 600 });
+      const c = await runAsync(["xcrun", "xccov", "view", "--archive", "--json", bundle], { timeoutSec: 600 });
       if (c.ok) {
         const keep = new Set(mods.flatMap((x) => this.sourceFiles(x)));
         coverage = parseXccovArchiveJson(JSON.parse(c.out), (f) => keep.has(f));

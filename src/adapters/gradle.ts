@@ -1,3 +1,4 @@
+import { runAsync } from "../util.ts";
 // Android (AGP) and plain JVM Kotlin/Java modules via Gradle + JaCoCo (injected init script).
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -38,19 +39,28 @@ export class GradleAdapter implements Adapter {
   doctor(): Doctor {
     const lines: string[] = [];
     let ok = true;
-    const j = run(["java", "-version"]);
+    const hasAndroid = this.modules().some((m) => m.kind === "android");
+    const java = process.env.JAVA_HOME ? path.join(process.env.JAVA_HOME, "bin", process.platform === "win32" ? "java.exe" : "java") : "java";
+    const j = run([java, "-version"]);
     if (!j.ok) {
       ok = false;
       lines.push("java not found: set JAVA_HOME to a JDK 17+ (Android Gradle Plugin 8+ requirement)");
     } else {
       lines.push(`java: ${j.out.split("\n")[0]}`);
+      const version = /version "(?:1\.)?(\d+)/.exec(j.out);
+      if (hasAndroid && (!version || Number(version[1]) < 17)) {
+        ok = false;
+        lines.push("JDK 17+ required: configure JAVA_HOME (the same JDK used by Gradle)");
+      }
     }
     const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
     const lp = path.join(this.root, "local.properties");
-    const hasAndroid = this.modules().some((m) => m.kind === "android");
     if (hasAndroid && !sdk && !(exists(lp) && /sdk\.dir/.test(readFile(lp)))) {
       ok = false;
       lines.push("Android modules found but no SDK: set ANDROID_HOME or sdk.dir in local.properties");
+    } else if (hasAndroid && sdk && !exists(path.join(sdk, "platforms"))) {
+      ok = false;
+      lines.push(`Android SDK platforms directory not found: ${sdk}`);
     } else if (hasAndroid) {
       lines.push(`android sdk: ${sdk ?? "(local.properties)"}`);
     }
@@ -233,12 +243,12 @@ export class GradleAdapter implements Adapter {
   }
 
   /** Map module -> preferred unit-test task (cached `tasks --all` output). */
-  private testTasks(): Record<string, string | undefined> {
+  private async testTasks(): Promise<Record<string, string | undefined>> {
     const cache = path.join(this.stateDir, "gradle-test-tasks.json");
     const settingsMtime = this.modules().map((m) => fs.statSync(m.meta!.buildFile).mtimeMs).join(",");
     const c = readJson<{ key: string; tasks: Record<string, string | undefined> } | null>(cache, null);
     if (c && c.key === settingsMtime) return c.tasks;
-    const r = run([...this.gradlew(), "-q", "tasks", "--all", ...COMPAT], { cwd: this.root, timeoutSec: 1800, logFile: path.join(this.stateDir, "logs", "gradle-tasks.log") });
+    const r = await runAsync([...this.gradlew(), "-q", "tasks", "--all", ...COMPAT], { cwd: this.root, timeoutSec: 1800, logFile: path.join(this.stateDir, "logs", "gradle-tasks.log") });
     const byMod: Record<string, string[]> = {};
     for (const line of stripAnsi(r.out).split("\n")) {
       const m = /^([\w:.-]*?):?(test[A-Za-z0-9]*)\s+-\s/.exec(line.trim());
@@ -264,7 +274,7 @@ export class GradleAdapter implements Adapter {
     return pkg ? `${pkg}.${cls}` : cls;
   }
 
-  runTests(req: RunRequest): TestRun {
+  async runTests(req: RunRequest): Promise<TestRun> {
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
     const start = Date.now();
     let mods = req.modules ?? this.modules();
@@ -272,7 +282,7 @@ export class GradleAdapter implements Adapter {
       const owners = new Set(req.testFiles.map((f) => this.moduleFor(f)?.name));
       mods = this.modules().filter((m) => owners.has(m.name));
     }
-    const tasks = this.testTasks();
+    const tasks = await this.testTasks();
     mods = mods.filter((m) => tasks[m.name]);
     if (!mods.length) {
       return { ok: false, compiled: true, tests: [], logFile, excerpt: "no unit-test task found for the selected module(s)", seconds: 0, infraError: "no unit-test task" };
@@ -293,7 +303,7 @@ export class GradleAdapter implements Adapter {
       fs.rmSync(path.join(m.dir, "build", "test-results", tasks[m.name]!), { recursive: true, force: true });
       fs.rmSync(path.join(m.dir, "build", "unitgen"), { recursive: true, force: true });
     }
-    const r = run(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
+    const r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
     let out = r.out;
     out = stripAnsi(out);
     const tests: TestCase[] = [];

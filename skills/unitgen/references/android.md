@@ -32,3 +32,9 @@
   or `toBuilder()`; proto3 scalars default to `0`/`false`/`""`, not Kotlin defaults.
 - `internal` classes are visible from tests in the same module.
 - Use the assertion library the module's existing tests use (kotlin.test, Truth, JUnit).
+- Before asserting on DTOs, read their definitions and mapping functions: a network model
+  may use different property names or an enum instead of the domain model's boolean.
+- Inspect existing fakes for TODO/unsupported methods. Use a test-local implementation for
+  missing Flow behaviour. Assert persistence/synchronization side effects on the collaborator,
+  not only that the repository's local data changed.
+- This adapter validates JVM local tests, not APK installation, device APIs, or Compose UI.

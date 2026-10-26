@@ -1,6 +1,6 @@
 // Pluggable model backends for `unitgen generate`. The skill path does not use these: there,
 // the coding agent itself writes the test and calls `unitgen verify`.
-import { run, which } from "./util.ts";
+import { runAsync, runSignal, which } from "./util.ts";
 
 export interface LlmBackend {
   name: string;
@@ -20,6 +20,7 @@ function anthropic(model: string): LlmBackend {
     name: `anthropic:${model}`,
     async complete(prompt) {
       const res = await fetch(`${process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com"}/v1/messages`, {
+        signal: runSignal,
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -41,7 +42,7 @@ function claudeCli(model?: string): LlmBackend {
     async complete(prompt) {
       const args = ["claude", "-p", "--output-format", "text"];
       if (model) args.push("--model", model);
-      const r = run(args, { input: prompt, timeoutSec: 900 });
+      const r = await runAsync(args, { input: prompt, timeoutSec: 900 });
       if (!r.ok) throw new Error(`claude -p failed: ${r.out.slice(0, 500)}`);
       return r.out;
     },
@@ -52,7 +53,7 @@ function command(cmd: string): LlmBackend {
   return {
     name: `cmd:${cmd}`,
     async complete(prompt) {
-      const r = run(["sh", "-c", cmd], { input: prompt, timeoutSec: 900 });
+      const r = await runAsync(["sh", "-c", cmd], { input: prompt, timeoutSec: 900 });
       if (!r.ok) throw new Error(`model command failed: ${r.out.slice(0, 500)}`);
       return r.out;
     },

@@ -1,12 +1,14 @@
 // Fully automatic loop: rank -> brief -> model -> verify -> feedback -> retry -> keep or quarantine.
 import * as path from "node:path";
+import * as fs from "node:fs";
 import type { Adapter } from "./adapters/types.ts";
 import { buildBrief } from "./context.ts";
 import { extractCode, type LlmBackend } from "./llm.ts";
 import type { State } from "./state.ts";
 import { rankTargets } from "./targets.ts";
-import { log, relPath, writeFile } from "./util.ts";
-import { formatVerify, verify, type VerifyResult } from "./verify.ts";
+import { log, readJson, relPath, writeFile } from "./util.ts";
+import { formatVerify, quarantine, verify, type VerifyResult } from "./verify.ts";
+import { mutate, mutationGate } from "./mutate.ts";
 
 export interface GenerateOpts {
   limit: number;
@@ -14,6 +16,19 @@ export interface GenerateOpts {
   files?: string[];
   module?: string;
   reruns: number;
+  mutationMax?: number;
+  minMutationScore?: number;
+}
+
+/** A killed worker must not leave verify-only acceptance masquerading as a passed generation. */
+export function recoverGeneration(state: State): void {
+  const file = state.file("generation-in-progress.json");
+  const pending = readJson<{ testFile: string } | null>(file, null);
+  if (!pending) return;
+  state.data.accepted = state.data.accepted.filter((a) => a.testFile !== pending.testFile);
+  state.setTestCoverage(pending.testFile, undefined);
+  state.save();
+  fs.unlinkSync(file);
 }
 
 export async function generate(adapter: Adapter, state: State, llm: LlmBackend, opts: GenerateOpts): Promise<VerifyResult[]> {
@@ -30,12 +45,28 @@ export async function generate(adapter: Adapter, state: State, llm: LlmBackend, 
       const brief = buildBrief(adapter, state, src, { feedback });
       const reply = await llm.complete(brief.markdown);
       writeFile(brief.testPath, extractCode(reply));
-      last = verify(adapter, state, brief.testPath, {
+      last = await verify(adapter, state, brief.testPath, {
         target: src, reruns: opts.reruns, attempts: attempt,
         onFail: attempt === opts.attempts ? "quarantine" : "keep",
       });
       log(`  attempt ${attempt}: ${last.verdict}${last.verdict === "accepted" ? ` (+${last.gainedLines} lines)` : ""}`);
-      if (last.verdict === "accepted" || last.verdict === "infra_error") break;
+      if (last.verdict === "accepted") {
+        const pending = state.file("generation-in-progress.json");
+        writeFile(pending, JSON.stringify({ testFile: relPath(brief.testPath, adapter.root) }));
+        let mutation;
+        try { mutation = await mutate(adapter, state, brief.testPath, src, opts.mutationMax ?? 15); }
+        catch (e) {
+          recoverGeneration(state);
+          throw e;
+        }
+        const gate = mutationGate(mutation, opts.minMutationScore ?? 80);
+        if (gate.status !== "FAILED") { fs.unlinkSync(pending); break; }
+        last = { ...last, verdict: "mutation_failures", feedback: `Mutation gate failed (${Math.round(mutation.score * 100)}%). Strengthen assertions.\n${mutation.feedback}` };
+        // A model/infra error on the next attempt must not leave a failed quality gate accepted.
+        recoverGeneration(state);
+        if (attempt === opts.attempts) quarantine(adapter, state, brief.testPath, "mutation_failures", attempt, src);
+      }
+      if (last.verdict === "infra_error") break;
       feedback = last.feedback;
     }
     if (last) {

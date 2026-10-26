@@ -12,5 +12,17 @@ ENV_SH="${UNITGEN_ENV:-$DIR/../unitgen-env/env.sh}"
 if [ -f "$ENV_SH" ]; then
   # shellcheck disable=SC1090
   . "$ENV_SH"
+elif [ -n "${UNITGEN_ENV:-}" ]; then
+  echo "unitgen: UNITGEN_ENV file not found: $ENV_SH" >&2
+  exit 1
 fi
+if [ -n "${JAVA_HOME:-}" ]; then
+  PATH="$JAVA_HOME/bin:$PATH"
+  export PATH
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "unitgen: Node >= 22.18 is required; configure PATH or UNITGEN_ENV" >&2
+  exit 1
+fi
+node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 18)) { console.error("unitgen: Node >= 22.18 required; found " + process.versions.node); process.exit(1); }' || exit 1
 exec node --disable-warning=ExperimentalWarning "$DIR/src/cli.ts" "$@"
