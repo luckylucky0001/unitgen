@@ -37,12 +37,33 @@ unitgen 采用的就是调研结论推荐的路线：平台无关的 LLM 闭环 
 3. 变异测试作为比覆盖率更强的判据（ACH）；
 4. 丰富上下文：已有测试、项目自带 fake、可用测试库、构建约定。
 
+## 在一台新电脑上安装
+
+前置条件（只装你要用的平台对应的那部分）：
+
+| 用途 | 需要 |
+|---|---|
+| CLI 本身 | Node.js ≥ 22.18（`node -v` 检查） |
+| Android | JDK 17+（`JAVA_HOME`）、Android SDK（`ANDROID_HOME` 或工程里的 `local.properties`） |
+| iOS | Xcode（或仅 Command Line Tools：只能跑 Swift Package + Swift Testing） |
+| 鸿蒙 | 无额外要求（没有 DevEco 时用内置的 Node shim 跑纯逻辑；有 hvigor 则用 hvigor） |
+
+```bash
+git clone https://github.com/luckylucky0001/unitgen.git ~/unitgen
+cd ~/unitgen && npm install
+mkdir -p ~/.local/bin && ln -sfn ~/unitgen/bin/unitgen ~/.local/bin/unitgen
+export PATH="$HOME/.local/bin:$PATH"          # 写进 ~/.zshrc 可永久生效
+unitgen --help
+
+# 作为 Claude Code Skill（可选）
+mkdir -p ~/.claude/skills && ln -sfn ~/unitgen/skills/unitgen ~/.claude/skills/unitgen
+```
+
+演示建议：先在一个开源工程上跑 `unitgen doctor` → `baseline` → `targets`，再让 Claude Code 用 Skill 补 1–2 个文件，最后 `unitgen mutate` 和 `unitgen report`。Android 工程第一次构建会下载 Gradle 依赖，建议提前跑一次 `baseline` 预热。
+
 ## 快速开始
 
 ```bash
-cd ~/Documents/unitgen && npm install        # 只为类型检查和鸿蒙 shim（typescript）
-ln -sfn ~/Documents/unitgen/bin/unitgen ~/.local/bin/unitgen   # 确保 ~/.local/bin 在 PATH 里
-
 cd <你的工程>
 unitgen doctor        # 识别工程类型、检查工具链
 unitgen baseline      # 跑现有测试 + 覆盖率（一次）
@@ -59,7 +80,7 @@ unitgen report        # .unitgen/REPORT.md
 ### 作为 Claude Code Skill 使用
 
 ```bash
-mkdir -p ~/.claude/skills && ln -s ~/Documents/unitgen/skills/unitgen ~/.claude/skills/unitgen
+mkdir -p ~/.claude/skills && ln -sfn ~/unitgen/skills/unitgen ~/.claude/skills/unitgen
 ```
 
 然后在 Claude Code 里说「给这个工程补单测」即可；Skill 规定了完整流程、各 verdict 的处理方式和硬性规则（不改产品代码、不弱化断言等）。
