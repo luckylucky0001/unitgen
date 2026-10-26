@@ -13,7 +13,8 @@ doubles and example tests), then runs a strict gate on every test file you write
 ## Setup
 
 ```bash
-UNITGEN="${UNITGEN:-$(command -v unitgen || echo "$HOME/Documents/unitgen/bin/unitgen")}"
+UNITGEN="${UNITGEN:-$(command -v unitgen || true)}"
+[ -n "$UNITGEN" ] && [ -x "$UNITGEN" ] || { echo "Install unitgen or set UNITGEN to its absolute executable path" >&2; exit 1; }
 "$UNITGEN" doctor -C <project-root>
 ```
 
@@ -25,11 +26,25 @@ work around a missing toolchain by skipping verification.
 
 All commands accept `-C <root>`; run them from the project root otherwise.
 
+### TRAE / TRAE CN
+
+Install the complete Skill with `sh scripts/install-trae.sh --project <project-root>` or
+`--global` (TRAE CN). The installer also links the CLI into `~/.local/bin`; ensure TRAE's
+terminal PATH contains that directory, or set `UNITGEN` explicitly. Keep the checkout in place.
+For reproducible toolchains, copy `scripts/unitgen-env.example.sh` outside the repository,
+fill in paths, and export `UNITGEN_ENV` for **every** command. Do not rely on an `export`
+from a previous tool call surviving into the next one.
+
+TRAE writes tests and calls the CLI directly; this workflow requires no Claude CLI/API key.
+Keep stdout for `--json` results and read progress from stderr or the reported log file.
+Use the tool's process/job status for long builds; do not repeatedly start builds or use
+fixed multi-minute sleeps. Cancellation must stop the command, not only the agent response.
+
 ## Workflow
 
 1. **Baseline (once):** `"$UNITGEN" baseline` — runs the existing tests with coverage.
-   Re-run only after large production-code changes. A few failing pre-existing tests are
-   fine (they are reported); a build failure is not — read the log it prints.
+   Require exit 0 and a successful measured baseline before generating tests. A failed baseline
+   preserves previous coverage as evidence but marks the baseline invalid. Read its log and fix the environment / report failures.
 2. **Pick targets:** `"$UNITGEN" targets --limit 15`. If the user named files or a module,
    use those (`--module <name>` narrows the list). Prefer `logic` kind with many uncovered
    lines. Skip a target if it is pure glue around platform APIs you cannot fake.
@@ -40,6 +55,9 @@ All commands accept `-C <root>`; run them from the project root otherwise.
       mean the target cannot be verified here: prefer another target.
    2. Open any other source the brief references but does not include (constructors of
       collaborators, data classes, test-helper modules) before writing assertions.
+      Read the actual network/local/domain model fields; do not infer that they share names.
+      Check fakes for TODO/unimplemented methods. If needed, implement a small test-local fake
+      using existing interfaces; do not change shared fakes or add dependencies.
    3. Write the test file at the given path. Follow the brief's rules; reuse listed test
       doubles; mirror the imports of the example tests.
    4. `"$UNITGEN" verify <test-file> --target <source-file>` and act on the verdict:
@@ -60,7 +78,10 @@ All commands accept `-C <root>`; run them from the project root otherwise.
       (then `verify` and `mutate` again), unless the mutant is equivalent (no observable change,
       e.g. an unreachable bound or a value nobody reads) — exclude it with
       `"$UNITGEN" mutate <test-file> --equivalent <line>` and say why in `"$UNITGEN" note "..."`.
-      Aim for ≥ 80%. A run samples up to `--max` (default 15) mutants, preferring deleted calls,
+      Require the configured gate (default `--min-score 80`); exit 2 means it failed.
+      Check observable side effects too (for example, data actually saved to the network fake),
+      not just the local return value. Report sampled counts and crash-only kills separately.
+      A run samples up to `--max` (default 15) mutants, preferring deleted calls,
       negated conditions and comparison flips; the output says how many candidates exist. Re-runs
       re-check previous survivors first and then move on to mutants not tried yet.
       Mutants that don't compile are replaced and don't count; the source is always restored.
@@ -87,6 +108,9 @@ All commands accept `-C <root>`; run them from the project root otherwise.
 - Expected values come from reading the code (or a trustworthy oracle such as an RFC
   test vector), never from "whatever the test printed".
 - Run one `verify` at a time per project: runs share build directories.
+- All CLI commands acquire a project lock, including recovery. Never remove a live lock.
+  After a forced kill, confirm the owner/builds have stopped before removing a stale
+  `.unitgen/run.lock`; the next command restores interrupted mutations.
 - Do not add dependencies. Use only the libraries the brief lists or the example tests import.
 
 ## Platform notes
@@ -100,6 +124,6 @@ Read the matching reference before writing the first test for a platform:
 ## Non-interactive mode
 
 `"$UNITGEN" generate --llm anthropic|claude|cmd:<shell> --limit 5` runs the same
-brief → write → verify → feedback loop without an agent (ANTHROPIC_API_KEY for `anthropic`,
+brief → write → verify → mutate → feedback loop without an agent (ANTHROPIC_API_KEY for `anthropic`,
 `claude` on PATH for `claude`). Prefer the interactive workflow above when you are the agent:
 you can read more of the codebase than a single brief contains.

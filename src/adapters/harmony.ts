@@ -1,3 +1,4 @@
+import { runAsync } from "../util.ts";
 // HarmonyOS / OpenHarmony (ArkTS) via hvigor when available, otherwise the Node "shim" runner.
 //
 // Shim mode transpiles .ets with TypeScript, runs hypium-style tests against a compatible API
@@ -228,11 +229,11 @@ export class HarmonyAdapter implements Adapter {
     writeFile(list, text.replace(imp[0], "").replace(new RegExp(`^\\s*${imp[1]}\\(\\);\\n`, "m"), ""));
   }
 
-  runTests(req: RunRequest): TestRun {
+  async runTests(req: RunRequest): Promise<TestRun> {
     return this.mode() === "hvigor" ? this.runHvigor(req) : this.runShim(req);
   }
 
-  private runShim(req: RunRequest): TestRun {
+  private async runShim(req: RunRequest): Promise<TestRun> {
     const start = Date.now();
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
     const mods = req.modules ?? this.modules();
@@ -257,7 +258,7 @@ export class HarmonyAdapter implements Adapter {
     // Coverage comes straight from V8 (NODE_V8_COVERAGE) on the transpiled JS under <work>/gen and is
     // mapped back to .ets lines here; see v8LineCoverage for why c8's line rule is not used.
     const args = ["node", path.join(work, "runner.cjs"), tsDir, results, exists(ohm) ? ohm : "-", ...files];
-    const r = run(args, { cwd: work, timeoutSec: req.timeoutSec ?? 900, logFile, env: {
+    const r = await runAsync(args, { cwd: work, timeoutSec: req.timeoutSec ?? 900, logFile, env: {
       UNITGEN_LOCAL_DEPS: JSON.stringify(this.localDeps()), UNITGEN_ROOT: this.root,
       ...(req.coverage ? { NODE_V8_COVERAGE: path.join(work, "tmp") } : {}),
     } });
@@ -320,14 +321,14 @@ export class HarmonyAdapter implements Adapter {
     };
   }
 
-  private runHvigor(req: RunRequest): TestRun {
+  private async runHvigor(req: RunRequest): Promise<TestRun> {
     const start = Date.now();
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
     const mods = req.modules ?? this.modules();
     // Local unit tests (src/test). Override with UNITGEN_HVIGOR_TEST_ARGS if your toolchain differs.
     const extra = (process.env.UNITGEN_HVIGOR_TEST_ARGS ?? "test -p coverage=true --no-daemon").split(/\s+/).filter(Boolean);
     const args = [this.hvigor()!, ...mods.flatMap((m) => ["-p", `module=${m.name}@default`]), ...extra];
-    const r = run(args, { cwd: this.root, timeoutSec: 3600, logFile });
+    const r = await runAsync(args, { cwd: this.root, timeoutSec: 3600, logFile });
     const tests: TestCase[] = [];
     for (const line of r.out.split("\n")) {
       const m = /(?:OHOS_REPORT_STATUS: test=|\[(?:pass|fail)\]\s*)(\S+)/i.exec(line);

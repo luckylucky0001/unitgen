@@ -1,5 +1,5 @@
 // Shared helpers: subprocess, logging, JSON5, file walking.
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -28,6 +28,90 @@ export interface RunOpts {
   timeoutSec?: number;
   logFile?: string;
   input?: string;
+  signal?: AbortSignal;
+  /** Stream build output to stderr; stdout remains reserved for CLI results / JSON. */
+  stream?: boolean;
+}
+
+const cancellation = new AbortController();
+export const runSignal = cancellation.signal;
+export function cancelRuns(): void { cancellation.abort(); }
+export class RunCancelled extends Error {
+  constructor() { super("command cancelled"); }
+}
+
+/** Long-running builds stay observable and cancellable without changing synchronous discovery. */
+export async function runAsync(cmd: string[], opts: RunOpts = {}): Promise<CmdResult> {
+  const signal = opts.signal ?? cancellation.signal;
+  if (signal.aborted || cancellation.signal.aborted) throw new RunCancelled();
+  const start = Date.now();
+  const stream = opts.stream ?? (!!opts.logFile && process.env.UNITGEN_QUIET !== "1");
+  if (opts.logFile) writeFile(opts.logFile, `$ ${cmd.map(shq).join(" ")}\n\n`);
+  if (stream) log(`running ${cmd[0]}; log: ${opts.logFile ?? "stderr"}`);
+  return await new Promise<CmdResult>((resolve, reject) => {
+    const child = spawn(cmd[0], cmd.slice(1), {
+      cwd: opts.cwd, env: { ...process.env, ...opts.env },
+      detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"],
+    });
+    if (child.pid && process.send) process.send({ type: "unitgen-build-start", pid: child.pid });
+    let out = "", size = 0, timedOut = false, cancelled = false, overflow = false;
+    let spawnError: Error | undefined;
+    let logError: Error | undefined;
+    let force: ReturnType<typeof setTimeout> | undefined;
+    const kill = (hard: boolean) => {
+      if (!child.pid) return;
+      try {
+        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+        else process.kill(-child.pid, hard ? "SIGKILL" : "SIGTERM");
+      } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH") child.kill(hard ? "SIGKILL" : "SIGTERM"); }
+    };
+    const stop = () => {
+      kill(false);
+      if (!force) force = setTimeout(() => kill(true), 1500);
+    };
+    const abort = () => { cancelled = true; stop(); };
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal !== cancellation.signal) cancellation.signal.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(() => { timedOut = true; stop(); }, (opts.timeoutSec ?? 1800) * 1000);
+    const heartbeat = setInterval(() => {
+      if (stream) log(`still running (${Math.floor((Date.now() - start) / 1000)}s); log: ${opts.logFile ?? "stderr"}`);
+    }, 30000);
+    const capture = (chunk: string) => {
+      size += Buffer.byteLength(chunk);
+      if (size > 256 * 1024 * 1024) { overflow = true; stop(); return; }
+      out += chunk;
+      if (opts.logFile && !logError) {
+        try { fs.appendFileSync(opts.logFile, chunk); }
+        catch (e) { logError = e as Error; stop(); }
+      }
+      if (stream) process.stderr.write(chunk);
+    };
+    child.stdout.setEncoding("utf8").on("data", capture);
+    child.stderr.setEncoding("utf8").on("data", capture);
+    child.on("error", (e) => { spawnError = e; });
+    child.stdin.on("error", () => { /* Child may exit without reading the entire prompt. */ });
+    child.stdin.end(opts.input);
+    child.on("close", (status) => {
+      if (child.pid && process.send) process.send({ type: "unitgen-build-end", pid: child.pid });
+      clearTimeout(timer); clearInterval(heartbeat);
+      // A descendant may survive the parent and close its pipes: finish group termination too.
+      if (cancelled || timedOut || overflow || logError) kill(true);
+      if (force) clearTimeout(force);
+      signal.removeEventListener("abort", abort);
+      cancellation.signal.removeEventListener("abort", abort);
+      if (timedOut) out += `\n[unitgen] TIMEOUT after ${opts.timeoutSec ?? 1800}s`;
+      if (overflow) out += "\n[unitgen] output exceeded 256 MiB";
+      if (spawnError) out += `\n${spawnError.message}`;
+      const code = cancelled ? 130 : timedOut || overflow ? -1 : spawnError ? ((spawnError as NodeJS.ErrnoException).code === "ENOENT" ? 127 : -1) : status ?? -1;
+      const result = { cmd, code, out, seconds: (Date.now() - start) / 1000, timedOut, ok: code === 0 };
+      if (opts.logFile && !logError) {
+        try { fs.appendFileSync(opts.logFile, `\n# exit=${code} ${result.seconds.toFixed(1)}s\n`); }
+        catch (e) { logError = e as Error; }
+      }
+      if (cancelled) reject(new RunCancelled()); else if (logError) reject(logError); else resolve(result);
+    });
+    if (signal.aborted || cancellation.signal.aborted) abort();
+  });
 }
 
 /** Run a command with stdout+stderr merged. Never throws on a non-zero exit. */

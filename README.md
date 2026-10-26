@@ -1,6 +1,6 @@
 # unitgen
 
-面向 **iOS（Swift）/ Android（Kotlin/Java）/ 鸿蒙（ArkTS）** 的「覆盖率驱动」单元测试补全工具：CLI + Claude Code Skill。
+面向 **iOS（Swift）/ Android（Kotlin/Java）/ 鸿蒙（ArkTS）** 的「覆盖率驱动」单元测试补全工具：CLI + Agent Skill（Claude Code / TRAE）。
 
 思路借鉴 Meta TestGen-LLM 与 Qodo Cover-Agent：**生成不是难点，筛选才是**。模型（或 Claude Code 本身）负责写测试，unitgen 负责决定测什么、并且只保留真正有价值的测试：
 
@@ -84,6 +84,52 @@ mkdir -p ~/.claude/skills && ln -sfn ~/unitgen/skills/unitgen ~/.claude/skills/u
 ```
 
 然后在 Claude Code 里说「给这个工程补单测」即可；Skill 规定了完整流程、各 verdict 的处理方式和硬性规则（不改产品代码、不弱化断言等）。
+
+### 在 TRAE / TRAE CN 中使用
+
+TRAE 直接编写测试、调用 unitgen 执行质量检查，这条路径不需要 Claude CLI 或 Anthropic API Key。
+安装脚本适用于 macOS/Linux，完整安装 Skill 和相对引用文件（保留此 checkout，不要移动或删除）：
+
+```bash
+cd /absolute/path/to/unitgen
+npm ci
+sh scripts/install-trae.sh --project /absolute/path/to/android-project
+# 或安装为 TRAE CN 全局技能：
+sh scripts/install-trae.sh --global
+```
+
+项目 Skill 位于 `<project>/.trae/skills/unitgen/`，TRAE CN 全局 Skill 位于 `~/.trae-cn/skills/unitgen/`。
+脚本也将 CLI 链接到 `~/.local/bin/unitgen`；可用 `UNITGEN_BIN_DIR` 指定其他 bin 目录，不覆盖已有用户文件。
+确保 TRAE 工具进程的 PATH 包含此 bin 目录，或明确提供 CLI 的绝对路径。
+目录依据：[TRAE 官方 Skill 文档](https://docs.trae.cn/ide_skills)。Windows 请手动复制整个 `skills/unitgen/` 目录到对应 Skill 目录，并使用可运行此 shell 入口的环境；安装脚本未在 Windows 验证。
+
+推荐把本机工具链路径保存在仓库外的环境文件：
+
+```bash
+cp scripts/unitgen-env.example.sh /absolute/path/to/unitgen-env.sh
+# 编辑文件，填写 Node、JAVA_HOME、ANDROID_HOME（不要提交本机路径或凭证）
+UNITGEN_ENV=/absolute/path/to/unitgen-env.sh /absolute/path/to/unitgen/bin/unitgen doctor -C /absolute/path/to/android-project
+```
+
+每次 TRAE 工具调用都传 `UNITGEN_ENV`，不要假设上一条命令的 `export` 会跨调用保留。
+在 TRAE 中启用/选择 unitgen Skill 后，可以使用下面的任务描述：
+
+> 使用 unitgen 给当前 Android 工程补单测。先 doctor 和 baseline，基线成功后按 targets/brief 选择逻辑文件。读取关联 DTO 和 fake 的实际实现，生成测试，逐个 verify，再 mutate 检查断言强度，最后输出 report。只新增测试，不改产品代码、已有测试和构建文件。报告覆盖率分子分母、变异抽样数及未验证范围。
+
+这是推荐接入流程；已有 Android 实验验证了 TRAE 读取 Skill、生成测试和调用 CLI，不能据此声称已验证所有 TRAE 版本的自动发现/触发行为。
+
+### 自动化结果、进度与停止
+
+- 长时间测试/构建使用异步子进程，构建输出实时写入日志并发送到 stderr；每 30 秒输出运行状态。`UNITGEN_QUIET=1` 只关闭终端进度，仍写日志。
+- `--json` 的结果在 stdout，stderr 是进度/诊断。不要把两者合并后当 JSON 解析。管道记录时使用支持 `pipefail` 的 shell，保留 unitgen 的实际退出码。
+- 退出码：`0` 通过；`1` 命令/环境/参数错误；`2` 质量门禁失败；`130` 用户取消。
+- `baseline` 必须构建、测试成功且有实际测试和覆盖率；失败返回非零，保留旧覆盖率作为证据，同时标记基线无效。`verify` 和 `generate` 要求成功基线。因此没有可运行测试的 Swift/ArkTS 工程需要先补充可运行的种子测试，不再把失败/空基线当作有效的 0% 基线。
+- `mutate` 默认要求 `--min-score 80`，未达标或变异运行遇到环境错误返回 `2`；没有可生成的变异体明确标记 `NOT_APPLICABLE`（退出 `0`），不把它解释成断言强度 100%。仍须报告抽样数、幸存项和仅由崩溃检出的数量。
+- `generate` 在 verify 后执行 mutate，将未通过的变异反馈给模型继续补强；重试耗尽则隔离该文件，并返回 `2`。`--max` 控制每轮变异预算；目前没有原生 `--llm trae`，TRAE 用户优先使用上面的 Skill 流程。
+- 一个项目一次只允许一个 CLI 命令，包括读取/恢复命令。正常 SIGINT/SIGTERM 会取消运行中的测试子进程并在 finally 中恢复源码、释放锁。macOS/Linux 会终止测试进程组；Windows 使用 `taskkill /T`，该平台尚未实测。
+- 强杀（SIGKILL）无法执行 finally。先确认 `.unitgen/run.lock` 中的 PID 及其构建子进程均已停止，再手动移除这个残留锁；下一条命令会按 journal 恢复中断的变异。不要删除活跃锁，也不要把 Agent 停止回复等同于后台构建已经停止。
+
+Android 的验证范围是 JVM 本地单测；APK 安装、真机 API 和 UI 测试需要另外验证。
 
 ### 无人值守模式
 

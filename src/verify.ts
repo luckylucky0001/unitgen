@@ -7,7 +7,7 @@ import { type Coverage, mergeCoverage, newlyCovered, ranges } from "./coverage.t
 import type { State } from "./state.ts";
 import { exists, readFile, relPath } from "./util.ts";
 
-export type Verdict = "accepted" | "compile_error" | "test_failures" | "flaky" | "no_assertions" | "no_gain" | "no_tests" | "infra_error";
+export type Verdict = "accepted" | "compile_error" | "test_failures" | "flaky" | "no_assertions" | "no_gain" | "no_tests" | "infra_error" | "mutation_failures";
 
 export interface VerifyResult {
   verdict: Verdict;
@@ -66,7 +66,7 @@ export function collectSuspects(text: string): string[] {
   return [...new Set(out)];
 }
 
-export function verify(adapter: Adapter, state: State, testFile: string, opts: VerifyOpts = {}): VerifyResult {
+export async function verify(adapter: Adapter, state: State, testFile: string, opts: VerifyOpts = {}): Promise<VerifyResult> {
   const abs = path.resolve(testFile);
   const start = Date.now();
   const target = opts.target ? path.resolve(opts.target) : undefined;
@@ -91,7 +91,7 @@ export function verify(adapter: Adapter, state: State, testFile: string, opts: V
   adapter.prepareTestFile(abs, m);
 
   const label = `verify-${path.basename(abs).replace(/\W+/g, "_")}-${Date.now()}`;
-  const run = adapter.runTests({ testFiles: [abs], modules: [m], coverage: true, label });
+  const run = await adapter.runTests({ testFiles: [abs], modules: [m], coverage: true, label });
   if (run.infraError) {
     return res("infra_error", { feedback: `Environment problem: ${run.infraError}\n${run.excerpt}`, logFile: run.logFile, suspects });
   }
@@ -114,7 +114,7 @@ export function verify(adapter: Adapter, state: State, testFile: string, opts: V
   }
   // Flakiness: re-run without coverage.
   for (let i = 0; i < (opts.reruns ?? 1); i++) {
-    const again = adapter.runTests({ testFiles: [abs], modules: [m], coverage: false, label: `${label}-rerun${i + 1}` });
+    const again = await adapter.runTests({ testFiles: [abs], modules: [m], coverage: false, label: `${label}-rerun${i + 1}` });
     const bad = suiteTests(again, adapter, abs).filter((t) => t.status === "failed");
     if (!again.ok || bad.length) {
       return res("flaky", { tests, failed: bad, logFile: again.logFile, suspects, feedback: `Tests passed once, then failed on re-run ${i + 1} (non-deterministic):\n${bad.map((t) => `${t.name}: ${t.message ?? ""}`).join("\n") || again.excerpt}` });

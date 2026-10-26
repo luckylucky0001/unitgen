@@ -87,7 +87,7 @@ export interface Adapter {
   briefWarnings?(source: string): string[];
   /** Undo prepareTestFile side effects when a file is quarantined (optional). */
   forgetTestFile?(testFile: string, m: Module): void;
-  runTests(req: RunRequest): TestRun;
+  runTests(req: RunRequest): Promise<TestRun>;
   /** Language-level hints: does the test file contain at least one real assertion? */
   countAssertions(text: string): number;
   readonly testFileSuffix: string;
