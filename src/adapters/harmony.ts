@@ -207,6 +207,7 @@ export class HarmonyAdapter implements Adapter {
 
   /** Why the real toolchain cannot run this project's local unit tests (undefined = it can). */
   private hvigorBlocker(): string | undefined {
+    if (!this.modules().length) return "no module with src/main/ets in the build profile";
     if (!this.toolchain()) return "no DevEco Studio / Command Line Tools for HarmonyOS found (set DEVECO_STUDIO_HOME)";
     if (!profileIsReal(this.root)) return "build-profile.json5 is missing (only a template is committed)";
     if (!this.hypiumDeclared()) return "no oh-package.json5 declares @ohos/hypium (devDependencies), which local unit tests need";
@@ -365,9 +366,11 @@ export class HarmonyAdapter implements Adapter {
     const platformImports = usedPlatformImports(text).length;
     const fns = (text.match(/\bfunction\s+\w+|\b\w+\s*\([^)]*\)\s*(:\s*[\w<>\[\]|, ]+)?\s*\{|=>\s*\{/g) ?? []).length;
     if (fns === 0) return "model";
+    // System APIs are stubs under the shim and mostly mocks in hvigor's Previewer runtime: either way
+    // a unit test cannot exercise them, so such files rank below pure logic.
+    // $r()/$rawfile() resource references load fine; enum/global *usage* in logic does not.
+    if (platformImports > 0 || /\b(Color|Alignment|ButtonStyleMode|AppStorage|getContext)\./.test(text)) return "platform";
     if (this.mode() === "shim") {
-      // $r()/$rawfile() resource references load fine as stubs; enum/global *usage* in logic does not.
-      if (platformImports > 0 || /\b(Color|Alignment|ButtonStyleMode|AppStorage|getContext)\./.test(text)) return "platform";
       const ohm = path.join(this.root, "oh_modules");
       const third = [...text.matchAll(/from\s+['"](@[\w-]+\/[^'"]+|[a-z][^'".]*)['"]/g)].map((m) => m[1]).filter((p) => p !== "@ohos/hypium");
       const local = this.localDeps();
@@ -640,6 +643,7 @@ export class HarmonyAdapter implements Adapter {
     let ok = true, compiled = true;
     let infraError: string | undefined;
     let outside: string | undefined;
+    let skipped = 0;
     let combinedLog = "";
     for (const m of mods) {
       // hvigor's generated test entry imports src/test/List.test.ets: a module without one has no local tests.
@@ -658,11 +662,19 @@ export class HarmonyAdapter implements Adapter {
         if (!r.compiled) {
           const own = new Set((req.testFiles ?? []).map((f) => path.resolve(f)));
           const badTests = [...new Set(r.errorFiles.filter((f) => f.startsWith(m.testRoot + path.sep) && !own.has(f) && !/List\.test\.ets$/.test(f)))];
-          const badProd = r.errorFiles.filter((f) => m.sourceRoots.some((s) => f.startsWith(s + path.sep)));
+          // Anything outside this module's test sources: its own code, other modules, generated pages.
+          const badProd = r.errorFiles.filter((f) => !f.startsWith(m.testRoot + path.sep));
           if (!req.testFiles && badTests.length && !badProd.length) {
             dropped.push(...badTests);
             files = (files ?? this.listedTests(m)).filter((f) => !badTests.includes(f));
             continue;
+          }
+          // Full runs: a module whose production code does not build in local-test mode (e.g. resources
+          // of a dependency that hvigor does not resolve there) is reported and skipped, not fatal.
+          if (!req.testFiles && badProd.length && mods.length > 1) {
+            notes.push(`module ${m.name} skipped: its code does not compile in hvigor's local unit test mode (${[...new Set(badProd)].slice(0, 3).map((f) => relPath(f, this.root)).join(", ")}: ${r.excerpt.split("\n")[0].replace(/^.*?: /, "")}); its files cannot be verified with hvigor (UNITGEN_HARMONY_MODE=shim can test their pure logic)`);
+            skipped++;
+            break;
           }
           compiled = false; ok = false;
           excerpts.push(r.excerpt);
@@ -682,6 +694,7 @@ export class HarmonyAdapter implements Adapter {
       if (dropped.length) notes.push(`excluded existing tests that do not compile with the ArkTS compiler: ${dropped.map((f) => relPath(f, this.root)).join(", ")}`);
     }
     writeFile(logFile, combinedLog);
+    if (skipped && skipped === mods.filter((m) => req.testFiles || exists(path.join(m.testRoot, "List.test.ets"))).length) { compiled = false; ok = false; }
     const failedMsgs = tests.filter((t) => t.status === "failed").map((t) => `FAILED ${t.name}\n${t.message ?? ""}`);
     return {
       ok: ok && !infraError, compiled, tests, coverage: req.coverage ? coverage : undefined, logFile,
@@ -768,7 +781,11 @@ export class HarmonyAdapter implements Adapter {
     const local = this.localDeps();
     const missing = thirdParty.filter((p) => !exists(path.join(ohm, p)) && !local[p]);
     if (missing.length) out.push(`Imports ohpm packages that are not installed (${missing.join(", ")}): tests will fail with INFRA_ERROR until \`ohpm install\` runs. Pick another target if you cannot install them.`);
-    if (system.length && this.mode() === "shim") out.push(`Imports system APIs that are stubbed under the Node shim (${system.join(", ")}): only test code paths whose results do not come from these APIs.`);
+    if (system.length) {
+      out.push(this.mode() === "shim"
+        ? `Imports system APIs that are stubbed under the Node shim (${system.join(", ")}): only test code paths whose results do not come from these APIs.`
+        : `Imports system APIs (${system.join(", ")}): local unit tests run in the Previewer, where most of them are mocks or unavailable. Test the logic around them; do not assert on what they return.`);
+    }
     const exported = exportedNames(text);
     if (exported && exported.size === 0) out.push("The file exports nothing, so a test cannot import any of its code (module-private functions/classes are unreachable). Pick another target; testing it needs the logic moved into an exported module.");
     if (UI_RE.test(text) && this.mode() === "shim") {
