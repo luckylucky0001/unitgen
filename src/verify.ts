@@ -107,9 +107,12 @@ export async function verify(adapter: Adapter, state: State, testFile: string, o
     const fb = failed.length
       ? failed.map((t) => `FAILED ${t.name}\n${t.message ?? ""}`).join("\n\n")
       : run.excerpt;
+    // Environment notes (stubbed platform APIs, blanked UI components) explain many failures.
+    const notes = run.excerpt.split("\n").filter((l) => l.startsWith("Note:"));
+    const stubNote = notes.length ? `\n\nBefore treating this as a bug, check whether the failing values come from stubbed code:\n${notes.join("\n")}\nA value produced by a stub is meaningless: do not assert on it and do not mark it UNITGEN-SUSPECT; test another path instead.` : "";
     return res("test_failures", {
       tests, failed, logFile: run.logFile, suspects,
-      feedback: `${failed.length || "Some"} test(s) failed. If the expectation was wrong, fix the expectation by re-reading the code; if the code is wrong, assert current behaviour and mark it with // UNITGEN-SUSPECT:.\n\n${fb}`,
+      feedback: `${failed.length || "Some"} test(s) failed. If the expectation was wrong, fix the expectation by re-reading the code; if the code is wrong, assert current behaviour and mark it with // UNITGEN-SUSPECT:.\n\n${fb}${stubNote}`,
     });
   }
   // Flakiness: re-run without coverage.

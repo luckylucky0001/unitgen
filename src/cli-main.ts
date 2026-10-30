@@ -9,7 +9,7 @@ import { pickBackend } from "./llm.ts";
 import { buildReport } from "./report.ts";
 import { State } from "./state.ts";
 import { formatTargets, rankTargets } from "./targets.ts";
-import { exists, log, relPath, writeFile } from "./util.ts";
+import { exists, log, relPath, walkFiles, writeFile } from "./util.ts";
 import { formatVerify, quarantine, verify } from "./verify.ts";
 import { formatMutation, mutate, mutationGate, recover } from "./mutate.ts";
 import * as fs from "node:fs";
@@ -61,6 +61,7 @@ export const CLI_OPTIONS = {
   target: { type: "string" },
   reruns: { type: "string" },
   "allow-no-gain": { type: "boolean" },
+  "allow-failing": { type: "boolean" },
   quarantine: { type: "boolean" },
   llm: { type: "string" },
   model: { type: "string" },
@@ -90,6 +91,10 @@ export async function main(argv: string[]): Promise<number> {
   }
   const root = path.resolve(o.project ?? process.cwd());
   const adapter = detectAdapter(root, o.adapter);
+  // File arguments may be given relative to the project root (as `targets` prints them) when -C is used.
+  const fileArg = (p: string | undefined) => p && !path.isAbsolute(p) && !exists(p) && exists(path.resolve(adapter.root, p)) ? path.resolve(adapter.root, p) : p;
+  if (["brief", "verify", "mutate", "reject"].includes(cmd) && rest[0]) rest[0] = fileArg(rest[0])!;
+  if (o.target) o.target = fileArg(o.target);
   const positive = (name: string, fallback: number) => {
     const n = Number(o[name as keyof typeof o] ?? fallback);
     if (!Number.isSafeInteger(n) || n < 1) throw new Error(`--${name} must be a positive integer`);
@@ -123,6 +128,10 @@ export async function main(argv: string[]): Promise<number> {
       state.data.baseline = { at: state.stamp(), ok: false, tests: 0, failed: 0, seconds: 0, note: "baseline in progress or interrupted" };
       state.save();
       log(`running existing tests with coverage (${adapter.id}) ...`);
+      // Generated test files from earlier sessions must be registered so the real toolchain runs them too.
+      if (adapter.platform === "harmony") for (const m of mods ?? adapter.modules()) {
+        for (const f of walkFiles(m.testRoot, [adapter.testFileSuffix])) adapter.prepareTestFile(f, m);
+      }
       const r = await adapter.runTests({ coverage: true, label: "baseline", modules: mods });
       const failed = r.tests.filter((t) => t.status === "failed").length;
       const cov = r.coverage ?? {};
@@ -132,8 +141,21 @@ export async function main(argv: string[]): Promise<number> {
         const own = new Set(mods.flatMap((m) => adapter.sourceFiles(m)));
         for (const f of Object.keys(prev)) if (!own.has(f) && !cov[f]) cov[f] = prev[f];
       }
-      const measured = r.ok && r.compiled && failed === 0 && r.tests.some((t) => t.status === "passed") && Object.keys(cov).length > 0;
-      const note = r.infraError ?? r.note ?? (!r.compiled ? "existing tests did not compile in this environment; baseline treated as 0% for affected modules" : failed ? `${failed} existing tests fail` : undefined);
+      // Failing existing tests block the baseline unless the user accepts them (--allow-failing) or the
+      // runner explains them (Node shim: they use stubbed system APIs and pass only on the real toolchain).
+      const tolerated = failed > 0 && !r.infraError && r.compiled && (!!o["allow-failing"] || !!r.failuresExplained);
+      const runOk = (r.ok || tolerated) && r.compiled && !r.infraError;
+      const hasCoverage = r.tests.some((t) => t.status === "passed") && Object.keys(cov).length > 0;
+      // A project without (useful) tests is a valid 0% baseline only where unitgen measures coverage
+      // itself (HarmonyOS Node shim). Elsewhere "nothing ran / nothing covered" usually means the
+      // test task or coverage agent is misconfigured, so it stays an error.
+      const empty = runOk && failed === 0 && !hasCoverage && !!r.emptyCoverageOk;
+      const measured = runOk && (failed === 0 || tolerated) && (hasCoverage || empty);
+      const failingNames = r.tests.filter((t) => t.status === "failed").map((t) => t.name);
+      const note = r.infraError ?? r.note ?? (!r.compiled ? "existing tests did not compile in this environment"
+        : tolerated ? `${failed} existing tests fail here and are excluded from the gate (${r.failuresExplained ?? "--allow-failing"}): ${failingNames.slice(0, 8).join("; ")}${failingNames.length > 8 ? "; ..." : ""}`
+        : failed ? `${failed} existing tests fail: ${failingNames.slice(0, 8).join("; ")}${failingNames.length > 8 ? "; ..." : ""}`
+        : empty ? "no existing test covers project code: every file starts at 0%" : undefined);
       const baseline = { at: state.stamp(), ok: measured, tests: r.tests.length, failed, note, seconds: r.seconds };
       if (measured) {
         state.baselineCoverage = cov;
@@ -146,10 +168,17 @@ export async function main(argv: string[]): Promise<number> {
         state.save();
       }
       const s = summarize(cov);
+      const unloaded = rankTargets(adapter, cov, { modules: mods, minUncovered: 1 }).filter((t) => !t.measured);
+      const why = !r.compiled ? "existing tests do not compile here"
+        : r.infraError ? "environment problem"
+        : failed ? `${failed} existing tests fail; fix them, or re-run with --allow-failing to measure the passing ones`
+        : !hasCoverage ? "the existing tests ran but covered no project code (the coverage tool may not be attached)"
+        : "build, tests and coverage must succeed";
       print([`tests: ${r.tests.length} (${failed} failed)  build: ${r.compiled ? "ok" : "FAILED"}  ${r.seconds.toFixed(0)}s`,
-        `coverage: ${s.total.covered}/${s.total.executable} lines (${s.total.pct.toFixed(1)}%) in ${s.files.length} files`,
-        note ? `note: ${note}` : "", !measured ? `baseline not saved: build, tests and coverage must succeed\n${r.excerpt}\nlog: ${r.logFile}` : ""].filter(Boolean).join("\n"),
-        { ...baseline, coverage: s.total, logFile: r.logFile });
+        `coverage: ${s.total.covered}/${s.total.executable} lines (${s.total.pct.toFixed(1)}%) in ${s.files.length} files loaded by tests`,
+        unloaded.length ? `not loaded by any test: ${unloaded.length} logic/model files (~${unloaded.reduce((n, t) => n + t.executable, 0)} lines, 0%)` : "",
+        note ? `note: ${note}` : "", !measured ? `baseline not saved: ${why}\n${r.excerpt}\nlog: ${r.logFile}` : ""].filter(Boolean).join("\n"),
+        { ...baseline, coverage: s.total, unloadedFiles: unloaded.length, logFile: r.logFile });
       return measured ? 0 : r.infraError ? 1 : 2;
     }
     case "targets": {
@@ -187,12 +216,14 @@ export async function main(argv: string[]): Promise<number> {
       if (!tgt) throw new Error("pass --target <source> (no accepted target recorded for this test file)");
       if (o.equivalent) {
         const eq = (state.data.equivalent ??= {});
-        eq[relTest] = [...new Set([...(eq[relTest] ?? []), ...o.equivalent.split(",").map((x) => Number(x.trim())).filter(Boolean)])];
+        const ids = o.equivalent.split(",").map((x) => x.trim()).filter((x) => /^\d+(\.\d+)?$/.test(x));
+        if (!ids.length) throw new Error("--equivalent takes line numbers (12) or mutant ids (12.2), comma-separated");
+        eq[relTest] = [...new Set([...(eq[relTest] ?? []).map(String), ...ids])];
         state.save();
       }
       const r = await mutate(adapter, state, rest[0], path.resolve(root, tgt), max);
       const gate = mutationGate(r, minScore);
-      print(`${formatMutation(r)}\ngate: ${gate.status} (minimum ${minScore}%)`, { ...r, gate });
+      print(`${formatMutation(r)}\ngate: ${gate.status} (minimum ${minScore}%)${gate.reason ? ` — ${gate.reason}` : ""}`, { ...r, gate });
       return gate.status === "FAILED" ? 2 : 0;
     }
     case "reject": {

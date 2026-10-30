@@ -24,7 +24,8 @@ export function buildReport(adapter: Adapter, state: State): string {
       wholeBefore += Object.values(base[f] ?? {}).filter((h) => h > 0).length;
       wholeAfter += Object.values(now[f] ?? {}).filter((h) => h > 0).length;
     } else {
-      wholeExec += estimateExecutable(readFile(f)).length;
+      const text = readFile(f);
+      wholeExec += estimateExecutable(adapter.estimateText ? adapter.estimateText(text) : text).length;
     }
   }
   const pct = (a: number) => (wholeExec ? ((100 * a) / wholeExec).toFixed(1) : "0.0");

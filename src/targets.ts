@@ -84,7 +84,7 @@ export function rankTargets(adapter: Adapter, cov: Coverage, opts: { modules?: M
         covered = coveredLines(cov, file);
       } else {
         // Compiled into the coverage report's binary but absent => never loaded; or no report at all.
-        exec = estimateExecutable(text);
+        exec = estimateExecutable(adapter.estimateText ? adapter.estimateText(text) : text);
         covered = new Set();
       }
       const uncoveredLines = exec.filter((l) => !covered.has(l)).sort((a, b) => a - b);

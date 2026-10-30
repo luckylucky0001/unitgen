@@ -36,6 +36,10 @@ export interface TestRun {
   coverageWarnings?: string[];
   /** Informational remark for the user (e.g. suites skipped on this toolchain). */
   note?: string;
+  /** Why failing existing tests are expected in this environment (the baseline then tolerates them). */
+  failuresExplained?: string;
+  /** Coverage is measured by unitgen itself, so "tests ran, nothing covered" really means 0%. */
+  emptyCoverageOk?: boolean;
 }
 
 export interface RunRequest {
@@ -83,6 +87,8 @@ export interface Adapter {
   prepareTestFile(testFile: string, m: Module): void;
   /** Extra directories holding test helpers/fakes the module's tests can use (e.g. a :shared-test module). */
   testSupportDirs?(m: Module): string[];
+  /** Source text used to estimate executable lines of a never-loaded file (e.g. without UI DSL blocks). */
+  estimateText?(text: string): string;
   /** Warnings to put at the top of a brief (missing packages, stubbed APIs, ...). */
   briefWarnings?(source: string): string[];
   /** Undo prepareTestFile side effects when a file is quarantined (optional). */

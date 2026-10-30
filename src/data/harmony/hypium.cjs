@@ -6,6 +6,9 @@ const util = require("node:util");
 
 const root = { name: "", suites: [], tests: [], hooks: { beforeAll: [], beforeEach: [], afterEach: [], afterAll: [] }, parent: null };
 let current = root;
+// Test file whose suites are being registered (set by the runner), reported with each result.
+let currentFile;
+function setFile(f) { currentFile = f; }
 
 function describe(name, fn) {
   const s = { name, suites: [], tests: [], hooks: { beforeAll: [], beforeEach: [], afterEach: [], afterAll: [] }, parent: current };
@@ -16,8 +19,19 @@ function describe(name, fn) {
 }
 function it(name, attrOrFn, maybeFn) {
   const fn = typeof attrOrFn === "function" ? attrOrFn : maybeFn;
-  current.tests.push({ name, fn });
+  current.tests.push({ name, fn, file: currentFile });
 }
+// Like hypium's default, an async test (or hook) that never settles fails after this long instead of
+// letting Node exit silently with an empty event loop.
+const TIMEOUT_MS = Number(process.env.UNITGEN_HYPIUM_TIMEOUT_MS || 5000);
+// Keeps the event loop alive while a test awaits a promise nothing else references.
+function withTimeout(promise, what) {
+  let timer;
+  const t = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`${what} did not finish within ${TIMEOUT_MS}ms (a promise that never settles?)`)), TIMEOUT_MS); });
+  return Promise.race([promise, t]).finally(() => clearTimeout(timer));
+}
+// Stubbed system modules hit while the current test ran (set by the runner through stub.cjs).
+const stubHits = { current: new Set() };
 const xit = () => {};
 function beforeAll(fn) { current.hooks.beforeAll.push(fn); }
 function beforeEach(fn) { current.hooks.beforeEach.push(fn); }
@@ -84,8 +98,8 @@ const Size = { SMALLTEST: 16384, MEDIUMTEST: 32768, LARGETEST: 65536 };
 const Level = { LEVEL0: 0, LEVEL1: 1, LEVEL2: 2, LEVEL3: 3, LEVEL4: 4 };
 
 async function callHook(fn) {
-  if (fn.length > 0) await new Promise((res, rej) => { try { const r = fn(res); if (r && r.then) r.then(() => {}, rej); } catch (e) { rej(e); } });
-  else await fn();
+  if (fn.length > 0) await withTimeout(new Promise((res, rej) => { try { const r = fn(res); if (r && r.then) r.then(() => {}, rej); } catch (e) { rej(e); } }), "hook");
+  else await withTimeout(Promise.resolve().then(() => fn()), "hook");
 }
 
 async function runSuite(s, path, results, inheritedEach) {
@@ -95,21 +109,23 @@ async function runSuite(s, path, results, inheritedEach) {
   try { for (const h of s.hooks.beforeAll) await callHook(h); } catch (e) { setupError = e; }
   for (const t of s.tests) {
     const full = [...name, t.name].join(" > ");
-    if (setupError) { results.push({ name: full, status: "failed", message: "beforeAll failed: " + (setupError && setupError.stack || setupError) }); continue; }
+    if (setupError) { results.push({ name: full, status: "failed", file: t.file, message: "beforeAll failed: " + (setupError && setupError.stack || setupError) }); continue; }
+    stubHits.current = new Set();
     try {
       for (const h of each.before) await callHook(h);
       if (t.fn.length > 0) {
         await new Promise((res, rej) => {
-          const timer = setTimeout(() => rej(new Error("done() not called within 5000ms")), 5000);
+          const timer = setTimeout(() => rej(new Error(`done() not called within ${TIMEOUT_MS}ms`)), TIMEOUT_MS);
           try { const r = t.fn(() => { clearTimeout(timer); res(); }); if (r && r.then) r.then(() => {}, (e) => { clearTimeout(timer); rej(e); }); } catch (e) { clearTimeout(timer); rej(e); }
         });
       } else {
-        await t.fn();
+        await withTimeout(Promise.resolve().then(() => t.fn()), "test");
       }
       for (const h of each.after) await callHook(h);
-      results.push({ name: full, status: "passed" });
+      results.push({ name: full, status: "passed", file: t.file });
     } catch (e) {
-      results.push({ name: full, status: "failed", message: String(e && e.stack ? e.stack.split("\n").slice(0, 6).join("\n") : e) });
+      const stubs = [...stubHits.current];
+      results.push({ name: full, status: "failed", file: t.file, message: String(e && e.stack ? e.stack.split("\n").slice(0, 6).join("\n") : e), ...(stubs.length ? { stubs } : {}) });
     }
   }
   for (const c of s.suites) await runSuite(c, name, results, each);
@@ -122,4 +138,4 @@ async function runAll() {
   return results;
 }
 
-module.exports = { describe, it, xit, beforeAll, beforeEach, afterEach, afterAll, expect, TestType, Size, Level, runAll, Hypium: { setData() {}, hypiumTest() {} } };
+module.exports = { stubHits, setFile, describe, it, xit, beforeAll, beforeEach, afterEach, afterAll, expect, TestType, Size, Level, runAll, Hypium: { setData() {}, hypiumTest() {} } };

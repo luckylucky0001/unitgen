@@ -24,9 +24,20 @@ const RULES = `Rules (a test that breaks any of these is rejected):
 6. Keep tests small, independent and named after the behaviour they check. Prefer 5-25 focused tests over one giant test.
 7. Only use test libraries named in the Conventions section or imported by the existing tests below. Do not add dependencies.`;
 
-function declarationLines(text: string): string[] {
-  const re = /^\s*(public |open |internal |private |fileprivate |protected |export |static |final |abstract |override |data |sealed |inline |suspend |async |mutating |@\w+\s+)*(func|fun|init|class|struct|enum|protocol|interface|object|typealias|val|var|let|case|constructor|function|type)\b/;
-  return text.split("\n").filter((l) => re.test(l) && !/^\s*(private|fileprivate)\b/.test(l)).map((l) => l.replace(/\{\s*$/, "").trimEnd());
+function declarationLines(text: string, file = ""): string[] {
+  const re = /^\s*(public |open |internal |private |fileprivate |protected |export |static |final |abstract |override |data |sealed |inline |suspend |async |mutating |@\w+\s+)*(func|fun|init|class|struct|enum|protocol|interface|object|typealias|val|var|let|const|case|constructor|function|type)\b/;
+  // TypeScript/ArkTS methods have no keyword: `sendMessage(x: string): Promise<void> {`.
+  const tsMethod = /^\s+(public |protected |static |async |override |readonly )*[A-Za-z_$][\w$]*\s*(<[^>]*>)?\([^)]*\)\s*(:\s*[^={;]+)?\s*\{\s*$/;
+  const isTs = /\.(ets|ts)$/.test(file);
+  return text.split("\n").filter((l) => {
+    if (/^\s*(private|fileprivate)\b/.test(l)) return false;
+    // Variables only at top level or as members (shallow indent), not locals inside function bodies.
+    const indent = l.length - l.trimStart().length;
+    // ArkTS/TS code is conventionally indented by 2 (members at 2, locals at 4+); Kotlin/Swift by 4.
+    if (/^\s*(val|var|let|const)\b/.test(l)) return indent <= (isTs ? 2 : 4);
+    if (re.test(l)) return true;
+    return isTs && tsMethod.test(l) && !/^\s*(if|for|while|switch|catch|return|function|else)\b/.test(l);
+  }).map((l) => l.replace(/\{\s*$/, "").trimEnd());
 }
 
 /** Signatures of other module files whose type names the target references. */
@@ -54,7 +65,7 @@ function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: 
     return { f, t, hits };
   }).filter((x) => x.hits > 0).sort((a, b) => b.hits - a.hits);
   for (const { f, t } of scored) {
-    const decl = declarationLines(t).join("\n");
+    const decl = declarationLines(t, f).join("\n");
     if (!decl) continue;
     const chunk = `// ${relPath(f, adapter.root)}\n${decl}`;
     if (used + chunk.length > budget) break;
@@ -64,9 +75,15 @@ function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: 
   return parts.join("\n\n");
 }
 
+// Supertypes too generic to say "this class can stand in for something the target uses".
+const GENERIC_SUPERTYPES = new Set(["Error", "Exception", "RuntimeException", "Throwable", "Object", "Any", "NSObject", "Equatable", "Hashable", "Codable", "Serializable", "Comparable", "Sendable"]);
+
 /** Existing fakes/stubs in the module's test sources that implement types the target uses. */
 function testDoubles(adapter: Adapter, m: Module, text: string, budget: number): string {
-  const idents = new Set(text.match(/\b[A-Z][A-Za-z0-9_]{2,}\b/g) ?? []);
+  const idents = new Set((text.match(/\b[A-Z][A-Za-z0-9_]{2,}\b/g) ?? []).filter((x) => !GENERIC_SUPERTYPES.has(x)));
+  // Production sources are not test doubles unless they say so by name (FakeX, MockX, InMemoryX, ...).
+  const prodRoots = adapter.modules().flatMap((mm) => mm.sourceRoots.map((r) => r + path.sep));
+  const doubleName = /(Fake|Mock|Stub|InMemory|Dummy|Spy|Test)/;
   const roots = [...new Set([path.dirname(m.testRoot), m.testRoot, ...(adapter.testSupportDirs?.(m) ?? [])])].filter(exists);
   const exts = [".kt", ".java", ".swift", ".ets", ".ts"];
   const parts: string[] = [];
@@ -76,12 +93,13 @@ function testDoubles(adapter: Adapter, m: Module, text: string, budget: number):
     for (const f of walkFiles(root, exts)) {
       if (seen.has(f) || /UnitGen|\.unitgen\./.test(path.basename(f))) continue;
       seen.add(f);
+      if (prodRoots.some((r) => f.startsWith(r)) && !doubleName.test(path.basename(f))) continue;
       const t = readFile(f);
       if (/XCTestCase|@Test\b|@Suite\b|\bdescribe\(|@org\.junit|import org\.junit|import kotlin\.test/.test(t) && !/\b(Fake|Test|Stub|Mock|InMemory)\w*\s*[:(<{]/.test(t.replace(/class\s+\w+Tests?\b/g, ""))) continue;
       const impl = [...t.matchAll(/\b(?:class|object|struct)\s+(\w+)[^{\n]*?(?::|implements|extends)\s*([^{\n]+)/g)]
         .filter((mm) => (mm[2].match(/\b[A-Z]\w+/g) ?? []).some((x) => idents.has(x)));
       if (!impl.length) continue;
-      const chunk = `// ${relPath(f, adapter.root)}\n${declarationLines(t).join("\n")}`;
+      const chunk = `// ${relPath(f, adapter.root)}\n${declarationLines(t, f).join("\n")}`;
       if (used + chunk.length > budget) return parts.join("\n\n");
       parts.push(chunk);
       used += chunk.length;
@@ -127,7 +145,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
   const text = readFile(abs);
   const cov = state.knownCoverage();
   const measured = cov[abs] !== undefined;
-  const exec = measured ? executableLines(cov, abs) : new Set(estimateExecutable(text));
+  const exec = measured ? executableLines(cov, abs) : new Set(estimateExecutable(adapter.estimateText ? adapter.estimateText(text) : text));
   const covered = measured ? coveredLines(cov, abs) : new Set<number>();
   const uncovered = [...exec].filter((l) => !covered.has(l)).sort((a, b) => a - b);
   const unc = new Set(uncovered);
