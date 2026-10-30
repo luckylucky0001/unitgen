@@ -79,6 +79,12 @@ test("arkts lint allows string-literal indexing on Record-typed names only", () 
   assert.deepEqual(out.map((x) => x.split(":")[0]), ["6"]);
 });
 
+test("arkts lint rejects expect() on a call declared to return void", () => {
+  const ctx = "export class S {\n  catch(e: Error): void {\n  }\n  size(): number { return 1; }\n}";
+  const out = arktsLint("expect(sm.catch(err)).assertUndefined();\nexpect(sm.size()).assertEqual(1);", ctx);
+  assert.deepEqual(out.map((x) => x.split(":")[0]), ["1"]);
+});
+
 test("importLint reports names the imported module does not export", () => {
   const prod = "class NumberItem {}\nexport class Board {}\nexport { helper as h };\nexport default function main() {}";
   assert.deepEqual([...exportedNames(prod)!].sort(), ["Board", "h", "main"]);
@@ -105,4 +111,34 @@ test("mutants get per-line ids and logging statements are not mutated", () => {
   assert.deepEqual(ms.filter((m) => m.line === 1).map((m) => m.id), ["1.1", "1.2"]);
   assert.equal(ms.filter((m) => m.line === 2 || m.line === 3).length, 0);
   assert.deepEqual(ms.filter((m) => m.line === 4).map((m) => m.id), ["4.1", "4.2"]);
+});
+
+test("hypium test_result.txt: assertion failures vs errors, multi-line messages", async () => {
+  const { parseHypiumResults } = await import("../src/adapters/harmony.ts");
+  const txt = ["class=Suite", "test=ok", "result=Success", "test=bad", "Error in bad, expect 3 equals 4", "    at x (a.ets:1:1)", "result=Failure",
+    "test=boom", "Error in boom, execute timeout 15000ms", "result=Error", "Tests run: 3, Failure: 1, Error: 1, Pass: 1, Ignore: 0"].join("\n");
+  const r = parseHypiumResults(txt);
+  assert.deepEqual(r.map((t) => [t.name, t.status]), [["Suite > ok", "passed"], ["Suite > bad", "failed"], ["Suite > boom", "failed"]]);
+  assert.match(r[1].message!, /^AssertionError: Error in bad, expect 3 equals 4\n/);
+  assert.match(r[2].message!, /^Error: .*timeout/);
+});
+
+test("hvigor coverage drops lines only function-type annotations touch", async () => {
+  const { parseHvigorCoverage } = await import("../src/adapters/harmony.ts");
+  const src = ["", "export const f: (a: number) => number =", "  (a: number): number => {", "    return a;", "  };", "export const g = (): number => 1;"].join("\n");
+  const report = JSON.stringify({ files: [{ path: "/p/src/main/ets/A.ets",
+    functions: [
+      { count: 0, regions: [{ startLoc: { line: 2, col: 17 }, endLoc: { line: 2, col: 40 }, count: 0 }] }, // the annotation
+      { count: 2, regions: [{ startLoc: { line: 3, col: 3 }, endLoc: { line: 5, col: 4 }, count: 2 }] },
+      { count: 0, regions: [{ startLoc: { line: 6, col: 17 }, endLoc: { line: 6, col: 33 }, count: 0 }] }, // a real, never-called arrow
+    ],
+    summary: { lines: { executedLineCount: [-1, -1, 0, 2, 2, -1, 0] } } }] });
+  const cov = parseHvigorCoverage(report, ["/p/src/main/ets"], () => src);
+  assert.deepEqual(cov["/p/src/main/ets/A.ets"], { 3: 2, 4: 2, 6: 0 });
+});
+
+test("ArkTS compiler errors are parsed with their files (paths with spaces)", async () => {
+  const { parseArkTsErrors } = await import("../src/adapters/harmony.ts");
+  const out = "Error Message: Property 'uri' is missing. At File: /a b/entry/src/test/X.test.ets:20:3\nCOMPILE RESULT:FAIL";
+  assert.deepEqual(parseArkTsErrors(out), [{ message: "Property 'uri' is missing.", file: "/a b/entry/src/test/X.test.ets", line: 20, col: 3 }]);
 });

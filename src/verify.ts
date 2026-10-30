@@ -95,6 +95,9 @@ export async function verify(adapter: Adapter, state: State, testFile: string, o
   if (run.infraError) {
     return res("infra_error", { feedback: `Environment problem: ${run.infraError}\n${run.excerpt}`, logFile: run.logFile, suspects });
   }
+  if (!run.compiled && run.compileErrorOutsideTests) {
+    return res("infra_error", { feedback: `Environment problem: ${run.compileErrorOutsideTests} (not caused by the test file)\n${run.excerpt}`, logFile: run.logFile, suspects });
+  }
   if (!run.compiled) {
     return res("compile_error", { feedback: `Compilation failed:\n${run.excerpt}`, logFile: run.logFile, suspects });
   }

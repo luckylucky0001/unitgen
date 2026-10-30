@@ -12,13 +12,16 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Coverage, parseLcov } from "../coverage.ts";
 import { estimateExecutable } from "../targets.ts";
-import { errorExcerpt, exists, json5Parse, preferOwnTest, readFile, readJson, relPath, run, walkFiles, which, writeFile } from "../util.ts";
+import { errorExcerpt, exists, json5Parse, preferOwnTest, readFile, readJson, relPath, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SHIM_DIR = path.join(HERE, "..", "data", "harmony");
 const SUFFIX = ".unitgen.test.ets";
-const arkui = createRequire(import.meta.url)(path.join(SHIM_DIR, "arkui.cjs")) as { stripArkUI(text: string): { text: string; names: string[] } };
+const arkui = createRequire(import.meta.url)(path.join(SHIM_DIR, "arkui.cjs")) as {
+  stripArkUI(text: string): { text: string; names: string[] };
+  codeLines(ts: unknown, text: string, fileName: string): Set<number>;
+};
 const UI_RE = /@Entry|@Component|@ComponentV2|@CustomDialog|@Builder\b|^\s*(export\s+)?struct\s+\w+/m;
 // System-API imports that do not make code platform-dependent: logging and error types.
 const HARMLESS_IMPORTS = new Set(["hilog", "BusinessError"]);
@@ -29,6 +32,136 @@ function profilePath(root: string): string | undefined {
     if (exists(path.join(root, f))) return path.join(root, f);
   }
   return undefined;
+}
+
+function profileIsReal(root: string): boolean {
+  return exists(path.join(root, "build-profile.json5"));
+}
+
+interface Toolchain {
+  hvigor: string;
+  home?: string;
+  sdk?: string;
+  sdkVersion?: string;
+  /** API level of the installed SDK (sdk/default/sdk-pkg.json). */
+  sdkApi?: number;
+  /** Extra environment for hvigor: DEVECO_SDK_HOME and the bundled node/ohpm on PATH. */
+  env: Record<string, string>;
+}
+
+/**
+ * DevEco Studio (macOS app bundle, Windows/Linux install dir) or Command Line Tools for HarmonyOS:
+ * hvigorw, the bundled Node.js and ohpm, and the SDK. DEVECO_STUDIO_HOME / DEVECO_SDK_HOME override.
+ */
+export function findToolchain(root: string, env: NodeJS.ProcessEnv = process.env): Toolchain | undefined {
+  const home = env.HOME ?? env.USERPROFILE ?? "";
+  const homes = [env.DEVECO_STUDIO_HOME, env.DEVECO_HOME, env.HARMONYOS_CLT_HOME,
+    "/Applications/DevEco-Studio.app/Contents", path.join(home, "Applications", "DevEco-Studio.app", "Contents"),
+    "C:\\Program Files\\Huawei\\DevEco Studio", path.join(home, "command-line-tools"), "/opt/command-line-tools", "/opt/deveco-studio"]
+    .filter((h): h is string => !!h && exists(h));
+  const exe = process.platform === "win32" ? "hvigorw.bat" : "hvigorw";
+  for (const h of homes) {
+    const hvigor = [path.join(h, "tools", "hvigor", "bin", exe), path.join(h, "bin", exe), path.join(h, "hvigor", "bin", exe)].find(exists);
+    if (!hvigor) continue;
+    return toolchainAt(hvigor, h, env);
+  }
+  // Older projects ship their own wrapper; hvigorw on PATH (CI images).
+  const local = [path.join(root, exe), which(exe)].find((x): x is string => !!x && exists(x));
+  return local ? toolchainAt(local, undefined, env) : undefined;
+}
+
+function toolchainAt(hvigor: string, home: string | undefined, env: NodeJS.ProcessEnv): Toolchain {
+  const bins = home ? [path.join(home, "tools", "node", "bin"), path.join(home, "tool", "node", "bin"), path.join(home, "tools", "node"),
+    path.join(home, "tools", "ohpm", "bin"), path.join(home, "ohpm", "bin"), path.join(home, "bin")].filter(exists) : [];
+  const sdk = env.DEVECO_SDK_HOME ?? (home && exists(path.join(home, "sdk")) ? path.join(home, "sdk") : undefined);
+  let sdkVersion: string | undefined;
+  let sdkApi: number | undefined;
+  try {
+    if (sdk) {
+      const d = json5Parse(readFile(path.join(sdk, "default", "sdk-pkg.json"))).data;
+      sdkVersion = d?.displayName;
+      sdkApi = d?.apiVersion !== undefined ? Number(d.apiVersion) : undefined;
+    }
+  } catch { /* unknown layout */ }
+  const out: Record<string, string> = {};
+  if (sdk) out.DEVECO_SDK_HOME = sdk;
+  if (bins.length) out.PATH = [...bins, env.PATH ?? ""].join(path.delimiter);
+  return { hvigor, home, sdk, sdkVersion, sdkApi, env: out };
+}
+
+/** hypium's test_result.txt: `class=`, `test=`, message lines, `result=Success|Failure|Error|Ignore`. */
+export function parseHypiumResults(text: string): TestCase[] {
+  const out: TestCase[] = [];
+  let cls = "";
+  let name: string | undefined;
+  let msg: string[] = [];
+  for (const line of text.split("\n")) {
+    let m: RegExpExecArray | null;
+    if ((m = /^class=(.*)$/.exec(line))) { cls = m[1].trim(); continue; }
+    if ((m = /^test=(.*)$/.exec(line))) { name = m[1].trim(); msg = []; continue; }
+    if ((m = /^result=(\w+)/.exec(line)) && name !== undefined) {
+      const r = m[1];
+      const status = r === "Success" ? "passed" : r === "Ignore" ? "skipped" : "failed";
+      // Failure = an assertion failed; Error = an exception or timeout (reported like a crash).
+      const message = msg.join("\n").trim();
+      out.push({ name: cls ? `${cls} > ${name}` : name, status, message: status === "failed" ? (r === "Error" ? `Error: ${message}` : `AssertionError: ${message}`) : undefined });
+      name = undefined;
+      continue;
+    }
+    if (name !== undefined && !/^Tests run:/.test(line)) msg.push(line);
+  }
+  return out;
+}
+
+type HvigorRegion = { startLoc: { line: number; col: number }; endLoc: { line: number; col: number }; count: number };
+type HvigorFile = { path: string; functions?: { count: number; regions: HvigorRegion[] }[]; summary?: { lines?: { executedLineCount?: number[] } } };
+
+/**
+ * coverageReport.json from `hvigorw test -p ohos-test-coverage=true`: per file, executedLineCount[line]
+ * (-1 = not executable). The tool also reports function *types* in annotations (`const f: (a: T) => U =`,
+ * `fn: (v: T) => U`) as never-called functions; a zero line that only such regions touch is not code
+ * that a test could run, so it is dropped. `source` reads a file (injectable for tests).
+ */
+export function parseHvigorCoverage(json: string, sourceRoots: string[], source: (f: string) => string = readFile): Coverage {
+  const out: Coverage = {};
+  let data: { files?: HvigorFile[] };
+  try { data = JSON.parse(json); } catch { return out; }
+  for (const f of data.files ?? []) {
+    const file = path.resolve(f.path);
+    if (!sourceRoots.some((r) => file.startsWith(r + path.sep))) continue;
+    const counts = f.summary?.lines?.executedLineCount ?? [];
+    let text: string[] = [];
+    try { text = source(file).split("\n"); } catch { /* keep raw counts */ }
+    const phantom = (r: HvigorRegion) => {
+      const before = (text[r.startLoc.line - 1] ?? "").slice(0, Math.max(0, r.startLoc.col - 1)).replace(/<[^<>]*>\s*$/, "").trimEnd();
+      return before.endsWith(":");
+    };
+    const realZero = new Set<number>();
+    const phantomZero = new Set<number>();
+    for (const fn of f.functions ?? []) {
+      for (const r of fn.regions ?? []) {
+        if (r.count !== 0) continue;
+        const target = fn.count === 0 && phantom(fn.regions[0]) ? phantomZero : realZero;
+        for (let l = r.startLoc.line; l <= r.endLoc.line; l++) target.add(l);
+      }
+    }
+    const lines: Record<number, number> = {};
+    counts.forEach((c, i) => {
+      if (typeof c !== "number" || c < 0 || i === 0) return;
+      if (c === 0 && phantomZero.has(i) && !realZero.has(i)) return;
+      lines[i] = c;
+    });
+    out[file] = lines;
+  }
+  return out;
+}
+
+/** ArkTS compiler / linter errors with their file positions. */
+export function parseArkTsErrors(text: string): { file: string; line: number; col: number; message: string }[] {
+  const out: { file: string; line: number; col: number; message: string }[] = [];
+  for (const m of text.matchAll(/Error Message: (.*?) At File: (.+?):(\d+):(\d+)\s*$/gm)) out.push({ message: m[1].trim(), file: m[2].trim(), line: Number(m[3]), col: Number(m[4]) });
+  for (const m of text.matchAll(/ArkTS:ERROR File: (.+?):(\d+):(\d+)\s*\n\s*(.+)/g)) out.push({ file: m[1].trim(), line: Number(m[2]), col: Number(m[3]), message: m[4].trim() });
+  return out;
 }
 
 /** Local names imported from @kit.* / @ohos.* / @system.* that the code (outside import lines) actually uses. */
@@ -69,7 +202,50 @@ export class HarmonyAdapter implements Adapter {
   private mode(): "hvigor" | "shim" {
     if (process.env.UNITGEN_HARMONY_MODE === "shim") return "shim";
     if (process.env.UNITGEN_HARMONY_MODE === "hvigor") return "hvigor";
-    return this.hvigor() ? "hvigor" : "shim";
+    return this.hvigorBlocker() ? "shim" : "hvigor";
+  }
+
+  /** Why the real toolchain cannot run this project's local unit tests (undefined = it can). */
+  private hvigorBlocker(): string | undefined {
+    if (!this.toolchain()) return "no DevEco Studio / Command Line Tools for HarmonyOS found (set DEVECO_STUDIO_HOME)";
+    if (!profileIsReal(this.root)) return "build-profile.json5 is missing (only a template is committed)";
+    if (!this.hypiumDeclared()) return "no oh-package.json5 declares @ohos/hypium (devDependencies), which local unit tests need";
+    if (!exists(path.join(this.root, "oh_modules"))) return "oh_modules/ is missing: run `ohpm install` in the project";
+    // hvigor refuses an explicit compileSdkVersion other than the installed SDK's API level.
+    const tc = this.toolchain()!;
+    const want = this.compileApi();
+    if (want !== undefined && tc.sdkApi !== undefined && want !== tc.sdkApi) {
+      return `build-profile.json5 sets compileSdkVersion API ${want}, but the installed DevEco SDK is API ${tc.sdkApi} (hvigor refuses to build; remove compileSdkVersion or install the matching DevEco)`;
+    }
+    // A pinned hvigor plugin version is downloaded through npm, which needs ~/.npmrc.
+    const cfg = path.join(this.root, "hvigor", "hvigor-config.json5");
+    const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+    if (exists(cfg) && /"@ohos\/hvigor(-ohos-plugin)?"\s*:\s*"[^"]+"/.test(readFile(cfg).replace(/\/\/.*$/gm, "")) && !exists(path.join(home, ".npmrc"))) {
+      return "hvigor/hvigor-config.json5 pins an hvigor plugin version, which hvigor downloads with npm, but ~/.npmrc does not exist (configure the npm registry as in the DevEco docs, or open the project once in DevEco Studio)";
+    }
+    return undefined;
+  }
+
+  /** API level of an explicit compileSdkVersion ("6.1.1(24)" or 24), if any. */
+  private compileApi(): number | undefined {
+    try {
+      const products = json5Parse(readFile(profilePath(this.root)!)).app?.products ?? [];
+      const v = products.find((p: { name?: string }) => p.name === this.product())?.compileSdkVersion ?? products[0]?.compileSdkVersion;
+      if (v === undefined) return undefined;
+      const m = /\((\d+)\)\s*$/.exec(String(v)) ?? /^(\d+)$/.exec(String(v));
+      return m ? Number(m[1]) : undefined;
+    } catch { return undefined; }
+  }
+
+  private hypiumDeclared(): boolean {
+    return [path.join(this.root, "oh-package.json5"), ...this.modules().map((m) => path.join(m.dir, "oh-package.json5"))]
+      .filter(exists).some((p) => readFile(p).includes("@ohos/hypium"));
+  }
+
+  private tc?: Toolchain | null;
+  private toolchain(): Toolchain | undefined {
+    if (this.tc === undefined) this.tc = findToolchain(this.root) ?? null;
+    return this.tc ?? undefined;
   }
 
   /** name -> absolute dir for `file:` dependencies (local modules), which need no ohpm install. */
@@ -99,12 +275,6 @@ export class HarmonyAdapter implements Adapter {
     return out;
   }
 
-  private hvigor(): string | undefined {
-    const local = path.join(this.root, "hvigorw");
-    if (exists(local)) return local;
-    return which("hvigorw");
-  }
-
   private tsDir(): string | undefined {
     const req = createRequire(import.meta.url);
     for (const base of [process.env.UNITGEN_TS_DIR, path.join(HERE, "..", "..")].filter(Boolean) as string[]) {
@@ -119,7 +289,13 @@ export class HarmonyAdapter implements Adapter {
     const lines: string[] = [];
     let ok = true;
     const mode = this.mode();
-    lines.push(`runner: ${mode}${mode === "shim" ? " (Node + TypeScript + V8 coverage; hvigorw not found. Pure-logic code only; platform APIs are stubbed)" : ` (${this.hvigor()})`}`);
+    const tc = this.toolchain();
+    const blocker = this.hvigorBlocker();
+    lines.push(`runner: ${mode}${mode === "shim"
+      ? ` (Node + TypeScript + V8 coverage; pure-logic code only, platform APIs are stubbed${blocker && process.env.UNITGEN_HARMONY_MODE !== "shim" ? `. hvigor not used: ${blocker}` : ""})`
+      : ` (hvigor local unit tests in the Previewer runtime: ${tc?.hvigor ?? "hvigorw not found"})`}`);
+    if (tc) lines.push(`toolchain: ${tc.home ?? path.dirname(tc.hvigor)}${tc.sdk ? `; SDK ${tc.sdk}${tc.sdkVersion ? ` (${tc.sdkVersion})` : ""}` : ""}`);
+    if (mode === "hvigor" && blocker) { ok = false; lines.push(`hvigor mode cannot run: ${blocker}`); }
     if (mode === "shim") {
       if (!this.tsDir()) { ok = false; lines.push("typescript not found: run `npm install` in the unitgen directory"); }
     }
@@ -137,7 +313,7 @@ export class HarmonyAdapter implements Adapter {
       lines.push("warning: oh-package.json5 declares dependencies but oh_modules/ is missing: run `ohpm install`. Until then files importing those packages are ranked as `platform` and cannot be verified.");
     }
     const pkgs = [path.join(this.root, "oh-package.json5"), ...ms.map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists);
-    if (!pkgs.some((p) => readFile(p).includes("@ohos/hypium"))) {
+    if (!this.hypiumDeclared() && pkgs.length) {
       lines.push("warning: no oh-package.json5 declares @ohos/hypium; add it to devDependencies before running the generated tests with hvigor/DevEco (the Node shim does not need it)");
     }
     return { ok, lines };
@@ -280,6 +456,11 @@ export class HarmonyAdapter implements Adapter {
     return this.mode() === "hvigor" ? this.runHvigor(req) : this.runShim(req);
   }
 
+  /** Runner description for the brief and reports. */
+  get runnerName(): string {
+    return this.mode() === "hvigor" ? "hvigor (ArkTS compiler + Previewer runtime)" : "Node shim";
+  }
+
   private async runShim(req: RunRequest): Promise<TestRun> {
     const start = Date.now();
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
@@ -392,26 +573,184 @@ export class HarmonyAdapter implements Adapter {
     };
   }
 
+  private listJournal(): string {
+    return path.join(this.stateDir, "harmony-list.json");
+  }
+
+  /** A run that was killed while List.test.ets was swapped for an isolated one: put the original back. */
+  private restoreIfCrashed(): void {
+    const j = readJson<{ list: string; backup: string | null }[] | null>(this.listJournal(), null);
+    if (!j) return;
+    for (const e of j) {
+      if (e.backup === null) fs.rmSync(e.list, { force: true });
+      else if (exists(e.backup)) { fs.copyFileSync(e.backup, e.list); fs.rmSync(e.backup, { force: true }); }
+    }
+    fs.rmSync(this.listJournal(), { force: true });
+  }
+
+  /** Point List.test.ets at exactly these test files (hvigor compiles what the list imports). Returns a restore fn. */
+  private swapList(m: Module, files: string[]): () => void {
+    const list = path.join(m.testRoot, "List.test.ets");
+    const backup = path.join(this.stateDir, `List.test.ets.${m.name.replace(/\W+/g, "_")}.backup`);
+    fs.mkdirSync(this.stateDir, { recursive: true });
+    const had = exists(list);
+    if (had) fs.copyFileSync(list, backup);
+    writeFile(this.listJournal(), JSON.stringify([{ list, backup: had ? backup : null }]));
+    const imports: string[] = [];
+    const calls: string[] = [];
+    files.forEach((f, i) => {
+      const fn = /export\s+default\s+function\s+(\w+)/.exec(readFile(f))?.[1];
+      if (!fn) return;
+      let rel = relPath(f, m.testRoot).replace(/\.ets$/, "");
+      if (!rel.startsWith(".")) rel = `./${rel}`;
+      imports.push(`import t${i} from '${rel}';`);
+      calls.push(`  t${i}();`);
+    });
+    writeFile(list, `${imports.join("\n")}\n\nexport default function testsuite() {\n${calls.join("\n")}\n}\n`);
+    return () => {
+      if (had) { fs.copyFileSync(backup, list); fs.rmSync(backup, { force: true }); } else fs.rmSync(list, { force: true });
+      fs.rmSync(this.listJournal(), { force: true });
+    };
+  }
+
+  /** Test files List.test.ets currently imports (what a full hvigor run executes). */
+  private listedTests(m: Module): string[] {
+    const list = path.join(m.testRoot, "List.test.ets");
+    if (!exists(list)) return [];
+    return [...readFile(list).matchAll(/^\s*import\s+\w+\s+from\s+['"](\.[^'"]+)['"]/gm)]
+      .map((x) => [path.resolve(m.testRoot, x[1]), path.resolve(m.testRoot, x[1]) + ".ets"].find((c) => exists(c) && fs.statSync(c).isFile()))
+      .filter((f): f is string => !!f);
+  }
+
   private async runHvigor(req: RunRequest): Promise<TestRun> {
+    this.restoreIfCrashed();
     const start = Date.now();
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
-    const mods = req.modules ?? this.modules();
-    // Local unit tests (src/test). Override with UNITGEN_HVIGOR_TEST_ARGS if your toolchain differs.
-    const extra = (process.env.UNITGEN_HVIGOR_TEST_ARGS ?? "test -p coverage=true --no-daemon").split(/\s+/).filter(Boolean);
-    const args = [this.hvigor()!, ...mods.flatMap((m) => ["-p", `module=${m.name}@default`]), ...extra];
-    const r = await runAsync(args, { cwd: this.root, timeoutSec: 3600, logFile });
+    const tc = this.toolchain();
+    const blocker = this.hvigorBlocker();
+    if (!tc || blocker) {
+      return { ok: false, compiled: false, tests: [], logFile, excerpt: "", seconds: 0, infraError: `hvigor mode cannot run: ${blocker ?? "toolchain missing"}. UNITGEN_HARMONY_MODE=shim runs pure-logic tests without it` };
+    }
+    let mods = req.modules ?? this.modules();
+    if (req.testFiles) mods = mods.filter((m) => req.testFiles!.some((f) => this.moduleFor(f)?.name === m.name));
     const tests: TestCase[] = [];
-    for (const line of r.out.split("\n")) {
-      const m = /(?:OHOS_REPORT_STATUS: test=|\[(?:pass|fail)\]\s*)(\S+)/i.exec(line);
-      if (m) tests.push({ name: m[1], status: /fail/i.test(line) ? "failed" : "passed" });
-    }
-    let coverage;
+    const coverage: Coverage = {};
+    const excerpts: string[] = [];
+    const notes: string[] = [];
+    let ok = true, compiled = true;
+    let infraError: string | undefined;
+    let outside: string | undefined;
+    let combinedLog = "";
     for (const m of mods) {
-      const lcovs = walkFiles(path.join(m.dir, ".test"), [".info"]).concat(walkFiles(path.join(m.dir, "build"), ["lcov.info"]));
-      for (const l of lcovs) coverage = { ...(coverage ?? {}), ...parseLcov(readFile(l), m.dir) };
+      // hvigor's generated test entry imports src/test/List.test.ets: a module without one has no local tests.
+      if (!req.testFiles && !exists(path.join(m.testRoot, "List.test.ets"))) continue;
+      let files = req.testFiles?.filter((f) => this.moduleFor(f)?.name === m.name);
+      // A full run executes List.test.ets; existing tests that do not compile are dropped (and reported)
+      // so one stale test file does not hide every other test's result.
+      const dropped: string[] = [];
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const r = await this.hvigorModuleRun(m, tc, files, req, `${req.label}-${m.name.replace(/\W+/g, "_")}${attempt ? `-retry${attempt}` : ""}`);
+        combinedLog += r.log;
+        if (r.infraError) {
+          infraError = `${r.infraError}${r.infraError === "timeout" ? "" : " (hvigor environment problem; fix it, or set UNITGEN_HARMONY_MODE=shim to run pure-logic tests on Node)"}`;
+          excerpts.push(r.excerpt); ok = false; break;
+        }
+        if (!r.compiled) {
+          const own = new Set((req.testFiles ?? []).map((f) => path.resolve(f)));
+          const badTests = [...new Set(r.errorFiles.filter((f) => f.startsWith(m.testRoot + path.sep) && !own.has(f) && !/List\.test\.ets$/.test(f)))];
+          const badProd = r.errorFiles.filter((f) => m.sourceRoots.some((s) => f.startsWith(s + path.sep)));
+          if (!req.testFiles && badTests.length && !badProd.length) {
+            dropped.push(...badTests);
+            files = (files ?? this.listedTests(m)).filter((f) => !badTests.includes(f));
+            continue;
+          }
+          compiled = false; ok = false;
+          excerpts.push(r.excerpt);
+          // Production code that does not compile is not the test's fault (verify reports it as an
+          // environment problem); for a mutant it just means the mutant is discarded.
+          if (badProd.length && !r.errorFiles.some((f) => own.has(f))) {
+            outside = `production code does not compile with the ArkTS compiler: ${[...new Set(badProd)].map((f) => relPath(f, this.root)).join(", ")}`;
+          }
+          break;
+        }
+        tests.push(...r.tests);
+        Object.assign(coverage, r.coverage);
+        if (r.tests.some((t) => t.status === "failed")) ok = false;
+        if (!r.tests.length && r.excerpt) excerpts.push(r.excerpt);
+        break;
+      }
+      if (dropped.length) notes.push(`excluded existing tests that do not compile with the ArkTS compiler: ${dropped.map((f) => relPath(f, this.root)).join(", ")}`);
     }
-    const compiled = !/ArkTS:ERROR|ERROR: ArkTS|Compile failed/i.test(r.out);
-    return { ok: r.ok, compiled, tests, coverage, logFile, excerpt: r.ok ? "" : errorExcerpt(r.out), seconds: (Date.now() - start) / 1000 };
+    writeFile(logFile, combinedLog);
+    const failedMsgs = tests.filter((t) => t.status === "failed").map((t) => `FAILED ${t.name}\n${t.message ?? ""}`);
+    return {
+      ok: ok && !infraError, compiled, tests, coverage: req.coverage ? coverage : undefined, logFile,
+      excerpt: [...excerpts, ...failedMsgs.slice(0, 10)].filter(Boolean).join("\n"), seconds: (Date.now() - start) / 1000,
+      infraError, note: notes.join("; ") || undefined, emptyCoverageOk: true, compileErrorOutsideTests: outside,
+    };
+  }
+
+  private async hvigorModuleRun(m: Module, tc: Toolchain, files: string[] | undefined, req: RunRequest, label: string):
+    Promise<{ compiled: boolean; tests: TestCase[]; coverage: Coverage; errorFiles: string[]; excerpt: string; log: string; infraError?: string }> {
+    const buildRoot = ".test";
+    const out = path.join(m.dir, buildRoot, "default");
+    const resultFile = path.join(out, "intermediates", "test", "coverage_data", "test_result.txt");
+    const reportFile = path.join(out, "outputs", "test", "reports", "coverageReport.json");
+    // Stale results survive a failed compile: never read a previous run's files.
+    fs.rmSync(path.dirname(resultFile), { recursive: true, force: true });
+    fs.rmSync(path.dirname(reportFile), { recursive: true, force: true });
+    const product = this.product();
+    const extra = process.env.UNITGEN_HVIGOR_TEST_ARGS?.split(/\s+/).filter(Boolean)
+      ?? ["-p", "isLocalTest=true", "-p", "unitTestMode=true", "-p", `buildRoot=${buildRoot}`, ...(req.coverage ? ["-p", "ohos-test-coverage=true"] : []), "test", "--no-daemon"];
+    const args = [tc.hvigor, "--mode", "module", "-p", `module=${m.name}@default`, "-p", `product=${product}`, ...extra];
+    const restore = files ? this.swapList(m, files) : undefined;
+    let r;
+    try {
+      r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 1800, logFile: path.join(this.stateDir, "logs", `${label}.log`), env: tc.env });
+    } finally {
+      restore?.();
+    }
+    const text = stripAnsi(r.out);
+    const log = `$ ${args.join(" ")}\n${text}\n`;
+    if (r.timedOut) return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: "", log, infraError: "timeout" };
+    const infra = /SDK (?:component|path)[^\n]*(?:missing|not found|invalid)[^\n]*|Unable to find the SDK[^\n]*|ohpm ERROR[^\n]*|Cannot find module '@ohos\/hypium'[^\n]*|Invalid value of 'DEVECO_SDK_HOME'[^\n]*|00303\d{3}[^\n]*/i.exec(text)?.[0];
+    const errors = parseArkTsErrors(text);
+    const compileFailed = /COMPILE RESULT:FAIL|ArkTS Compiler Error|Failed :[\w:]+@(?:UnitTest|Legacy)\w*ArkTS/.test(text);
+    if (compileFailed) {
+      const excerpt = errors.length ? errors.slice(0, 20).map((e) => `${relPath(e.file, this.root)}:${e.line}:${e.col}: ${e.message}`).join("\n") : errorExcerpt(text);
+      return { compiled: false, tests: [], coverage: {}, errorFiles: errors.map((e) => e.file), excerpt, log, infraError: errors.length ? undefined : infra };
+    }
+    if (!exists(resultFile)) {
+      return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: errorExcerpt(text), log,
+        infraError: infra ?? (r.ok ? undefined : "hvigor failed before running the tests; see the log") };
+    }
+    const single = files?.length === 1 ? files[0] : undefined;
+    const tests = parseHypiumResults(readFile(resultFile)).map((t) => ({ ...t, file: single }));
+    const coverage = exists(reportFile) ? this.dropTypeOnlyLines(parseHvigorCoverage(readFile(reportFile), m.sourceRoots)) : {};
+    return { compiled: true, tests, coverage, errorFiles: [], excerpt: "", log };
+  }
+
+  /**
+   * hvigor's coverage tool counts lines of a declaration's type annotation (`const f: (a: T) => U =`
+   * spread over several lines) as executable and never covered. Keep only lines that produce code;
+   * a line with hits is always kept.
+   */
+  private dropTypeOnlyLines(cov: Coverage): Coverage {
+    const tsDir = this.tsDir();
+    if (!tsDir) return cov;
+    const ts = createRequire(import.meta.url)(tsDir);
+    for (const [file, lines] of Object.entries(cov)) {
+      let code: Set<number>;
+      try { code = arkui.codeLines(ts, readFile(file), file); } catch { continue; }
+      for (const ln of Object.keys(lines)) if (lines[Number(ln)] === 0 && !code.has(Number(ln))) delete lines[Number(ln)];
+    }
+    return cov;
+  }
+
+  private product(): string {
+    try {
+      return json5Parse(readFile(profilePath(this.root)!)).app?.products?.[0]?.name ?? "default";
+    } catch { return "default"; }
   }
 
   countAssertions(text: string): number {
@@ -436,7 +775,9 @@ export class HarmonyAdapter implements Adapter {
       const names = arkui.stripArkUI(text).names;
       out.push(`Declares ArkUI components/builders (${names.join(", ")}): under the Node shim they are replaced by empty stand-ins, so their members (including private methods and build()) cannot be tested here. Test the exported code outside them.`);
     }
-    if (/@(ObservedV2|Trace|Observed|Track|Local|Param|Monitor|Computed)\b/.test(text) && this.mode() === "shim") out.push("Uses ArkUI state-management decorators: they are no-ops under the shim (no change tracking), so test plain logic, not reactivity.");
+    if (/@(ObservedV2|Trace|Observed|Track|Local|Param|Monitor|Computed)\b/.test(text)) {
+      out.push(`Uses ArkUI state-management decorators${this.mode() === "shim" ? " (no change tracking under the Node shim: test plain logic, not reactivity)" : ""}. Arrays/Maps/Sets/Dates assigned to @Trace/@State fields are stored as observable proxies: compare them by content (assertDeepEquals, length, elements), never by identity (===).`);
+    }
     if (/(\b(Color|Alignment|FlexAlign|FontWeight|ButtonStyleMode|AppStorage|getContext)\b|\$r\s*\(|\$rawfile\s*\()/.test(text) && this.mode() === "shim") out.push("Uses ArkUI globals (Color, Alignment, $r, AppStorage, ...): they are inert stubs under the shim, so do not assert on their values.");
     return out;
   }
@@ -594,6 +935,7 @@ export function arktsLint(text: string, context = ""): string[] {
   const out: string[] = [];
   const records = new Set([...`${text}\n${context}`.matchAll(/([A-Za-z_$][\w$]*)\??\s*:\s*Record\s*</g)].map((m) => m[1]));
   for (const m of text.matchAll(/([A-Za-z_$][\w$]*)\s*(?::\s*[^=;]+)?=\s*[^;\n]*\bas\s+Record\s*</g)) records.add(m[1]);
+  const voidFns = new Set([...`${text}\n${context}`.matchAll(/([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\([^()]*\)\s*:\s*void\b/g)].map((m) => m[1]));
   const rules: [RegExp, string][] = [
     [/:\s*(any|unknown)\b|\bas\s+(any|unknown)\b|<(any|unknown)>/, "arkts-no-any-unknown: `any`/`unknown` are not allowed"],
     [/^\s*var\s/, "arkts-no-var: use let/const"],
@@ -613,6 +955,10 @@ export function arktsLint(text: string, context = ""): string[] {
   text.split("\n").forEach((line, i) => {
     const l = line.replace(/\/\/.*$/, "").replace(/'(?:\\.|[^'])*'|"(?:\\.|[^"])*"|`(?:\\.|[^`])*`/g, (s) => (/\[\s*$/.test(line.slice(0, line.indexOf(s))) ? s : "''"));
     for (const [re, msg] of rules) if (re.test(l)) out.push(`${i + 1}: ${msg}`);
+    // hypium's expect(actualValue?: Object): a call to a function declared `: void` is not an Object.
+    for (const m of l.matchAll(/\bexpect\(\s*(?:[A-Za-z_$][\w$]*\s*\.\s*)*([A-Za-z_$][\w$]*)\s*\(/g)) {
+      if (voidFns.has(m[1])) out.push(`${i + 1}: expect() needs a value, but ${m[1]}() returns void: call it on its own line and assert on its effects`);
+    }
     // Indexed access with a string literal is legal on Record<K, V> (and arrays), not on class instances.
     const byIndex = [...l.matchAll(/([A-Za-z_$][\w$]*)\s*\[\s*['"][A-Za-z_]\w*['"]\s*\]/g)].filter((m) => !records.has(m[1]));
     if (byIndex.length) out.push(`${i + 1}: arkts-no-props-by-index: use obj.prop instead of obj['prop'] (allowed only on Record types)`);

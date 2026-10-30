@@ -152,10 +152,10 @@ export async function main(argv: string[]): Promise<number> {
       const empty = runOk && failed === 0 && !hasCoverage && !!r.emptyCoverageOk;
       const measured = runOk && (failed === 0 || tolerated) && (hasCoverage || empty);
       const failingNames = r.tests.filter((t) => t.status === "failed").map((t) => t.name);
-      const note = r.infraError ?? r.note ?? (!r.compiled ? "existing tests did not compile in this environment"
+      const note = [r.infraError, r.note, !r.compiled ? "existing tests did not compile in this environment"
         : tolerated ? `${failed} existing tests fail here and are excluded from the gate (${r.failuresExplained ?? "--allow-failing"}): ${failingNames.slice(0, 8).join("; ")}${failingNames.length > 8 ? "; ..." : ""}`
         : failed ? `${failed} existing tests fail: ${failingNames.slice(0, 8).join("; ")}${failingNames.length > 8 ? "; ..." : ""}`
-        : empty ? "no existing test covers project code: every file starts at 0%" : undefined);
+        : empty ? "no existing test covers project code: every file starts at 0%" : undefined].filter(Boolean).join("; ") || undefined;
       const baseline = { at: state.stamp(), ok: measured, tests: r.tests.length, failed, note, seconds: r.seconds };
       if (measured) {
         state.baselineCoverage = cov;

@@ -47,4 +47,42 @@ function stripArkUI(text) {
   return { text: out + text.slice(last), names };
 }
 
-module.exports = { matchBrace, stripArkUI };
+/** Decode source-map VLQ mappings into [generated line, generated column, original line] (lines 1-based). */
+function decodeMappings(mappings) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const out = [];
+  let srcLine = 0;
+  mappings.split(";").forEach((lineStr, genLine) => {
+    let genCol = 0;
+    for (const seg of lineStr.split(",")) {
+      if (!seg) continue;
+      const vals = [];
+      let shift = 0, value = 0;
+      for (const ch of seg) {
+        const digit = chars.indexOf(ch);
+        value += (digit & 31) << shift;
+        if (digit & 32) shift += 5;
+        else { vals.push(value & 1 ? -(value >> 1) : value >> 1); value = 0; shift = 0; }
+      }
+      genCol += vals[0];
+      if (vals.length >= 4) {
+        srcLine += vals[2];
+        out.push([genLine + 1, genCol, srcLine + 1]);
+      }
+    }
+  });
+  return out;
+}
+
+/**
+ * Original lines that produce JavaScript (TypeScript transpile + source map): type annotations,
+ * interfaces and declarations-only lines are erased and never executable.
+ */
+function codeLines(ts, text, fileName) {
+  const out = ts.transpileModule(stripArkUI(text).text.replace(/^(\s*import\s+)lazy\s+/gm, "$1"), {
+    fileName, compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, experimentalDecorators: true, sourceMap: true, useDefineForClassFields: false },
+  });
+  return new Set(decodeMappings(JSON.parse(out.sourceMapText).mappings).map((s) => s[2]));
+}
+
+module.exports = { matchBrace, stripArkUI, decodeMappings, codeLines };

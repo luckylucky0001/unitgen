@@ -23,7 +23,7 @@ function it(name, attrOrFn, maybeFn) {
 }
 // Like hypium's default, an async test (or hook) that never settles fails after this long instead of
 // letting Node exit silently with an empty event loop.
-const TIMEOUT_MS = Number(process.env.UNITGEN_HYPIUM_TIMEOUT_MS || 5000);
+const TIMEOUT_MS = Number(process.env.UNITGEN_HYPIUM_TIMEOUT_MS || 15000);
 // Keeps the event loop alive while a test awaits a promise nothing else references.
 function withTimeout(promise, what) {
   let timer;

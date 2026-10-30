@@ -15,7 +15,7 @@ const genDir = path.join(path.dirname(resultsFile), "gen");
 const lineMaps = {};
 const ts = require(tsDir);
 const hypium = require("./hypium.cjs");
-const { stripArkUI } = require("./arkui.cjs");
+const { decodeMappings, stripArkUI } = require("./arkui.cjs");
 const stubPath = path.join(__dirname, "stub.cjs");
 
 const stubbed = new Set();
@@ -48,8 +48,25 @@ const DECORATORS = ["ObservedV2", "Observed", "Trace", "Track", "Local", "Param"
   "LocalStorageLink", "LocalStorageProp", "BuilderParam", "Builder", "Styles", "Extend", "Concurrent", "Sendable", "Reusable",
   "ReusableV2", "Require", "Component", "ComponentV2", "Entry", "Preview", "CustomDialog", "AnimatableExtend", "LocalBuilder"];
 const FACTORY_WITH_CLASS_ARG = new Set(["Type"]);
+// State management V2: a @Trace field holds an observable proxy of an assigned Array/Map/Set/Date, so
+// `obj.items === assigned` is false on the real runtime. Mirror that (behaviour otherwise unchanged).
+function traceField(target, key) {
+  const store = new WeakMap();
+  Object.defineProperty(target, key, {
+    configurable: true, enumerable: true,
+    get() { return store.get(this); },
+    set(v) {
+      const wrap = v !== null && typeof v === "object" && (Array.isArray(v) || v instanceof Map || v instanceof Set || v instanceof Date);
+      store.set(this, wrap ? new Proxy(v, {}) : v);
+    },
+  });
+}
 for (const name of DECORATORS) {
   if (name in globalThis) continue;
+  if (name === "Trace") {
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: (target, key) => { usedGlobals.add("@Trace"); if (typeof key === "string") traceField(target, key); } });
+    continue;
+  }
   const noop = () => undefined;
   const deco = function (...args) {
     usedGlobals.add("@" + name);
@@ -136,33 +153,6 @@ function compile(module, filename) {
   const segs = decodeMappings(JSON.parse(out.sourceMapText).mappings);
   lineMaps[genPath] = { source: filename, lines: genToSourceLines(segs), segs };
   module._compile(js, genPath);
-}
-
-/** Decode source-map VLQ mappings into [generated line, generated column, original line] (lines 1-based). */
-function decodeMappings(mappings) {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  const out = [];
-  let srcLine = 0;
-  mappings.split(";").forEach((lineStr, genLine) => {
-    let genCol = 0;
-    for (const seg of lineStr.split(",")) {
-      if (!seg) continue;
-      const vals = [];
-      let shift = 0, value = 0;
-      for (const ch of seg) {
-        const digit = chars.indexOf(ch);
-        value += (digit & 31) << shift;
-        if (digit & 32) shift += 5;
-        else { vals.push(value & 1 ? -(value >> 1) : value >> 1); value = 0; shift = 0; }
-      }
-      genCol += vals[0];
-      if (vals.length >= 4) {
-        srcLine += vals[2];
-        out.push([genLine + 1, genCol, srcLine + 1]);
-      }
-    }
-  });
-  return out;
 }
 
 /** Generated line -> lowest original line (1-based), for stack traces. */
