@@ -6,7 +6,7 @@ import { parseSwiftTestOutput } from "../src/adapters/swiftpm.ts";
 import { mergeCoverage, newlyCovered, parseJacocoXml, parseLcov, parseLlvmCovJson, ranges, summarize } from "../src/coverage.ts";
 import { extractCode } from "../src/llm.ts";
 import { estimateExecutable } from "../src/targets.ts";
-import { json5Parse, preferOwnTest } from "../src/util.ts";
+import { canonical, json5Parse, preferOwnTest } from "../src/util.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -39,7 +39,7 @@ test("llvm-cov lines inside a region that hold no code (blank, comment, #if) are
   const file = path.join(dir, "F.swift");
   fs.writeFileSync(file, ["func f() -> Int {", "  let x = 1", "", "  // note", "  #if os(iOS)", "  return x", "}"].join("\n"));
   const json = { data: [{ files: [{ filename: file, segments: [[1, 18, 0, true, true, false], [7, 2, 0, false, false, false]] }] }] };
-  assert.deepEqual(Object.keys(parseLlvmCovJson(json)[fs.realpathSync(file)]).map(Number), [1, 2, 6, 7]);
+  assert.deepEqual(Object.keys(parseLlvmCovJson(json)[canonical(file)]).map(Number), [1, 2, 6, 7]);
 });
 
 test("jacoco xml resolves package paths", () => {
