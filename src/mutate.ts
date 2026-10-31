@@ -321,15 +321,25 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
         throw new Error(`${relTest} does not pass on the unmodified code; fix it (unitgen verify) before mutating`);
       }
       // Mutants can loop forever (e.g. a binary search bound): cap each run and count a timeout as killed.
-      const timeoutSec = Math.max(60, Math.ceil(clean.seconds * 4) + 30);
+      // The clean run is a no-op incremental build, faster than a mutant's rebuild: start generous, then
+      // follow what completed mutant runs actually took (3x the median + 10 s, never below 20 s).
+      const done: number[] = [];
+      const timeoutFor = () => {
+        if (!done.length) return Math.max(60, Math.ceil(clean.seconds * 4) + 30);
+        const median = [...done].sort((x, y) => x - y)[Math.floor(done.length / 2)];
+        return Math.max(20, Math.ceil(clean.seconds * 2) + 10, Math.ceil(median * 3) + 10);
+      };
       for (const [i, mu] of candidates.entries()) {
         if (results.filter((r) => r.outcome !== "stillborn").length >= max) break;
         const lines2 = original.split("\n");
         lines2.splice(mu.line - 1, (mu.endLine ?? mu.line) - mu.line + 1, mu.mutated);
         fs.writeFileSync(absTarget, lines2.join("\n"));
+        const timeoutSec = timeoutFor();
         const r = await adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: `mutant-${base}-${mu.id}`, timeoutSec });
+        const timedOut = r.infraError === "timeout" || /TIMEOUT after/.test(r.excerpt);
+        if (!timedOut && r.seconds > 0) done.push(r.seconds);
         let outcome: MutantResult["outcome"];
-        if (r.infraError === "timeout" || /TIMEOUT after/.test(r.excerpt)) outcome = "killed";
+        if (timedOut) outcome = "killed";
         else if (r.infraError) outcome = "error";
         else if (!r.compiled) outcome = "stillborn";
         else if (!r.ok || r.tests.some((t) => t.status === "failed")) {
@@ -340,7 +350,7 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
         }
         else outcome = r.tests.length ? "survived" : "error";
         results.push({ ...mu, outcome, testHash });
-        const shown = outcome === "stillborn" ? "did not compile (discarded)" : outcome;
+        const shown = outcome === "stillborn" ? "did not compile (discarded)" : timedOut ? `killed (no result within ${timeoutSec}s: the mutant hangs)` : outcome;
         log(`  mutant ${i + 1} (budget ${max}, ${fresh.length} not yet killed of ${all.length}) [${mu.id}] line ${mu.line} (${mu.op}): ${shown}`);
       }
     } finally {
