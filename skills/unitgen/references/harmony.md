@@ -85,7 +85,10 @@ export default function urlUnitGenTest() {
   observable proxies — compare by content (`assertDeepEquals`, length, elements), never by
   identity (`===`).
 - System APIs are stubs (shim) or mostly mocks (Previewer): test the logic around them, never
-  what they return.
+  what they return. That includes objects they hand back (`const mac = cryptoFramework.createMac()`,
+  then `mac.doFinal()`) and ArkUI dialogs (`AlertDialog.show`). The brief marks such uncovered
+  lines `!~`, and `TEST_FAILURES` names the mocked APIs the code under test uses: a failing value
+  that comes from one (an HMAC of `000000`, an empty file) is the mock, not a bug.
 - The Previewer runtime iterates strings by UTF-16 code unit in `Array.from(str)`
   (`Array.from('💩').length === 2`), unlike Node. Expected values for non-BMP text must come from
   the spec/oracle; if the code under test relies on code-point iteration, that is a finding

@@ -25,7 +25,9 @@ SDK, or DevEco Studio's hvigor (found automatically; otherwise a Node shim for A
 and doctor says why). Fix whatever it reports before continuing; do not work around a missing
 toolchain by skipping verification.
 
-All commands accept `-C <root>`; run them from the project root otherwise.
+All commands accept `-C <root>`; without it, unitgen finds the project root upwards from the
+current directory (a HarmonyOS module directory leads to the app root). Every command prints the
+path of its full log; `mutate` prints one line per mutant and keeps build output in the logs.
 
 ### TRAE / TRAE CN
 
@@ -114,7 +116,7 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
         equivalent: leave it, note it, and report the score as it is.
       - The gate (default `--min-score 80`) counts every mutant evaluated with the current test
         file; exit 2 means it failed (the test stays accepted). `--max` caps one run: about
-        1–2 s per mutant with hvigor, 3–10 s with SwiftPM/Gradle, 10–25 s with Xcode, so use
+        1–3 s per mutant with hvigor, 3–10 s with SwiftPM/Gradle, 10–25 s with Xcode, so use
         `--max 10` on Xcode. `--max` counts mutants that compiled; ones that do not compile are
         replaced by the next candidates. Re-run to evaluate more candidates.
       - Kills by a crash (exception, index out of range, hang) rather than an assertion are

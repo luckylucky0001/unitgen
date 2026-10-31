@@ -33,7 +33,7 @@ Commands
   status                     Show baseline / accepted / rejected counts
 
 Common options
-  -C, --project <dir>        Project root (default: cwd)
+  -C, --project <dir>        Project root (default: found upwards from the current directory)
       --adapter <id>         Force adapter: ${ADAPTER_IDS.join(", ")}
       --module <name>        Restrict to one module/target
       --json                 Machine-readable output
