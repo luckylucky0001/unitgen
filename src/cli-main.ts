@@ -191,6 +191,7 @@ export async function main(argv: string[]): Promise<number> {
       const unloaded = rankTargets(adapter, cov, { modules: mods, minUncovered: 1 }).filter((t) => !t.measured);
       const why = !r.compiled ? `the build failed — the project or its existing tests do not compile with this toolchain: ${r.excerpt.split("\n").find((l) => l.trim()) ?? "see the log"}`
         : r.infraError ? "environment problem"
+        : !r.ok && !r.tests.length ? `the test run failed before any test ran: ${r.excerpt.split("\n").find((l) => l.trim()) ?? "see the log"}`
         : failed && !tolerated ? `${failed} existing tests fail; fix them, or re-run with --allow-failing to measure the passing ones`
         : r.coverageProblem ? r.coverageProblem
         : failed ? `${failed} existing tests fail and no coverage was recorded for the passing ones`

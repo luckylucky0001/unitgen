@@ -168,7 +168,7 @@ export class SwiftPMAdapter implements Adapter {
 
   classify(file: string, text: string): FileKind {
     if (/Generated|\.generated\./.test(file) || /^\/\/.*(generated|DO NOT EDIT)/im.test(text.slice(0, 400))) return "generated";
-    if (/:\s*(some\s+)?View\b|UIViewController|NSViewController|UIView\b|@main\b/.test(text) && /import\s+(SwiftUI|UIKit|AppKit)/.test(text)) return "ui";
+    if (/:\s*(some\s+)?View\b|:\s*(UI|NS)\w*(View|Cell|Controller|Control|Window|Button|Label)\b|UIViewController|NSViewController|UIView\b|@main\b/.test(text) && /import\s+(SwiftUI|UIKit|AppKit)/.test(text)) return "ui";
     const decls = (text.match(/\bfunc\s+\w+/g) ?? []).length + (text.match(/\b(init|subscript)\s*[(<]/g) ?? []).length + (text.match(/\b(get|set)\s*\{/g) ?? []).length;
     if (decls === 0) return "model";
     return "logic";

@@ -232,7 +232,7 @@ function isCallStatement(t: string): boolean {
 /** `name = value`, `a.b.c = value`, `n += 1` on one line (not a declaration, not `this.`/`self.`). */
 function isPlainAssignment(t: string): boolean {
   const m = maskStrings(t);
-  return !KEYWORD_START.test(t) && /^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\s*([+\-*\/%]|\?\?)?=(?![=>])/.test(m)
+  return !KEYWORD_START.test(t) && /^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*|\[[^\]]*\])*\s*([+\-*\/%]|\?\?)?=(?![=>])/.test(m)
     && !/^(this|self)\./.test(m) && balanced(t) && !/[{(\[]\s*$/.test(m);
 }
 
@@ -417,7 +417,8 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
     }
     // Returned template literals (`return \`${a}-${b}\``) are built strings too.
     const tpl = /\breturn\s+(`[^`]*`)/.exec(comment >= 0 ? original.slice(0, comment) : original);
-    if (tpl && tpl[1].length > 2) {
+    // Not a Swift escaped identifier (``return `default` ``).
+    if (tpl && tpl[1].length > 2 && !/^`[A-Za-z_]\w*`$/.test(tpl[1])) {
       const at = tpl.index + tpl[0].length - tpl[1].length;
       out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + "``" + original.slice(at + tpl[1].length) });
     }

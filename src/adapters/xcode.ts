@@ -132,7 +132,7 @@ export class XcodeAdapter implements Adapter {
   classify(file: string, text: string): FileKind {
     if (/Generated|\.generated\./.test(file) || /^\/\/.*(generated|DO NOT EDIT)/im.test(text.slice(0, 400))) return "generated";
     if (/@main\b|UIApplicationDelegate|NSApplicationDelegate|SceneDelegate/.test(text)) return "entry";
-    if (/:\s*(some\s+)?View\b|UIViewController|NSViewController|UIView\b|NSView\b/.test(text) && /import\s+(SwiftUI|UIKit|AppKit)/.test(text)) return "ui";
+    if (/:\s*(some\s+)?View\b|:\s*(UI|NS)\w*(View|Cell|Controller|Control|Window|Button|Label)\b|UIViewController|NSViewController|UIView\b|NSView\b/.test(text) && /import\s+(SwiftUI|UIKit|AppKit)/.test(text)) return "ui";
     const decls = (text.match(/\bfunc\s+\w+/g) ?? []).length + (text.match(/\b(init|subscript)\s*[(<]/g) ?? []).length;
     return decls === 0 ? "model" : "logic";
   }
@@ -295,7 +295,10 @@ export class XcodeAdapter implements Adapter {
     // building the same project does not contend for its build database.
     const args = ["xcodebuild", "test", ...this.containerArgs(), "-scheme", scheme, "-destination", dest, "-resultBundlePath", bundle,
       "-derivedDataPath", path.join(this.stateDir, "DerivedData"),
-      "CODE_SIGNING_ALLOWED=NO", "CODE_SIGN_IDENTITY=", "COMPILER_INDEX_STORE_ENABLE=NO"];
+      "CODE_SIGNING_ALLOWED=NO", "CODE_SIGN_IDENTITY=", "COMPILER_INDEX_STORE_ENABLE=NO",
+      // For unitgen's runs only (the project is not changed): @testable import needs testability
+      // (off in some projects' Debug config), and legacy gcov flags zero llvm's coverage counters.
+      "ENABLE_TESTABILITY=YES", "GCC_INSTRUMENT_PROGRAM_FLOW_ARCS=NO", "GCC_GENERATE_TEST_COVERAGE_FILES=NO"];
     if (req.coverage) args.push("-enableCodeCoverage", "YES");
     if (req.testFiles && m.meta?.testTarget) {
       for (const f of req.testFiles) args.push(`-only-testing:${m.meta.testTarget}/${path.basename(f, ".swift")}`);
@@ -320,12 +323,19 @@ export class XcodeAdapter implements Adapter {
       }
     }
     fs.rmSync(bundle, { recursive: true, force: true });
+    // Tests passed but not one line anywhere was hit: the counters never worked (not a real 0%).
+    const passed = tests.filter((t) => t.status === "passed").length;
+    const coverageProblem = req.coverage && coverage && passed > 0 && Object.keys(coverage).length > 0
+      && !Object.values(coverage).some((ls) => Object.values(ls).some((h) => h > 0))
+      ? `xccov recorded 0 executed lines although ${passed} test(s) passed: coverage was not collected. Check the scheme's "Gather coverage" and build settings that replace llvm coverage (GCC_INSTRUMENT_PROGRAM_FLOW_ARCS, OTHER_CFLAGS/OTHER_SWIFT_FLAGS with -profile-* or --coverage).`
+      : undefined;
     const infra = /Unable to find a destination|no available devices|requires a provisioning profile|xcodebuild: error: Could not resolve package/.exec(out)?.[0];
     return {
       ok: r.ok, compiled, tests, coverage, logFile, seconds: (Date.now() - start) / 1000,
       // xcodebuild prints simulator/package noise first: lead with its own error lines.
       excerpt: r.ok ? "" : [...new Set(out.split("\n").filter((l) => /(^|\s)error:/.test(l)).map((l) => l.trim()))].slice(0, 10).join("\n") || errorExcerpt(out),
       infraError: r.timedOut ? "timeout" : infra,
+      ...(coverageProblem ? { coverageProblem } : {}),
     };
   }
 

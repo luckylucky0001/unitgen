@@ -196,6 +196,12 @@ test("pbxproj: add and remove a test file round-trips", async () => {
   assert.deepEqual(p.targets()[0].files, ["/proj/Tests/ATests.swift", "/proj/Tests/BUnitGenTests.swift"]);
   p.removeIds([ids.fileRef, ids.buildFile]);
   assert.equal(p.text, txt);
+  // ObjectMapper layout: group `Tests`, file references with a subdirectory (`Sub/ATests.swift`).
+  const sub = new Pbxproj(txt.replace("path = ATests.swift;", "path = Sub/ATests.swift;"), "/proj");
+  assert.deepEqual(sub.targets()[0].files, ["/proj/Tests/Sub/ATests.swift"]);
+  sub.addSourceFile(sub.targets()[0], "/proj/Tests/Sub/BUnitGenTests.swift");
+  assert.deepEqual(sub.targets()[0].files, ["/proj/Tests/Sub/ATests.swift", "/proj/Tests/Sub/BUnitGenTests.swift"]);
+  assert.match(sub.text, /path = Sub\/BUnitGenTests\.swift;/);
 });
 
 test("gradle: settings includes over several lines, no includeBuild; failures per module with their reason", async () => {

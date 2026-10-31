@@ -193,7 +193,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
 
   const examples = adapter.exampleTests(m, abs).map((f) => {
     const t = stripLicense(readFile(f)).split("\n");
-    const more = t.length > 120 ? ` (first 120 of ${t.length} lines; open the full file: its expected values and error messages are reliable oracles even if it cannot run here)` : "";
+    const more = t.length > 120 ? ` (first 120 of ${t.length} lines; open the full file: its expected values and error messages are reliable oracles)` : "";
     return `// ${relPath(f, adapter.root)}${more}\n${t.slice(0, 120).join("\n")}`;
   });
 
