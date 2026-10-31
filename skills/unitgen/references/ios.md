@@ -7,14 +7,29 @@
   Keep that block when committing; delete it to remove the generated target.
 - Directory: `Tests/<Target>UnitGenTests/`, or `UnitGenTests/<Target>/` when the existing
   test target owns all of `Tests/` (sources may not overlap).
-- `verify` runs `swift test --enable-code-coverage` with a temporary manifest that keeps only
-  the generated targets; `Package.swift` is restored afterwards (a crash leaves a backup in
-  `.unitgen/Package.swift.orig`, restored on the next run).
+- `verify` runs `swift test --enable-swift-testing --enable-code-coverage` with a temporary
+  manifest that keeps only the generated targets (`--enable-swift-testing` matters: packages with
+  `swift-tools-version` < 6.0 otherwise run 0 `@Test` functions). `Package.swift` is restored
+  afterwards; after a crash or forced kill the next unitgen command restores it.
+- The baseline runs the package's own tests only; generated targets are excluded.
+- A `.target` that contains `main.swift` builds as an executable: unitgen does not offer it
+  (tests cannot import it).
 - Command Line Tools without Xcode: XCTest is unavailable, so the existing XCTest suites
   cannot run and the baseline is 0%. Only Swift Testing works there; unitgen adds the
   framework search paths it needs.
-- Packages that `import UIKit` unconditionally cannot build on macOS; `doctor` warns.
-  Use an Xcode scheme with an iOS Simulator for those (not automated yet).
+- Packages that `import UIKit` unconditionally cannot build on macOS; `doctor` warns. Use the
+  Xcode adapter for those.
+
+## Xcode projects (`--adapter xcode`)
+
+- Used automatically for `.xcodeproj`/`.xcworkspace` without a `Package.swift`; pass
+  `--adapter xcode` on every command when both exist.
+- Runs `xcodebuild test` on an iOS Simulator (or macOS for macOS targets) with
+  `-only-testing:<TestTarget>/<Class>`; coverage from the `.xcresult` (`xccov`).
+- Generated files go into the existing test target that tests the module (the brief names the
+  file); classic targets get the file registered in `project.pbxproj`, synchronized folders need
+  nothing. Commit that pbxproj change together with the test file.
+- xcodebuild runs are slow (tens of seconds): keep `mutate --max` small (10).
 
 ## Writing the test
 

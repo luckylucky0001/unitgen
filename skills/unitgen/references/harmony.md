@@ -2,24 +2,39 @@
 
 ## How unitgen runs it
 
-- Project = `build-profile.json5` + `oh-package.json5`; modules from `build-profile.json5`
-  (`modules[].srcPath`) that have `src/main/ets`.
-- Test files: `<module>/src/test/<File>.unitgen.test.ets` (local unit tests, hypium).
-  unitgen also registers each file in `src/test/List.test.ets` so hvigor runs it.
-- Runner:
-  - **hvigor** when `hvigorw` is on PATH or in the project (DevEco toolchain). Override the
-    arguments with `UNITGEN_HVIGOR_TEST_ARGS` if your toolchain differs.
-  - **shim** otherwise: TypeScript transpiles `.ets` on the fly, `@ohos/hypium` is replaced
-    by a compatible implementation, every other `@kit.*`/`@ohos.*` import becomes an inert
-    stub, and c8 measures coverage against the original `.ets` lines. Faithful for pure
-    logic only. Files importing platform kits are ranked as `platform` (low priority).
-- Shim limits come back as `INFRA_ERROR`, never as a test problem: uninstalled ohpm packages,
-  ArkTS syntax TypeScript cannot parse, ArkUI/system globals the shim lacks. Do not edit the
-  test to dodge them — pick another target. If most of a module hits them, say so and stop:
-  that module needs hvigor/DevEco (`UNITGEN_HARMONY_MODE=hvigor`).
-- The shim does not run the ArkTS compiler, so generated tests are linted against the most
-  common ArkTS restrictions; violations come back as `COMPILE_ERROR`. Before shipping,
-  run the tests once in DevEco / hvigor.
+- Project = `build-profile.json5` (or a committed `build-profile.template.json5` when the real
+  one is git-ignored) + `oh-package.json5`; modules from `modules[].srcPath` that have `src/main/ets`.
+- Test files: `<module>/src/test/<File>.unitgen.test.ets` (local unit tests, hypium). unitgen
+  registers each accepted file in `src/test/List.test.ets` so DevEco/hvigor runs it too.
+- Two runners; `unitgen doctor` says which one is used and why:
+  - **hvigor** (default when it can work): DevEco Studio / Command Line Tools are found
+    automatically (`/Applications/DevEco-Studio.app`, `DEVECO_STUDIO_HOME`). Local unit tests
+    run in the Previewer runtime with the real ArkTS compiler and hvigor's coverage report.
+    Requirements: `@ohos/hypium` in devDependencies, `ohpm install` done, no
+    `compileSdkVersion` other than the installed SDK's API level. Each verify takes ~5–20 s;
+    unitgen points `List.test.ets` at the file under test while it runs (restored afterwards,
+    also after a crash), so a broken existing test elsewhere does not block you.
+  - **Node shim** (`UNITGEN_HARMONY_MODE=shim`, or automatically when hvigor cannot run):
+    TypeScript transpiles `.ets`, `@ohos/hypium` is replaced by a compatible implementation,
+    every `@kit.*`/`@ohos.*` import is an inert stub, ArkUI `struct`/`@Builder` declarations are
+    blanked out (helpers next to them still load), coverage comes from V8. Fast (< 1 s), faithful
+    for pure logic only, and it does not run the ArkTS compiler: generated tests are linted
+    against the common ArkTS restrictions instead.
+- Baseline and verify must use the same runner; switching (`UNITGEN_HARMONY_MODE`) requires
+  `unitgen baseline` again, then `verify` of the files measured with the other runner.
+- Environment problems come back as `INFRA_ERROR`, never as a test problem: production code
+  that does not compile, uninstalled ohpm packages, ArkTS syntax the shim cannot parse,
+  missing coverage (see below). Don't edit the test to dodge them — pick another target.
+
+### Known environment pitfalls (all reported by doctor / baseline)
+
+- `@ohos/hypium` older than 1.0.19 delivers coverage through `printSync`, which the Previewer
+  drops: tests pass, coverage is 0 → `INFRA_ERROR`. Upgrade the devDependency and `ohpm install`.
+- A module that imports a package its own `oh-package.json5` does not declare (only the root
+  does) does not build under hvigor: the baseline skips it and names the package; `targets`
+  lists its files last.
+- `hvigor-config.json5` pinning a plugin version needs `~/.npmrc` (npm download); without it
+  unitgen uses the shim and says so.
 
 ## Writing the test
 
@@ -40,7 +55,7 @@ export default function urlUnitGenTest() {
   describe('UrlUnitGenTest', () => {
     it('parsesSingleParameter', 0, () => {
       for (const c of CASES) {
-        expect(parseQuery(c.input).get('a')).message(c.input).assertEqual(c.expected);
+        expect(parseQuery(c.input).get('a')).assertEqual(c.expected);
       }
     });
   });
@@ -48,12 +63,22 @@ export default function urlUnitGenTest() {
 ```
 
 - `export default function <camelName>()` wrapping one `describe('<SuiteName>', …)`.
-- `it(name, 0, fn)` — the middle argument is the test attribute; always `0`.
+- `it(name, 0, fn)` — the middle argument is the test attribute; always `0`. Async tests
+  time out after 15 s, like hypium's default.
 - Matchers: `assertEqual` (strict ===), `assertDeepEquals`, `assertTrue/False`, `assertNull`,
   `assertUndefined`, `assertContain`, `assertClose(v, eps)`, `assertLarger/Less[OrEqual]`,
-  `assertThrowError('exact message')` on a *function*, `.not()`, `.message('ctx')`,
+  `assertThrowError('exact message')` on a *function*, `.not()`,
   `await expect(promise).assertPromiseIsResolvedWith(v)` / `assertPromiseIsRejected()`.
+  `.message('ctx')` exists only in hypium ≥ 1.0.19 — the brief says whether you may use it.
+- `expect()` takes a value: never pass a call that returns `void`; call it, then assert on its effects.
+- Only import what the module exports; module-private code is unreachable (the brief warns
+  when a file exports nothing).
 - ArkTS restrictions: no `any`/`unknown`, object literals need a declared interface/class
-  type, no destructuring, no `var`, no function expressions, no `for…in`, no `obj['key']`
-  on non-arrays, no `delete`, no object spread, typed empty arrays (`const xs: number[] = []`).
-- Only test what doesn't depend on platform API results under the shim (they return stubs).
+  type, no destructuring, no `var`, no function expressions, no `for…in`, `obj['key']` only
+  on `Record` types and arrays, no `delete`, no object spread, typed empty arrays
+  (`const xs: number[] = []`).
+- State management: arrays/Maps/Sets/Dates assigned to `@Trace` (V2) fields are stored as
+  observable proxies — compare by content (`assertDeepEquals`, length, elements), never by
+  identity (`===`).
+- System APIs are stubs (shim) or mostly mocks (Previewer): test the logic around them, never
+  what they return.

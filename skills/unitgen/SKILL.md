@@ -18,11 +18,12 @@ UNITGEN="${UNITGEN:-$(command -v unitgen || true)}"
 "$UNITGEN" doctor -C <project-root>
 ```
 
-Needs Node >= 22.18 (runs the TypeScript sources directly); `bin/unitgen` uses the Node/JDK in
-`../unitgen-env` automatically when present, so no extra environment setup is needed. `doctor` checks the platform
-toolchain: Swift (Xcode or Command Line Tools), JDK 17+ and Android SDK, or hvigor (falls back
-to a Node shim for ArkTS pure logic). Fix whatever it reports before continuing; do not
-work around a missing toolchain by skipping verification.
+Needs Node >= 22.18 (runs the TypeScript sources directly); without one on PATH, `bin/unitgen`
+uses the Node bundled with DevEco Studio, or the Node/JDK in `../unitgen-env` when present.
+`doctor` checks the platform toolchain: Swift (Xcode or Command Line Tools), JDK 17+ and Android
+SDK, or DevEco Studio's hvigor (found automatically; otherwise a Node shim for ArkTS pure logic,
+and doctor says why). Fix whatever it reports before continuing; do not work around a missing
+toolchain by skipping verification.
 
 All commands accept `-C <root>`; run them from the project root otherwise.
 
@@ -42,9 +43,13 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
 
 ## Workflow
 
-1. **Baseline (once):** `"$UNITGEN" baseline` — runs the existing tests with coverage.
-   Require exit 0 and a successful measured baseline before generating tests. A failed baseline
-   preserves previous coverage as evidence but marks the baseline invalid. Read its log and fix the environment / report failures.
+1. **Baseline (once):** `"$UNITGEN" baseline` — runs the project's own tests with coverage
+   (files unitgen generated are excluded). Require exit 0 before generating tests. A project
+   without tests gets a valid 0% baseline. If existing tests fail, the output lists them: report
+   them; `baseline --allow-failing` keeps a baseline from the passing ones (the HarmonyOS shim
+   does this by itself for tests that fail only because they call stubbed system APIs).
+   A failed baseline marks the baseline invalid; read its message and log, fix the environment
+   or report it. Re-run the baseline after switching runners (e.g. `UNITGEN_HARMONY_MODE`).
 2. **Pick targets:** `"$UNITGEN" targets --limit 15`. If the user named files or a module,
    use those (`--module <name>` narrows the list). Prefer `logic` kind with many uncovered
    lines. Skip a target if it is pure glue around platform APIs you cannot fake.
@@ -68,23 +73,28 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
       | `COMPILE_ERROR` | fix the test using the compiler output |
       | `TEST_FAILURES` | re-read the production code; fix the *expectation*. If the code is really wrong, assert current behaviour and add `// UNITGEN-SUSPECT: <why>` (collected into the report automatically) |
       | `FLAKY` | remove the source of nondeterminism (time, ordering, shared state, real dispatchers) |
-      | `NO_GAIN` | the tests only hit already-covered lines; aim at the `!` lines in a fresh brief |
+      | `NO_GAIN` | the tests only hit already-covered lines; aim at the `!` lines in a fresh brief. `--allow-no-gain` only when a file is intentionally redundant, and say why in a note |
       | `NO_ASSERTIONS` / `NO_TESTS` | add real assertions / check suite & class naming |
-      | `INFRA_ERROR` | environment problem (missing SDK, uninstalled ohpm packages, ...): report it, pick another target; don't edit tests to dodge it |
+      | `INFRA_ERROR` | environment problem (missing SDK, uninstalled ohpm packages, production code that does not compile, coverage that never arrives, ...): follow the fix the message names or report it and pick another target; don't edit tests to dodge it. It does not count as an attempt |
 
    5. **Check assertion strength:** `"$UNITGEN" mutate <test-file>` flips operators / deletes
       calls on the lines your test covers and re-runs it. Coverage alone does not prove the
       assertions check anything. For each *survived* mutant, add an assertion that would fail
       (then `verify` and `mutate` again), unless the mutant is equivalent (no observable change,
       e.g. an unreachable bound or a value nobody reads) — exclude it with
-      `"$UNITGEN" mutate <test-file> --equivalent <line>` and say why in `"$UNITGEN" note "..."`.
+      `"$UNITGEN" mutate <test-file> --equivalent <id>[,<id>...]` using the mutant ids printed in
+      brackets (`[12.2]`; a bare line number excludes every mutant on that line) and say why in
+      `"$UNITGEN" note "..."`. Excluded mutants are not run again.
       Require the configured gate (default `--min-score 80`); exit 2 means it failed.
       Check observable side effects too (for example, data actually saved to the network fake),
       not just the local return value. Report sampled counts and crash-only kills separately.
       A run samples up to `--max` (default 15) mutants, preferring deleted calls,
       negated conditions and comparison flips; the output says how many candidates exist. Re-runs
       re-check previous survivors first and then move on to mutants not tried yet.
-      Mutants that don't compile are replaced and don't count; the source is always restored.
+      Mutants that don't compile are replaced and don't count; the source is always restored,
+      also after a crash or forced kill (the next command restores it and takes over the stale lock).
+      A mutant that makes the code loop forever is killed by a timeout together with every
+      process the test run started.
       Re-verifying after strengthening shows "+0 vs. its previously accepted version" and is
       still ACCEPTED — new assertions don't need new lines.
    6. Give up on a target after ~4 attempts: `"$UNITGEN" reject <test-file> "<why>"` moves the
@@ -108,9 +118,10 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
 - Expected values come from reading the code (or a trustworthy oracle such as an RFC
   test vector), never from "whatever the test printed".
 - Run one `verify` at a time per project: runs share build directories.
-- All CLI commands acquire a project lock, including recovery. Never remove a live lock.
-  After a forced kill, confirm the owner/builds have stopped before removing a stale
-  `.unitgen/run.lock`; the next command restores interrupted mutations.
+- All CLI commands acquire a project lock, including recovery. Never remove `.unitgen/run.lock`
+  by hand: after a forced kill the next command checks that the old command and the processes
+  it started are gone (stopping leftovers it can identify), takes the lock over and restores
+  interrupted mutations. If it says builds are still running, stop them with the command it prints.
 - Do not add dependencies. Use only the libraries the brief lists or the example tests import.
 
 ## Platform notes
