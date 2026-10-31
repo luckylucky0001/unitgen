@@ -272,7 +272,9 @@ export function mutantsFor(text: string, lines: number[], opts: MutantOptions = 
  * `at`: index of the mutated operator in the line; `op`: its text.
  */
 function literalChain(src: string[], ln: number, at: number, op: string): boolean {
-  const lit = String.raw`(?:0x[\da-fA-F]+|\d+(?:\.\d+)?|\u0000+|true|false|null|undefined)`;
+  // Literal types: numbers, strings, booleans, null/undefined, and enum members (`DateType.YmdHms`).
+  const lit = String.raw`(?:0x[\da-fA-F]+|\d+(?:\.\d+)?|\u0000+|true|false|null|undefined|[A-Z][\w$]*\.[A-Za-z_$][\w$]*)`;
+  const id = String.raw`[A-Za-z_$][\w$.]*`;
   const line = maskStrings(src[ln - 1].replace(/\/\/.*$/, ""));
   // The rest of the condition: following lines while each one ends in `||` / `&&`.
   let next = "";
@@ -281,14 +283,22 @@ function literalChain(src: string[], ln: number, at: number, op: string): boolea
     next += " " + prev;
   }
   const before = line.slice(0, at), after = line.slice(at + op.length) + " " + next;
-  const v = (op.includes("=")
-    ? /([A-Za-z_$][\w$.]*)\s*$/.exec(before)
-    : new RegExp(String.raw`([A-Za-z_$][\w$.]*)\s*[!=]==?\s*${lit}\s*\)*\s*$`).exec(before))?.[1];
-  if (!v) return false;
-  if (op.includes("=") && !new RegExp(String.raw`^\s*${lit}`).test(after)) return false;
-  // A flipped comparison narrows the rest of the `||` chain; a new `&&` only its right operand.
-  let rest = op.includes("=") ? after.replace(new RegExp(String.raw`^\s*${lit}`), "") : after;
-  if (!op.includes("=")) {
+  let v: string | undefined;
+  let rest = after;
+  if (op.includes("=")) {
+    // `v === lit` or `lit === v`.
+    const left = new RegExp(String.raw`(${id})\s*$`).exec(before)?.[1], afterLit = new RegExp(String.raw`^\s*${lit}(?![\w$])`).exec(after);
+    const leftLit = new RegExp(String.raw`(?:^|[^\w$.])${lit}\s*$`).test(before), right = new RegExp(String.raw`^\s*(${id})`).exec(after);
+    if (left && afterLit && !new RegExp(String.raw`^${lit}$`).test(left)) { v = left; rest = after.slice(afterLit[0].length); }
+    else if (leftLit && right) { v = right[1]; rest = after.slice(right[0].length); }
+    if (!v) return false;
+    // In `if (v != 2) ... else if (v == 3)` the else branches see v narrowed as well.
+    if (/\bif\s*\(/.test(before)) rest += " " + elseIfConditions(src, ln);
+  } else {
+    v = new RegExp(String.raw`(${id})\s*[!=]==?\s*${lit}\s*\)*\s*$`).exec(before)?.[1]
+      ?? new RegExp(String.raw`${lit}\s*[!=]==?\s*(${id})\s*\)*\s*$`).exec(before)?.[1];
+    if (!v) return false;
+    // A new `&&` narrows only its right operand.
     let depth = 0;
     for (let i = 0; i < rest.length; i++) {
       if (rest[i] === "(") depth++;
@@ -296,8 +306,27 @@ function literalChain(src: string[], ln: number, at: number, op: string): boolea
       else if (depth === 0 && rest.startsWith("||", i)) { rest = rest.slice(0, i); break; }
     }
   }
+  const name = v.replace(/[.$]/g, "\\$&");
   // `typeof v === 'object'` compares the typeof result, not v.
-  return new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${v.replace(/[.$]/g, "\\$&")}\s*[!=]==?\s*${lit}`).test(rest);
+  return new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${name}\s*[!=]==?\s*${lit}|${lit}\s*[!=]==?\s*${name}(?![\w$.])`).test(rest);
+}
+
+/** Conditions of the `else if (...)` branches that follow the `if` on line `ln` (same chain). */
+function elseIfConditions(src: string[], ln: number): string {
+  let depth = 0;
+  const out: string[] = [];
+  for (let j = ln - 1; j < src.length && j < ln + 200; j++) {
+    let l = maskStrings(src[j].replace(/\/\/.*$/, ""));
+    if (j > ln - 1 && depth === 1 && /^\s*\}\s*else\s+if\b/.test(l)) out.push(l);
+    // The first line may itself be `} else if (...) {`: count from its `if`.
+    if (j === ln - 1) l = l.slice(Math.max(0, l.search(/\bif\s*\(/)));
+    for (const c of l) {
+      if (c === "{") depth++;
+      if (c === "}") depth--;
+    }
+    if (j > ln - 1 && depth <= 0) break;
+  }
+  return out.join(" ");
 }
 
 function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mutant[] {
@@ -328,7 +357,7 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
       const m = re.exec(masked);
       if (!m) continue;
       if ((op === "|| -> &&" && nullGuard(masked, "||", text)) || (op === "&& -> ||" && nullGuard(masked, "&&", text))) continue;
-      if (opts.literalNarrowing && /^(=== -> !==|!== -> ===|\|\| -> &&|&& -> \|\|)$/.test(op) && literalChain(src, ln, m.index, m[0])) continue;
+      if (opts.literalNarrowing && /^(=== -> !==|!== -> ===|== -> !=|!= -> ==|\|\| -> &&|&& -> \|\|)$/.test(op) && literalChain(src, ln, m.index, m[0])) continue;
       // `"0" + s` is a concatenation: `"0" - s` never compiles.
       if (op === "+ -> -" && (masked[m.index - 1] === "\u0000" || masked[m.index + m[0].length] === "\u0000")) continue;
       const mutated = original.slice(0, m.index) + rep + original.slice(m.index + m[0].length);

@@ -31,6 +31,8 @@ export interface RunOpts {
   signal?: AbortSignal;
   /** Stream build output to stderr; stdout remains reserved for CLI results / JSON. */
   stream?: boolean;
+  /** Only stream lines this accepts (the log file still gets everything). */
+  streamLine?: (line: string) => boolean;
 }
 
 const cancellation = new AbortController();
@@ -146,6 +148,7 @@ export async function runAsync(cmd: string[], opts: RunOpts = {}): Promise<CmdRe
     const heartbeat = setInterval(() => {
       if (stream) log(`still running (${Math.floor((Date.now() - start) / 1000)}s); log: ${opts.logFile ?? "stderr"}`);
     }, 30000);
+    let pending = "";
     const capture = (chunk: string) => {
       size += Buffer.byteLength(chunk);
       if (size > 256 * 1024 * 1024) { overflow = true; stop(); return; }
@@ -154,7 +157,14 @@ export async function runAsync(cmd: string[], opts: RunOpts = {}): Promise<CmdRe
         try { fs.appendFileSync(opts.logFile, chunk); }
         catch (e) { logError = e as Error; stop(); }
       }
-      if (stream) process.stderr.write(chunk);
+      if (stream && !opts.streamLine) process.stderr.write(chunk);
+      else if (stream) {
+        pending += chunk;
+        const lines = pending.split("\n");
+        pending = lines.pop() ?? "";
+        const shown = lines.filter((l) => opts.streamLine!(l));
+        if (shown.length) process.stderr.write(shown.join("\n") + "\n");
+      }
     };
     child.stdout.setEncoding("utf8").on("data", capture);
     child.stderr.setEncoding("utf8").on("data", capture);

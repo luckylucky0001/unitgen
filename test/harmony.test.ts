@@ -453,3 +453,46 @@ test("assignments to locals declared without a value are not deleted", () => {
   const tops = mutantsFor(ts, [2, 4]).map((m) => `${m.line}:${m.op}`);
   assert.deepEqual(tops.filter((o) => o.endsWith("delete assignment")), ["4:delete assignment"]);
 });
+
+test("narrowing guard: enum members, literals on the left, and if / else-if chains", () => {
+  const ts = [
+    "export function f(type: number, kind: DateType, a: number[] | null | undefined): number {",
+    "  if (kind == DateType.YmdHms || kind == DateType.YmdHm) {",
+    "    return 1;",
+    "  }",
+    "  if (undefined !== a && null !== a && a.length !== 0) {",
+    "    return 2;",
+    "  }",
+    "  if (type == 1) {",
+    "    return 3;",
+    "  } else if (type == 2) {",
+    "    return 4;",
+    "  } else if (type == 3) {",
+    "    return 5;",
+    "  }",
+    "  if (type == 9) {",
+    "    return 6;",
+    "  }",
+    "  return 0;",
+    "}",
+  ].join("\n");
+  const lines = ts.split("\n").map((_, i) => i + 1);
+  const strict = mutantsFor(ts, lines, { literalNarrowing: true }).map((m) => `${m.line}:${m.op}`);
+  for (const o of ["2:== -> !=", "2:|| -> &&", "5:!== -> ===", "8:== -> !=", "10:== -> !="]) assert.ok(!strict.includes(o), o);
+  // The last branch of the chain, and an if without else-if, can be flipped.
+  for (const o of ["12:== -> !=", "15:== -> !="]) assert.ok(strict.includes(o), o);
+});
+
+test("system-API detection: an import clause never spans into the next import", async () => {
+  const { usedPlatformImports } = await import("../src/adapters/harmony.ts");
+  const text = [
+    "import util from '@ohos.util';",
+    "import { Base64Util } from './Base64Util';",
+    "import { DateType } from '../entity/constraint';",
+    "import {",
+    "  buffer",
+    "} from '@kit.ArkTS';",
+    "export function f(s: string, t: DateType): string { return util.format(s) + buffer.from(s) + Base64Util.encode(s) + t; }",
+  ].join("\n");
+  assert.deepEqual(usedPlatformImports(text), ["util", "buffer"]);
+});

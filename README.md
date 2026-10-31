@@ -333,6 +333,9 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 | iOS SwiftPM | llvm-cov 把函数里的空行、注释、`#if/#else` 计为可执行行，brief 把空行标成未覆盖，前后分母也对不上（Splash：0/33 → 36/36） | 这些行一律不计 |
 | 变异测试 | 唯一能编译的变异被标成等价后，门禁报 FAILED「no mutant was evaluated」、报告写 0%（Splash 的 Font）；删掉「声明时没赋值的局部常量」的赋值注定编译不过；`var x: Int?` 行尾的 `?` 被当成三元表达式续行，下一行的删除变异全部丢失 | 门禁改为 NOT_APPLICABLE、报告写 n/a；跳过这类删除；修正续行判断 |
 | 运行 | 在工程子目录里执行命令报「No supported project」 | 像 git 一样向上查找工程根目录；鸿蒙模块目录继续向上找到应用根目录 |
+| 鸿蒙 hvigor | 警告很多的模块（harmony-utils：151 条 ArkTS:WARN）里，COMPILE_ERROR 只给出 80 行警告、看不到真正的错误：hvigor 在 stdout 管道写完前就退出，超过约 64 KB 的部分丢失 | 输出不完整时改读 hvigor 自己的 `.hvigor/outputs/build-logs/build.log`；终端只显示 hvigor 进度和错误（基线的 stderr 从 10,751 行降到 336 行），完整输出照样写日志 |
+| 鸿蒙 brief/targets | import 解析跨到了下一条 import：项目自己的枚举 `DateType` 被当成系统 API，相关行标成 `!~`，文件被排成 platform | 一条 import 不再跨过另一条 import |
+| 变异测试 | hvigor 下枚举比较链（`type == DateType.YmdHms \|\| type == DateType.YmdHm`）、`if / else if` 链、字面量写在左边（`undefined !== a && null !== a`）里的取反仍然编译不过：DateHelper 56 个里 16 个 | 收窄判断覆盖这三种写法；对照实测结果，去掉的 16 个全是编译不过的，没有误伤 |
 | 基线 | 重跑基线时，已经接受的生成测试被算进「改造前」（报告写成 6% → 34%，实际起点是 0） | 基线只跑项目原有的测试（四种运行器都处理了） |
 | 基线 | 因为平台桩而失败的旧测试让基线作废；shim 和 hvigor 的数据混在一起 | shim 下自动容忍这类失败（会列出来），其他情况用 `--allow-failing`；记录运行器，不一致时拒绝 verify |
 | 变异测试 | Swift 的 `if cond {`、尾随闭包、成员赋值、`case .x: return 2001`、返回的字符串都没有变异体：Rainbow 的 ConditionalStyleBuilder 只有 2 个候选，Kingfisher 的「100%」是虚高 | 补上这些算子；不再生成 `$0 → $1`、类型联合 `0 \| 1` 这类注定编译不过的变异 |

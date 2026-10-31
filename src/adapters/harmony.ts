@@ -202,10 +202,15 @@ export function parseArkTsErrors(text: string): { file: string; line: number; co
 }
 
 /** Local names imported from @kit.* / @ohos.* / @system.* that the code (outside import lines) actually uses. */
+/** ArkUI globals that need no import: dialogs shown by the UI framework (only mocks in tests). */
+const ARKUI_DIALOGS = ["AlertDialog", "ActionSheet", "DatePickerDialog", "TimePickerDialog", "TextPickerDialog", "CalendarPickerDialog"];
+const ARKUI_GLOBALS = ["Color", "Alignment", "ButtonStyleMode", "AppStorage", "getContext", ...ARKUI_DIALOGS];
+
 export function usedPlatformImports(text: string): string[] {
   const body = text.replace(/^\s*import\s[^;\n]*(;|$)/gm, "");
   const out: string[] = [];
-  for (const m of text.matchAll(/import\s+(?:type\s+)?([\s\S]*?)\s+from\s+['"]@(?:kit|ohos|system|arkts|hms)\.[^'"]+['"]/g)) {
+  // The clause may span lines (`import {\n a,\n b\n} from '@kit.X'`) but never another import's `from`.
+  for (const m of text.matchAll(/import\s+(?:type\s+)?((?:(?!\bfrom\b|\bimport\b|;)[\s\S])*?)\s+from\s+['"]@(?:kit|ohos|system|arkts|hms)\.[^'"]+['"]/g)) {
     if (/^type\b/.test(m[0].replace(/^import\s+/, ""))) continue;
     const names = m[1].replace(/[{}]/g, " ").split(/[,\s]+/).filter(Boolean);
     // `a as b` -> b; `* as ns` -> ns
@@ -453,8 +458,8 @@ export class HarmonyAdapter implements Adapter {
     // $r()/$rawfile() resource references load fine; enum/global *usage* in logic does not.
     // A few functions calling system APIs in an otherwise pure-logic file (url helpers with one
     // url.URL call) still make it a logic target: rank by how much of the code touches them.
-    if (platformImports > 0 || /\b(Color|Alignment|ButtonStyleMode|AppStorage|getContext)\./.test(text)) {
-      const names = [...usedPlatformImports(text), "Color", "Alignment", "ButtonStyleMode", "AppStorage", "getContext"];
+    if (platformImports > 0 || new RegExp(`\\b(${ARKUI_GLOBALS.join("|")})\\.`).test(text)) {
+      const names = [...usedPlatformImports(text), ...ARKUI_GLOBALS];
       const body = text.split("\n").filter((l) => !/^\s*import\s/.test(l));
       const touching = body.filter((l) => names.some((n) => new RegExp(`\\b${n.replace(/\$/g, "\\$")}\\b`).test(l))).length;
       // Several kits, or many lines touching them (system objects kept in fields are not counted, so
@@ -567,7 +572,7 @@ export class HarmonyAdapter implements Adapter {
   }
 
   platformLines(text: string): Set<number> {
-    const names = [...usedPlatformImports(text), "AppStorage", "AppStorageV2", "PersistentStorage", "getContext"];
+    const names = [...usedPlatformImports(text), "AppStorage", "AppStorageV2", "PersistentStorage", "getContext", ...ARKUI_DIALOGS];
     const calls = (n: string) => new RegExp(`(?<![\\w$.])${n.replace(/\$/g, "\\$")}\\s*[.(]`);
     // Objects a system API returned are mocks too: `const mac = cryptoFramework.createMac(...)`,
     // then `mac.update(...)`, `const r = await mac.doFinal()`, `return r.data`.
@@ -929,13 +934,18 @@ export class HarmonyAdapter implements Adapter {
         process.env.UNITGEN_HVIGOR_DAEMON === "0" ? "--no-daemon" : "--daemon"];
     const args = [tc.hvigor, "--mode", "module", "-p", `module=${m.name}@default`, "-p", `product=${product}`, ...extra];
     const daemon = extra.includes("--daemon");
+    const runStart = Date.now();
     // A Previewer of this project still running means a wedged daemon (e.g. a run killed by the user).
     if (daemon && this.ownPreviewers().length) this.resetHvigor(tc, "left running by an earlier run");
     const restore = files ? this.swapList(m, files) : undefined;
     let r;
     try {
       // A single test file (verify, mutants) never needs the 30 minutes a whole project's build may take.
-      r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? (files ? 900 : 1800), logFile: path.join(this.stateDir, "logs", `${label}.log`), env: tc.env });
+      r = await runAsync(args, {
+        cwd: this.root, timeoutSec: req.timeoutSec ?? (files ? 900 : 1800), logFile: path.join(this.stateDir, "logs", `${label}.log`), env: tc.env,
+        // Large modules print thousands of ArkTS warning lines: show hvigor's progress and errors only.
+        streamLine: (l) => /^> hvigor|ERROR|Error Message|\btasks? in total/.test(stripAnsi(l)) && !/ArkTS:WARN/.test(l),
+      });
     } catch (e) {
       if (daemon && e instanceof RunCancelled) this.resetHvigor(tc, "after the cancelled run");
       throw e;
@@ -943,7 +953,17 @@ export class HarmonyAdapter implements Adapter {
       restore?.();
     }
     if (daemon && r.timedOut) this.resetHvigor(tc, "after the timed-out run");
-    const text = stripAnsi(r.out);
+    let text = stripAnsi(r.out);
+    // hvigor exits before its stdout pipe drains: past ~64 KB (a module with many ArkTS warnings)
+    // the rest, compile errors included, is lost. Its own build log has everything.
+    if (!/\d+ tasks? in total/.test(text)) {
+      const buildLog = path.join(this.root, ".hvigor", "outputs", "build-logs", "build.log");
+      try {
+        if (fs.statSync(buildLog).mtimeMs >= runStart - 1000) {
+          text = stripAnsi(readFile(buildLog)).replace(/^\[[^\]]*\] \[\w+\] [\w-]+ - /gm, "");
+        }
+      } catch { /* no build log */ }
+    }
     const runLog = `$ ${args.join(" ")}\n${text}\n`;
     if (r.timedOut) return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: "", log: runLog, infraError: "timeout" };
     const infra = /SDK (?:component|path)[^\n]*(?:missing|not found|invalid)[^\n]*|Unable to find the SDK[^\n]*|ohpm ERROR[^\n]*|Cannot find module '@ohos\/hypium'[^\n]*|Invalid value of 'DEVECO_SDK_HOME'[^\n]*|00303\d{3}[^\n]*/i.exec(text)?.[0];
