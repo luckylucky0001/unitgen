@@ -433,7 +433,17 @@ export class HarmonyAdapter implements Adapter {
     // System APIs are stubs under the shim and mostly mocks in hvigor's Previewer runtime: either way
     // a unit test cannot exercise them, so such files rank below pure logic.
     // $r()/$rawfile() resource references load fine; enum/global *usage* in logic does not.
-    if (platformImports > 0 || /\b(Color|Alignment|ButtonStyleMode|AppStorage|getContext)\./.test(text)) return "platform";
+    // A few functions calling system APIs in an otherwise pure-logic file (url helpers with one
+    // url.URL call) still make it a logic target: rank by how much of the code touches them.
+    if (platformImports > 0 || /\b(Color|Alignment|ButtonStyleMode|AppStorage|getContext)\./.test(text)) {
+      const names = [...usedPlatformImports(text), "Color", "Alignment", "ButtonStyleMode", "AppStorage", "getContext"];
+      const body = text.split("\n").filter((l) => !/^\s*import\s/.test(l));
+      const touching = body.filter((l) => names.some((n) => new RegExp(`\\b${n.replace(/\$/g, "\\$")}\\b`).test(l))).length;
+      // Several kits, or many lines touching them (system objects kept in fields are not counted, so
+      // breadth matters too): a platform file.
+      const kits = new Set([...text.matchAll(/from\s+['"](@(?:kit|ohos|system|arkts|hms)\.[^'"]+)['"]/g)].map((m) => m[1]));
+      if (kits.size >= 3 || touching * 10 >= estimateExecutable(text).length) return "platform";
+    }
     if (this.mode() === "shim") {
       const ohm = path.join(this.root, "oh_modules");
       const third = [...text.matchAll(/from\s+['"](@[\w-]+\/[^'"]+|[a-z][^'".]*)['"]/g)].map((m) => m[1]).filter((p) => p !== "@ohos/hypium");

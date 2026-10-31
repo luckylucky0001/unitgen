@@ -56,6 +56,8 @@ export function estimateExecutable(text: string): number[] {
     }
     if (!l || l.startsWith("//") || l.startsWith("*") || l.startsWith("@") || l.startsWith("import ") || l.startsWith("package ")) return;
     if (/^[{}()\[\],;]+$/.test(l)) return;
+    // Continuation lines of a data literal (`'com', 'net', 'org',` / `0x1F, 0x20,`) are one expression.
+    if (/^((['"`])(?:\\.|(?!\2).)*\2|-?(0x[\da-f]+|\d+(\.\d+)?)|true|false|null)(\s*,\s*((['"`])(?:\\.|(?!\8).)*\8|-?(0x[\da-f]+|\d+(\.\d+)?)|true|false|null))*\s*,?\s*[\])}]?[;,]?$/i.test(l)) return;
     // Field / interface member declarations without an initializer ("name?: string;", "val id: Int").
     if (/^(public |private |protected |readonly |static |override |val |var |let |declare )*[\w$]+[?!]?\s*:\s*[^=(){}]+[;,]?$/.test(l)) return;
     if (/^(public |private |internal |protected |open |final |abstract |data |sealed |export |static )*(class|struct|enum|protocol|interface|object|extension|namespace)\b/.test(l)) return;
