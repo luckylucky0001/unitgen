@@ -59,7 +59,7 @@ unitgen --help
 mkdir -p ~/.claude/skills && ln -sfn ~/unitgen/skills/unitgen ~/.claude/skills/unitgen
 ```
 
-演示建议：先在一个开源工程上跑 `unitgen doctor` → `baseline` → `targets`，再让 Claude Code 用 Skill 补 1–2 个文件，最后 `unitgen mutate` 和 `unitgen report`。Android 工程第一次构建会下载 Gradle 依赖，建议提前跑一次 `baseline` 预热。
+演示建议：先在一个开源工程上跑 `unitgen doctor` → `baseline` → `targets`，再让 Claude Code 用 Skill 补 1–2 个文件，最后 `unitgen mutate` 和 `unitgen report`。Android 工程第一次构建会下载 Gradle 依赖，建议提前跑一次 `baseline` 预热；鸿蒙工程第一次 hvigor 构建也会慢一些。`doctor` 会说明用的是哪个运行器以及原因，有问题先按它的提示处理。
 
 ## 快速开始
 
@@ -75,7 +75,9 @@ unitgen reject <测试文件> "原因"       # 放弃并隔离
 unitgen report        # .unitgen/REPORT.md
 ```
 
-需要 Node ≥ 22.18（直接运行 TypeScript 源码，无构建步骤）。如果仓库旁边有 `unitgen-env/env.sh`（本机就是），`bin/unitgen` 会自动用里面的 Node 24 / JDK 17 / Android SDK 路径，只对 unitgen 进程生效。
+鸿蒙工程先在工程根目录执行一次 `ohpm install`（DevEco Studio 打开工程时也会自动执行）；同时有 `Package.swift` 和 `.xcodeproj` 的 iOS 工程，想走 Xcode + 模拟器时，每条命令都加 `--adapter xcode`。
+
+需要 Node ≥ 22.18（直接运行 TypeScript 源码，无构建步骤）。PATH 里没有合适的 Node 时，`bin/unitgen` 会改用 DevEco Studio 自带的 Node；如果仓库旁边有 `unitgen-env/env.sh`，会自动用里面的 Node / JDK 17 / Android SDK 路径，只对 unitgen 进程生效。
 
 ### 作为 Claude Code Skill 使用
 

@@ -144,6 +144,17 @@ test("a stale lock whose build is still running is not taken over", { skip: proc
   assert.throws(() => acquireProjectLock(dir, () => {}), new RegExp(`still running \\(${build.pid}\\).*kill -TERM -${build.pid}`));
 });
 
+test("per-command help includes option continuation lines; --equivalent validates its values", (t) => {
+  const dir = temp(t), cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+  const help = spawnSync(process.execPath, [cli, "mutate", "--help"], { encoding: "utf8", cwd: dir });
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /--equivalent <id\|line>/);
+  fs.writeFileSync(path.join(dir, "settings.gradle"), "include ':app'\n");
+  const bad = spawnSync(process.execPath, [cli, "mutate", "-C", dir, "x.kt", "--target", "y.kt", "--equivalent", "12.x"], { encoding: "utf8", env: { ...process.env, UNITGEN_QUIET: "1" } });
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /--equivalent takes line numbers \(12\) or mutant ids \(12\.2\); got: 12\.x/);
+});
+
 test("help and empty commands accept leading common options outside a project", (t) => {
   const dir = temp(t), cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
   for (const args of [["--json", "help"], ["--json"], ["--module", ":app", "help"]]) {

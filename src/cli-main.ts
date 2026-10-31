@@ -242,6 +242,10 @@ export async function main(argv: string[]): Promise<number> {
     case "mutate": {
       if (!rest[0]) throw new Error("usage: unitgen mutate <test-file> [--target <source>] [--max 10]");
       const relTest = relPath(path.resolve(rest[0]), root);
+      // Repeatable and comma-separated: --equivalent 12.2 --equivalent 14.1,15 (validated before anything runs).
+      const ids = (o.equivalent ?? []).flatMap((x) => x.split(",")).map((x) => x.trim()).filter(Boolean);
+      const bad = ids.filter((x) => !/^\d+(\.\d+)?$/.test(x));
+      if (bad.length || (o.equivalent && !ids.length)) throw new Error(`--equivalent takes line numbers (12) or mutant ids (12.2); got: ${bad.join(", ") || "nothing"}`);
       requireBaseline();
       const acc = state.data.accepted.find((a) => a.testFile === relTest);
       if (acc?.runner && adapter.runnerName && acc.runner !== adapter.runnerName) {
@@ -249,13 +253,8 @@ export async function main(argv: string[]): Promise<number> {
       }
       const tgt = o.target ?? acc?.target;
       if (!tgt) throw new Error("pass --target <source> (no accepted target recorded for this test file)");
-      if (o.equivalent) {
+      if (ids.length) {
         const eq = (state.data.equivalent ??= {});
-        // Repeatable and comma-separated: --equivalent 12.2 --equivalent 14.1,15
-        const raw = o.equivalent.flatMap((x) => x.split(",")).map((x) => x.trim()).filter(Boolean);
-        const bad = raw.filter((x) => !/^\d+(\.\d+)?$/.test(x));
-        if (bad.length || !raw.length) throw new Error(`--equivalent takes line numbers (12) or mutant ids (12.2); got: ${bad.join(", ") || "nothing"}`);
-        const ids = raw;
         eq[relTest] = [...new Set([...(eq[relTest] ?? []).map(String), ...ids])];
         state.save();
       }
