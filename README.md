@@ -240,6 +240,7 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 | [lxmusic-harmony](https://github.com/Adamaik/lxmusic-harmony) 13★ | 鸿蒙 · hvigor | `Inflate.ets` | 0% → **100%**（0 → 149 / 149 行） | 19 | 87%（13/15 杀死，评估 19/153；其中 3 个靠崩溃，29 个判为等价） |
 
 口径说明：
+- 表中 SwiftPM 项目（Ink、Rainbow）的行数是当时的口径，llvm-cov 会把函数内的空行和注释行计为可执行行。现在的版本不再计入这些行，重跑时分母会略小，覆盖率百分比基本不变。
 - 「改造前」是只跑项目原有测试的基线，鸿蒙这几个项目原来都没有测到这些文件。
 - 对项目副本的改动：除了新增的测试文件、unitgen 自己注册测试用的 `List.test.ets` / `Package.swift` / `project.pbxproj`，只有下面三处构建配置，都是为了能在 DevEco 26 上构建，生产代码一行没动：
   - qs-arkts：加了 `@ohos/hypium` 依赖；去掉了写死的 `compileSdkVersion`（API 24，本机 SDK 是 26）；去掉了 hvigor 插件的版本锁定。
@@ -328,6 +329,10 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 | verify | 环境错误（INFRA_ERROR）或一次失败的重新验证，会把已接受的测试连同覆盖率和变异历史一起丢掉，`mutate` 随后报一个看不懂的「pass --target」；INFRA_ERROR 退出码是 2 | 环境错误不改动状态，退出码改为 1；真正失败时该文件暂停计数，历史保留，再次通过后恢复；`status` 和 `mutate` 会说明原因 |
 | 变异测试 | 测试文件没变时，已知的幸存者每次都重跑（Aigis 一轮 21 次里 15 次是重复）；`x = .string`、`obj.secret = undefined` 这类赋值、抛出的错误消息、返回的模板字符串都没有变异体；`"0" + s` 被改成 `"0" - s`，`self.init(...)` 被删，都注定编译不过；每个变异体的完整测试输出刷屏 | 幸存者只在测试文件改动后重跑；补上这几类变异（赋值删除只在该行没有其他变异时生成）；跳过注定编译不过的两类；变异体的构建输出只写日志 |
 | 变异测试 | ArkTS 编译器会把 `c === 0x2D` 收窄成字面量类型：字符判断链 `c === 0x2D \|\| c === 0x2E \|\| …` 里把前面的 `===` 改成 `!==`、或把 `\|\|` 改成 `&&`，都编译不过（「types '45' and '46' have no overlap」）。qs-arkts 的 utils_encode 84 个变异里 14 个白跑 | 在 hvigor 下不生成这几类（链末尾那个比较、`typeof x === '…'` 照常生成；Node shim 不做类型检查，照常生成）。utils_encode 95 个候选全部判定，编译不过的降到 2 个，得分 92%。行末的 `\|\|`、`&&` 原先没有变异体，现在也有 |
+| 状态 | `.unitgen` 里的覆盖率用绝对路径记录，工程目录被移动、改名或复制后，已接受测试的覆盖率在报告里消失（Aigis 副本里 utils.ets 从 100% 变成 19%） | 改为相对工程根目录记录（旧的绝对路径照常读取） |
+| iOS SwiftPM | llvm-cov 把函数里的空行、注释、`#if/#else` 计为可执行行，brief 把空行标成未覆盖，前后分母也对不上（Splash：0/33 → 36/36） | 这些行一律不计 |
+| 变异测试 | 唯一能编译的变异被标成等价后，门禁报 FAILED「no mutant was evaluated」、报告写 0%（Splash 的 Font）；删掉「声明时没赋值的局部常量」的赋值注定编译不过；`var x: Int?` 行尾的 `?` 被当成三元表达式续行，下一行的删除变异全部丢失 | 门禁改为 NOT_APPLICABLE、报告写 n/a；跳过这类删除；修正续行判断 |
+| 运行 | 在工程子目录里执行命令报「No supported project」 | 像 git 一样向上查找工程根目录；鸿蒙模块目录继续向上找到应用根目录 |
 | 基线 | 重跑基线时，已经接受的生成测试被算进「改造前」（报告写成 6% → 34%，实际起点是 0） | 基线只跑项目原有的测试（四种运行器都处理了） |
 | 基线 | 因为平台桩而失败的旧测试让基线作废；shim 和 hvigor 的数据混在一起 | shim 下自动容忍这类失败（会列出来），其他情况用 `--allow-failing`；记录运行器，不一致时拒绝 verify |
 | 变异测试 | Swift 的 `if cond {`、尾随闭包、成员赋值、`case .x: return 2001`、返回的字符串都没有变异体：Rainbow 的 ConditionalStyleBuilder 只有 2 个候选，Kingfisher 的「100%」是虚高 | 补上这些算子；不再生成 `$0 → $1`、类型联合 `0 \| 1` 这类注定编译不过的变异 |
