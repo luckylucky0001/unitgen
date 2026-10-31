@@ -311,6 +311,26 @@ export class SwiftPMAdapter implements Adapter {
     };
   }
 
+  /** llvm-cov export of the raw profiles next to SwiftPM's codecov JSON path (same format as that JSON). */
+  private async coverageFromProfraw(codecovJson: string): Promise<any | undefined> {
+    const dir = path.dirname(codecovJson);
+    const raws = walkFiles(dir, [".profraw"]);
+    if (!raws.length) return undefined;
+    const xcrun = process.platform === "darwin" ? ["xcrun"] : [];
+    const profdata = path.join(this.stateDir, "merged.profdata");
+    const merged = await runAsync([...xcrun, "llvm-profdata", "merge", "-sparse", ...raws, "-o", profdata], { cwd: this.root });
+    if (!merged.ok) return undefined;
+    const bundle = fs.readdirSync(path.dirname(dir)).find((f) => f.endsWith("PackageTests.xctest"));
+    if (!bundle) return undefined;
+    const b = path.join(path.dirname(dir), bundle);
+    const bin = process.platform === "darwin" ? path.join(b, "Contents", "MacOS", bundle.replace(/\.xctest$/, "")) : b;
+    if (!exists(bin)) return undefined;
+    const exp = await runAsync([...xcrun, "llvm-cov", "export", "-format=text", "-instr-profile", profdata, bin], { cwd: this.root, stream: false });
+    fs.rmSync(profdata, { force: true });
+    if (!exp.ok) return undefined;
+    try { return JSON.parse(exp.out.slice(exp.out.indexOf("{"))); } catch { return undefined; }
+  }
+
   async runTests(req: RunRequest): Promise<TestRun> {
     const t = this.tc();
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
@@ -330,17 +350,25 @@ export class SwiftPMAdapter implements Adapter {
       // No --filter: with the CLT toolchain Swift Testing ignores SwiftPM's filter ("No matching test
       // cases"). Isolated runs already drop every non-generated test target via the runtime manifest,
       // and coverage gains are computed against baseline + accepted, so co-running accepted files is harmless.
+      // Raw profiles of an earlier run must not leak into this one (see coverageFromProfraw).
+      const codecovJson = req.coverage ? (await runAsync(["swift", "test", "--show-codecov-path"], { cwd: this.root })).out.trim().split("\n").pop()! : "";
+      if (codecovJson) for (const f of walkFiles(path.dirname(codecovJson), [".profraw"])) fs.rmSync(f, { force: true });
       const r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
       const out = stripAnsi(r.out);
       const tests = parseSwiftTestOutput(out);
       const compiled = !/error: (emit-module|compile|link)|error: fatalError|: error: /.test(out) || tests.length > 0;
       let coverage;
       if (req.coverage && compiled) {
-        const p = (await runAsync(["swift", "test", "--show-codecov-path"], { cwd: this.root })).out.trim().split("\n").pop()!;
+        const p = codecovJson;
+        const dirs = mods.map((m) => m.dir + path.sep);
         if (exists(p)) {
-          const dirs = mods.map((m) => m.dir + path.sep);
           coverage = parseLlvmCovJson(JSON.parse(readFile(p)), (f) => dirs.some((d) => f.startsWith(d)));
           if (process.env.UNITGEN_KEEP_COV !== "1") fs.unlinkSync(p);
+        } else {
+          // SwiftPM writes the JSON only when every test passes; with failing tests (a baseline with
+          // --allow-failing) the raw profiles are still there.
+          const json = await this.coverageFromProfraw(p);
+          if (json) coverage = parseLlvmCovJson(json, (f) => dirs.some((d) => f.startsWith(d)));
         }
       }
       const infraError = r.timedOut ? "timeout" : undefined;
