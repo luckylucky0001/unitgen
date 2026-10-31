@@ -103,7 +103,15 @@ export class XcodeAdapter implements Adapter {
         meta: { testTarget: test?.name, files, synced: !!test?.syncedDirs.length },
       });
     }
-    return out;
+    // One framework built per platform from the same sources (Foo-iOS, Foo-tvOS, Foo-macOS) is one
+    // module here: keep the variant with a unit-test target, iOS first (it runs in the simulator).
+    const byRoots = new Map<string, Module[]>();
+    for (const m of out) {
+      const k = [...m.sourceRoots].sort().join("|");
+      byRoots.set(k, [...(byRoots.get(k) ?? []), m]);
+    }
+    const rank = (m: Module) => (m.meta?.testTarget ? 0 : 2) + (/ios/i.test(m.name) ? 0 : 1);
+    return [...byRoots.values()].map((group) => [...group].sort((a, b) => rank(a) - rank(b))[0]);
   }
 
   moduleFor(file: string): Module | undefined {
@@ -253,12 +261,11 @@ export class XcodeAdapter implements Adapter {
     if (req.testFiles && m.meta?.testTarget) {
       for (const f of req.testFiles) args.push(`-only-testing:${m.meta.testTarget}/${path.basename(f, ".swift")}`);
     } else if (m.meta?.testTarget) {
-      for (const x of mods) if (x.meta?.testTarget) args.push(`-only-testing:${x.meta.testTarget}`);
+      // Only the test target of the scheme being run: another module's test bundle is usually not
+      // part of this scheme, and xcodebuild refuses the whole run then.
+      args.push(`-only-testing:${m.meta.testTarget}`);
       if (req.excludeGenerated) {
-        for (const x of mods) {
-          if (!x.meta?.testTarget) continue;
-          for (const f of walkFiles(x.testRoot, [this.testFileSuffix])) args.push(`-skip-testing:${x.meta.testTarget}/${path.basename(f, ".swift")}`);
-        }
+        for (const f of walkFiles(m.testRoot, [this.testFileSuffix])) args.push(`-skip-testing:${m.meta.testTarget}/${path.basename(f, ".swift")}`);
       }
     }
     const r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
@@ -277,7 +284,9 @@ export class XcodeAdapter implements Adapter {
     const infra = /Unable to find a destination|no available devices|requires a provisioning profile|xcodebuild: error: Could not resolve package/.exec(out)?.[0];
     return {
       ok: r.ok, compiled, tests, coverage, logFile, seconds: (Date.now() - start) / 1000,
-      excerpt: r.ok ? "" : errorExcerpt(out), infraError: r.timedOut ? "timeout" : infra,
+      // xcodebuild prints simulator/package noise first: lead with its own error lines.
+      excerpt: r.ok ? "" : [...new Set(out.split("\n").filter((l) => /(^|\s)error:/.test(l)).map((l) => l.trim()))].slice(0, 10).join("\n") || errorExcerpt(out),
+      infraError: r.timedOut ? "timeout" : infra,
     };
   }
 
