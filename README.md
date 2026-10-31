@@ -60,6 +60,8 @@ unitgen --help
 
 不想改 PATH 的话，直接用 `~/unitgen/bin/unitgen` 也可以。unitgen 直接运行 TypeScript 源码，没有构建步骤；保留这个目录，不要移动或删除。
 
+Windows（cmd 或 PowerShell）：`git clone` 后在仓库目录执行 `npm ci`，再用 `bin\unitgen.cmd`（可以把 `bin` 目录加进 PATH，之后直接用 `unitgen`）。`UNITGEN_ENV` 在 Windows 上是一个 `.cmd` 文件，里面用 `set JAVA_HOME=...` 这类语句设置工具链路径。
+
 **检查**：进入你的工程目录运行 `unitgen doctor`。它会说明识别出的工程类型、用的是哪个运行器以及原因；有问题时按它给出的提示处理（例如鸿蒙工程会给出 DevEco 自带 ohpm 的完整路径）。
 
 ## 使用
@@ -262,7 +264,7 @@ status                     基线、已接受、已隔离的数量
 - **鸿蒙**：跑的是本地单测（Previewer 运行时），系统 API 大多是模拟实现。设备相关逻辑、`ohosTest`（Instrument Test）和 UI 测试不在范围内。shim 只对纯逻辑可信。struct 里的私有方法、模块没有导出的代码测不到，brief 会提前提示。
 - **iOS**：UI 测试和真机不在范围内。xcodebuild 每次运行要几十秒。只有 Command Line Tools 时，工程已有的 XCTest 用例跑不了，基线为 0%。
 - **Android**：只有 JVM 本地单测；没有 Robolectric 或 `isReturnDefaultValues` 时，`android.util.Log` 等调用会抛异常。APK 安装、真机 API 和 Compose UI 测试不在范围内。
-- **Windows**：没有实测。
+- **Windows**：CI 在 windows-latest 上跑全部单测，并用 `bin\unitgen.cmd` 在一个 Gradle/Java 工程上端到端跑通 doctor、baseline、verify、mutate、report。鸿蒙和 iOS 在 Windows 上没有实测（iOS 本来就需要 macOS）。TRAE 安装脚本是 shell 脚本，Windows 上请手动复制 Skill 目录。
 
 ## 开发
 

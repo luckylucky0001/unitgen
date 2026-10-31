@@ -153,9 +153,12 @@ export function parseHvigorCoverage(json: string, sourceRoots: string[], source:
   const out: Coverage = {};
   let data: { files?: HvigorFile[] };
   try { data = JSON.parse(json); } catch { return out; }
+  // Windows: hvigor may write `d:/proj/...` for a root `D:\\proj\\...` (drive case, separators).
+  const norm = (p: string) => (process.platform === "win32" ? path.resolve(p).toLowerCase() : path.resolve(p));
+  const roots = sourceRoots.map((r) => norm(r) + path.sep);
   for (const f of data.files ?? []) {
     const file = path.resolve(f.path);
-    if (!sourceRoots.some((r) => file.startsWith(r + path.sep))) continue;
+    if (!roots.some((r) => norm(file).startsWith(r))) continue;
     const counts = f.summary?.lines?.executedLineCount ?? [];
     let text: string[] = [];
     try { text = source(file).split("\n"); } catch { /* keep raw counts */ }
