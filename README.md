@@ -264,7 +264,7 @@ status                     基线、已接受、已隔离的数量
 - **鸿蒙**：跑的是本地单测（Previewer 运行时），系统 API 大多是模拟实现。设备相关逻辑、`ohosTest`（Instrument Test）和 UI 测试不在范围内。shim 只对纯逻辑可信。struct 里的私有方法、模块没有导出的代码测不到，brief 会提前提示。
 - **iOS**：UI 测试和真机不在范围内。xcodebuild 每次运行要几十秒。只有 Command Line Tools 时，工程已有的 XCTest 用例跑不了，基线为 0%。
 - **Android**：只有 JVM 本地单测；没有 Robolectric 或 `isReturnDefaultValues` 时，`android.util.Log` 等调用会抛异常。APK 安装、真机 API 和 Compose UI 测试不在范围内。
-- **Windows**：CI 在 windows-latest 上跑全部单测，并用 `bin\unitgen.cmd` 在一个 Gradle/Java 工程上端到端跑通 doctor、baseline、verify、mutate、report。鸿蒙和 iOS 在 Windows 上没有实测（iOS 本来就需要 macOS）。TRAE 安装脚本是 shell 脚本，Windows 上请手动复制 Skill 目录。
+- **Windows**：CI 在 windows-latest 上跑全部单测，并用 `bin\unitgen.cmd` 在一个 Gradle/Java 工程上端到端跑通 doctor、baseline、verify、mutate、report。鸿蒙的 Node shim 也在 Windows 上端到端跑通；鸿蒙的 hvigor 路径（DevEco for Windows）没有实测，iOS 本来就需要 macOS。TRAE 安装脚本是 shell 脚本，Windows 上请手动复制 Skill 目录。
 
 ## 开发
 
