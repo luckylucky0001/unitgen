@@ -43,22 +43,31 @@ gradle.beforeProject { p ->
         r.dependsOn(tt)
         r.executionData.from(tt.extensions.getByName('jacoco').destinationFile)
       }
-      def b = p.layout.buildDirectory.get().asFile
-      def V = v.capitalize()
-      // Bytecode-transforming plugins (Hilt, ASM instrumentation) run tests against rewritten classes;
-      // JaCoCo must analyze exactly those or it drops the data ("Execution data ... does not match").
-      r.classDirectories.from(p.files({
-        def asm = new File(b, "intermediates/classes/${v}/transform${V}ClassesWithAsm")
-        if (asm.exists()) {
-          return p.fileTree(asm) { include 'dirs/**', 'jars/**/*.jar'; exclude unitgenExcludes }
-        }
-        return p.fileTree(b) {
-          include "tmp/kotlin-classes/${v}/**", "intermediates/javac/${v}/**/classes/**",
-                  "intermediates/built_in_kotlinc/${v}/**/classes/**", "classes/kotlin/${v}/**", "classes/java/${v}/**"
+      // Classes of project q compiled for variant w. Bytecode-transforming plugins (Hilt, ASM
+      // instrumentation) run tests against rewritten classes; JaCoCo must analyze exactly those or it
+      // drops the data ("Execution data ... does not match").
+      def classesOf = { q, String w ->
+        def qb = q.layout.buildDirectory.get().asFile
+        def W = w.capitalize()
+        def asm = new File(qb, "intermediates/classes/${w}/transform${W}ClassesWithAsm")
+        if (asm.exists()) return q.fileTree(asm) { include 'dirs/**', 'jars/**/*.jar'; exclude unitgenExcludes }
+        return q.fileTree(qb) {
+          include "tmp/kotlin-classes/${w}/**", "intermediates/javac/${w}/**/classes/**",
+                  "intermediates/built_in_kotlinc/${w}/**/classes/**", "classes/kotlin/${w}/**", "classes/java/${w}/**"
           exclude unitgenExcludes
         }
+      }
+      // Tests of one module also run code of the modules it depends on: report those classes too, one
+      // variant per module (the same as the test's, else debug, else main), never two copies of a class.
+      r.classDirectories.from(p.files({
+        def trees = [classesOf(p, v)]
+        p.rootProject.allprojects.findAll { it != p }.each { q ->
+          def w = [v, 'debug', 'main'].find { cand -> !classesOf(q, cand).isEmpty() }
+          if (w != null) trees << classesOf(q, w)
+        }
+        return trees
       }))
-      r.sourceDirectories.from(p.files('src/main/java', 'src/main/kotlin'))
+      r.sourceDirectories.from(p.files({ p.rootProject.allprojects.collect { q -> [q.file('src/main/java'), q.file('src/main/kotlin')] }.flatten() }))
       r.reports {
         xml.required = true
         html.required = false

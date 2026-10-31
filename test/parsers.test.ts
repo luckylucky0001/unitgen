@@ -197,3 +197,34 @@ test("pbxproj: add and remove a test file round-trips", async () => {
   p.removeIds([ids.fileRef, ids.buildFile]);
   assert.equal(p.text, txt);
 });
+
+test("gradle: settings includes over several lines, no includeBuild; failures per module with their reason", async () => {
+  const { settingsIncludes, gradleFailures, gradleExcerpt } = await import("../src/adapters/gradle.ts");
+  assert.deepEqual(settingsIncludes('rootProject.name = "x"\ninclude(\n    ":app",\n    ":feature:album",\n)\npluginManagement {\n    includeBuild("build-logic")\n}\ninclude ":core", \':data\'\n'), [":app", ":feature:album", ":core", ":data"]);
+  const out = [
+    "> Task :core:testDebugUnitTest",
+    "w: Some API is deprecated. It will be removed in version 10.0 of the Android Gradle plugin.",
+    "FAILURE: Build completed with 2 failures.",
+    "1: Task failed with an exception.",
+    "* What went wrong:",
+    "Execution failed for task ':app:checkDebugAarMetadata' (registered by plugin 'com.android.internal.application').",
+    "> A failure occurred while executing com.android.build.gradle.internal.tasks.CheckAarMetadataWorkAction",
+    "   > 4 issues were found when checking AAR metadata:",
+    "",
+    "       1.  Dependency 'glide:5.0.9' requires libraries and applications that",
+    "           depend on it to compile against version 37 or later of the",
+    "           Android APIs.",
+    "",
+    "* Try:",
+    "2: Task failed with an exception.",
+    "* What went wrong:",
+    "Execution failed for task ':feature:album:compileDebugKotlin'.",
+    "> Compilation error. See log for more details",
+    "e: file:///p/feature/album/src/main/kotlin/A.kt:3:5 Unresolved reference 'foo'.",
+  ].join("\n");
+  assert.deepEqual(gradleFailures(out).map((f) => [f.module, f.task]), [[":app", "checkDebugAarMetadata"], [":feature:album", "compileDebugKotlin"]]);
+  assert.match(gradleFailures(out)[0].reason, /4 issues were found .* compile against version 37 or later/);
+  assert.match(gradleFailures(out)[1].reason, /A\.kt:3:5 Unresolved reference 'foo'/);
+  assert.match(gradleExcerpt(out).split("\n")[0], /^e: .*Unresolved reference/);
+  assert.ok(!gradleExcerpt(out).includes("deprecated"));
+});

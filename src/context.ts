@@ -221,7 +221,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     src,
     "```",
   ];
-  if (related) sections.push("", "## Related declarations in the same module", "```", related, "```");
+  if (related) sections.push("", "## Related declarations (this module, and types it imports from other modules)", "```", related, "```");
   if (doubles) sections.push("", "## Existing test doubles for types used by the target (prefer these over mocks)", "```", doubles, "```");
   if (examples.length) sections.push("", "## Existing tests in this module (follow their style, imports and fakes/helpers; the framework rules above win if they differ)", "```", examples.join("\n\n"), "```");
   if (existingGenerated) sections.push("", "## Current content of the generated test file (extend it; keep passing tests)", "```", existingGenerated, "```");
