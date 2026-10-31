@@ -496,3 +496,10 @@ test("system-API detection: an import clause never spans into the next import", 
   ].join("\n");
   assert.deepEqual(usedPlatformImports(text), ["util", "buffer"]);
 });
+
+test("Swift: backtick identifiers are not strings; subscript assignments can be deleted", () => {
+  const swift = ["func f() -> Kind {", "    result[key] = value", "    return `default`", "}"].join("\n");
+  const ops = mutantsFor(swift, [2, 3]).map((m) => `${m.line}:${m.op}`);
+  assert.ok(ops.includes("2:delete assignment"));
+  assert.ok(!ops.some((o) => o.startsWith("3:string")));
+});

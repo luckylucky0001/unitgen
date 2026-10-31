@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Coverage, mergeCoverage, parseJacocoXml } from "../coverage.ts";
-import { errorExcerpt, exists, preferOwnTest, readFile, readJson, relPath, run, stripAnsi, walkFiles, writeJson } from "../util.ts";
+import { errorExcerpt, exists, log, preferOwnTest, readFile, readJson, relPath, run, stripAnsi, walkFiles, writeJson } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const INIT_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data", "unitgen-jacoco.init.gradle");
@@ -65,6 +65,10 @@ export class GradleAdapter implements Adapter {
       lines.push(`android sdk: ${sdk ?? "(local.properties)"}`);
     }
     lines.push(`modules: ${this.modules().length} (${this.modules().filter((m) => m.kind === "android").length} android, ${this.modules().filter((m) => m.kind === "jvm").length} jvm)`);
+    if (!this.modules().length) {
+      ok = false;
+      lines.push("no module with sources under src/ found in settings.gradle(.kts) includes: pass the right root with -C");
+    }
     return { ok, lines };
   }
 
@@ -73,13 +77,16 @@ export class GradleAdapter implements Adapter {
     const settings = ["settings.gradle.kts", "settings.gradle"].map((f) => path.join(this.root, f)).find(exists)!;
     const text = readFile(settings).replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
     const names = new Set<string>();
-    for (const m of text.matchAll(/\binclude\s*\(?([^)\n]*)\)?/g)) {
-      for (const s of m[1].matchAll(/["']([:\w.-]+)["']/g)) names.add(s[1].startsWith(":") ? s[1] : `:${s[1]}`);
+    for (const n of settingsIncludes(text)) names.add(n);
+    // `project(":core").projectDir = file("libs/core")`
+    const dirs = new Map<string, string>();
+    for (const m of text.matchAll(/project\(\s*["']:?([\w:.-]+)["']\s*\)\.projectDir\s*=\s*(?:file|File)\(\s*(?:rootDir\s*,\s*)?["']([^"']+)["']\s*\)/g)) {
+      dirs.set(`:${m[1]}`, path.resolve(this.root, m[2]));
     }
     const out: Module[] = [];
     if (exists(path.join(this.root, "src", "main"))) names.add(":");
     for (const name of names) {
-      const dir = name === ":" ? this.root : path.join(this.root, ...name.slice(1).split(":"));
+      const dir = dirs.get(name) ?? (name === ":" ? this.root : path.join(this.root, ...name.slice(1).split(":")));
       const buildFile = ["build.gradle.kts", "build.gradle"].map((f) => path.join(dir, f)).find(exists);
       if (!buildFile) continue;
       const bt = readFile(buildFile);
@@ -211,6 +218,19 @@ export class GradleAdapter implements Adapter {
     return { direct: directHits, indirect: known.filter(([re]) => !re.test(d) && re.test(i)).map(([, s]) => s) };
   }
 
+  /** A module whose test classpath has no test framework at all: nothing written here can compile. */
+  private noTestFramework(m: Module): boolean {
+    const { direct, indirect } = this.testDeps(m);
+    return !direct.length && !indirect.length && !walkFiles(path.join(m.dir, "src"), [".kt", ".java"]).some((f) => /[\\/]src[\\/]test\w*[\\/]/.test(f) && !f.includes(SUFFIX));
+  }
+
+  briefWarnings(source: string): string[] {
+    const m = this.moduleFor(source);
+    return m && this.noTestFramework(m)
+      ? [`Module \`${m.name}\` declares no unit-test framework (no testImplementation of JUnit / kotlin-test, no existing tests): a test file cannot compile here. Pick a target in another module (code used by other modules is often covered through their tests), or ask the user to add a test dependency.`]
+      : [];
+  }
+
   conventions(m: Module): string {
     const { direct, indirect } = this.testDeps(m);
     const lang = m.meta?.kotlin ? "Kotlin" : "Java";
@@ -248,7 +268,8 @@ export class GradleAdapter implements Adapter {
     const settingsMtime = this.modules().map((m) => fs.statSync(m.meta!.buildFile).mtimeMs).join(",");
     const c = readJson<{ key: string; tasks: Record<string, string | undefined> } | null>(cache, null);
     if (c && c.key === settingsMtime) return c.tasks;
-    const r = await runAsync([...this.gradlew(), "-q", "tasks", "--all", ...COMPAT], { cwd: this.root, timeoutSec: 1800, logFile: path.join(this.stateDir, "logs", "gradle-tasks.log") });
+    log("discovering each module's unit-test task (gradle tasks --all; the first run configures the whole build)");
+    const r = await runAsync([...this.gradlew(), "-q", "tasks", "--all", ...COMPAT], { cwd: this.root, timeoutSec: 1800, logFile: path.join(this.stateDir, "logs", "gradle-tasks.log"), streamLine: () => false });
     const byMod: Record<string, string[]> = {};
     for (const line of stripAnsi(r.out).split("\n")) {
       const m = /^([\w:.-]*?):?(test[A-Za-z0-9]*)\s+-\s/.exec(line.trim());
@@ -304,11 +325,20 @@ export class GradleAdapter implements Adapter {
       fs.rmSync(path.join(m.dir, "build", "test-results", tasks[m.name]!), { recursive: true, force: true });
       fs.rmSync(path.join(m.dir, "build", "unitgen"), { recursive: true, force: true });
     }
-    const r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
+    const r = await runAsync(args, {
+      cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile,
+      // A large build prints thousands of lines: show failures and results only (the log has everything).
+      streamLine: (l) => /^> Task \S+ FAILED|^e: |: error: |^BUILD (SUCCESSFUL|FAILED)|^FAILURE:|^\* What went wrong|^Execution failed for task|tests completed/.test(stripAnsi(l)),
+    });
     let out = r.out;
     out = stripAnsi(out);
     const tests: TestCase[] = [];
-    for (const m of mods) tests.push(...parseJUnitXmlDir(path.join(m.dir, "build", "test-results", tasks[m.name]!)));
+    const failedTests = new Set<string>();
+    for (const m of mods) {
+      const ts = parseJUnitXmlDir(path.join(m.dir, "build", "test-results", tasks[m.name]!));
+      if (ts.some((t) => t.status === "failed")) failedTests.add(m.name);
+      tests.push(...ts);
+    }
     const compileFailed = /Compilation error|e: file:|error: |compile\w*Kotlin' FAILED|compile\w*JavaWithJavac' FAILED|Execution failed for task '.*compile/i.test(out) && /BUILD FAILED/.test(out);
     const noTests = /No tests found for given includes/.test(out);
     let coverage: Coverage | undefined;
@@ -322,29 +352,50 @@ export class GradleAdapter implements Adapter {
     }
     const coverageWarnings = [...new Set([...out.matchAll(/Execution data for class (\S+) does not match/g)].map((m) => m[1]))];
     const infra = /SDK location not found|Could not resolve all|Could not GET|Unable to locate a Java Runtime|TIMEOUT|Problem configuring task|Selection failed/.exec(out)?.[0];
+    // A full run (baseline) with --continue still built and tested the other modules: a module whose
+    // build fails (not its tests) is set aside and named, so one broken module does not void the baseline.
+    const unbuildable: Record<string, string> = {};
+    if (!r.ok && !req.testFiles && !r.timedOut) {
+      const failures = gradleFailures(out);
+      const known = new Set(mods.map((m) => m.name));
+      const all = failures.length > 0 && failures.every((f) => known.has(f.module) && !(f.task === tasks[f.module] && (failedTests.has(f.module) || /There were failing tests/.test(f.reason))));
+      if (all && tests.length > 0) for (const f of failures) unbuildable[f.module] ??= f.reason;
+    }
+    const setAside = Object.keys(unbuildable).length > 0;
+    if (setAside && coverage) {
+      for (const m of mods.filter((x) => unbuildable[x.name])) for (const f of this.sourceFiles(m)) delete coverage[f];
+    }
     return {
-      ok: r.ok && !noTests,
-      compiled: !compileFailed,
+      ok: (r.ok || setAside) && !noTests,
+      compiled: !compileFailed || setAside,
       tests, coverage, logFile, seconds: (Date.now() - start) / 1000, coverageWarnings,
-      excerpt: r.ok && !noTests ? "" : noTests ? "No tests found for given includes (class name / package mismatch?)" : errorExcerpt(out),
-      infraError: r.timedOut ? "timeout" : infra && !compileFailed ? infra : undefined,
+      excerpt: r.ok && !noTests ? "" : noTests ? "No tests found for given includes (class name / package mismatch?)" : gradleExcerpt(out),
+      infraError: r.timedOut ? "timeout" : infra && !compileFailed && !setAside ? infra
+        : compileFailed && req.testFiles && mods.some((m) => this.noTestFramework(m)) && /Unresolved reference:? '?(junit|Test|kotlin\.test|assert\w*)'?|package org\.junit does not exist/.test(out)
+          ? `module ${mods.map((m) => m.name).join(", ")} has no unit-test framework on its test classpath (no testImplementation of JUnit / kotlin-test)` : undefined,
+      ...(setAside ? { unbuildable, note: `module(s) not built, their files are not measured: ${Object.entries(unbuildable).map(([k, v]) => `${k} (${v})`).join("; ")}` } : {}),
     };
   }
 
   private resolveCache = new Map<string, string[]>();
 
+  /** Source file of a class in a JaCoCo report: the module that ran first, then any other module (the report covers them all). */
   private resolveSource(m: Module, pkgPath: string): string | undefined {
-    let files = this.resolveCache.get(m.name);
-    if (!files) {
-      files = this.sourceFiles(m);
-      this.resolveCache.set(m.name, files);
+    for (const mod of [m, ...this.modules().filter((x) => x.name !== m.name)]) {
+      let files = this.resolveCache.get(mod.name);
+      if (!files) {
+        files = this.sourceFiles(mod);
+        this.resolveCache.set(mod.name, files);
+      }
+      const hit = files.find((f) => f.endsWith(path.sep + pkgPath));
+      if (hit) return hit;
+      // Kotlin files whose package does not match the directory layout.
+      const base = path.basename(pkgPath);
+      const pkg = path.dirname(pkgPath).replace(/\//g, ".");
+      const loose = files.find((f) => path.basename(f) === base && new RegExp(`^\\s*package\\s+${pkg.replace(/\./g, "\\.")}\\s*$`, "m").test(readFile(f)));
+      if (loose) return loose;
     }
-    const hit = files.find((f) => f.endsWith(path.sep + pkgPath));
-    if (hit) return hit;
-    // Kotlin files whose package does not match the directory layout.
-    const base = path.basename(pkgPath);
-    const pkg = path.dirname(pkgPath).replace(/\//g, ".");
-    return files.find((f) => path.basename(f) === base && new RegExp(`^\\s*package\\s+${pkg.replace(/\./g, "\\.")}\\s*$`, "m").test(readFile(f)));
+    return undefined;
   }
 
   countAssertions(text: string): number {
@@ -378,3 +429,60 @@ function decodeXml(s: string): string {
 }
 
 export { relPath };
+
+/**
+ * Project paths from `include(...)` in a settings file (comments already removed): Kotlin DSL calls
+ * spread over lines, Groovy `include ':a', ':b'`, never `includeBuild(...)` (a composite build).
+ */
+/** Failed tasks of a Gradle run (`--continue` lists each one under "What went wrong") with the reason. */
+export function gradleFailures(out: string): { task: string; module: string; reason: string }[] {
+  const res: { task: string; module: string; reason: string }[] = [];
+  const lines = out.split("\n");
+  lines.forEach((l, i) => {
+    const m = /Execution failed for task '(:?[^']*?):([\w]+)'/.exec(l);
+    if (!m) return;
+    const module = m[1] || ":";
+    // The reason: the first "> ..." line below, skipping generic ones ("Compilation error. See log").
+    const near = lines.slice(i + 1, i + 30).map((x) => x.trim());
+    const below = near.filter((x) => x.startsWith(">")).map((x) => x.replace(/^>\s*/, ""));
+    let reason = below.find((x) => !/See log for more details|^There were failing tests|^A failure occurred while executing/.test(x)) ?? below[0] ?? "build failed";
+    // "4 issues were found when checking AAR metadata:" -> add the first issue.
+    if (reason.endsWith(":")) {
+      const at = near.findIndex((x) => x.replace(/^>\s*/, "") === reason);
+      const detail: string[] = [];
+      for (const x of near.slice(at + 1)) {
+        if (!x) { if (detail.length) break; continue; }
+        if (x.startsWith(">") || /^\* /.test(x)) break;
+        detail.push(x);
+      }
+      if (detail.length) reason = `${reason} ${detail.join(" ").replace(/\s+/g, " ")}`;
+    }
+    // Kotlin/javac errors in that module's sources say more than "Compilation error".
+    const dir = module === ":" ? "" : module.slice(1).replace(/:/g, "/");
+    const err = lines.find((x) => /^e: |: error: /.test(x) && (!dir || x.includes(`/${dir}/`)));
+    if (err && /compil/i.test(m[2] + reason)) reason = err.replace(/^e: (file:\/\/)?/, "");
+    if (!res.some((r) => r.task === m[2] && r.module === module)) res.push({ task: m[2], module, reason: reason.slice(0, 300) });
+  });
+  return res;
+}
+
+/** What went wrong first: compiler errors, then Gradle's own failure blocks; warnings never lead. */
+export function gradleExcerpt(out: string): string {
+  const lines = out.split("\n");
+  const errs = lines.filter((l) => /^e: |^\S.*\.(java|kt|kts):\d+: error: |^\s*error: /.test(l));
+  const wrong: string[] = [];
+  lines.forEach((l, i) => {
+    if (!/^\* What went wrong:/.test(l)) return;
+    for (let j = i + 1; j < lines.length && j < i + 10 && !/^\* (Try|Exception|Get more help)/.test(lines[j]); j++) if (lines[j].trim()) wrong.push(lines[j]);
+  });
+  const picked = [...new Set([...errs.slice(0, 30), ...wrong])];
+  return picked.length ? picked.join("\n") : errorExcerpt(out);
+}
+
+export function settingsIncludes(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/\binclude(?![\w$])\s*(\(([^)]*)\)|([^\n]*))/g)) {
+    for (const s of (m[2] ?? m[3] ?? "").matchAll(/["']([:\w.-]+)["']/g)) out.push(s[1].startsWith(":") ? s[1] : `:${s[1]}`);
+  }
+  return [...new Set(out)];
+}

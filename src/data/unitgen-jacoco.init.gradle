@@ -39,25 +39,38 @@ gradle.beforeProject { p ->
       def mv = (tn =~ /^test(\w+)UnitTest$/)
       def v = mv.matches() ? (mv.group(1)[0].toLowerCase() + mv.group(1).substring(1)) : 'main'
       def tt = p.tasks.findByName(tn)
-      if (tt != null) {
+      // A test task without JaCoCo (created before the plugin applied, or a module without tests): no data.
+      def jx = tt?.extensions?.findByName('jacoco')
+      if (tt != null && jx != null) {
         r.dependsOn(tt)
-        r.executionData.from(tt.extensions.getByName('jacoco').destinationFile)
+        r.executionData.from(jx.destinationFile)
       }
-      def b = p.layout.buildDirectory.get().asFile
-      def V = v.capitalize()
-      // Bytecode-transforming plugins (Hilt, ASM instrumentation) run tests against rewritten classes;
-      // JaCoCo must analyze exactly those or it drops the data ("Execution data ... does not match").
-      r.classDirectories.from(p.files({
-        def asm = new File(b, "intermediates/classes/${v}/transform${V}ClassesWithAsm")
-        if (asm.exists()) {
-          return p.fileTree(asm) { include 'dirs/**', 'jars/**/*.jar'; exclude unitgenExcludes }
-        }
-        return p.fileTree(b) {
-          include "tmp/kotlin-classes/${v}/**", "intermediates/javac/${v}/**/classes/**",
-                  "intermediates/built_in_kotlinc/${v}/**/classes/**", "classes/kotlin/${v}/**", "classes/java/${v}/**"
+      // Classes of project q compiled for variant w. Bytecode-transforming plugins (Hilt, ASM
+      // instrumentation) run tests against rewritten classes; JaCoCo must analyze exactly those or it
+      // drops the data ("Execution data ... does not match").
+      def classesOf = { q, String w ->
+        def qb = q.layout.buildDirectory.get().asFile
+        def W = w.capitalize()
+        def asm = new File(qb, "intermediates/classes/${w}/transform${W}ClassesWithAsm")
+        if (asm.exists()) return q.fileTree(asm) { include 'dirs/**', 'jars/**/*.jar'; exclude unitgenExcludes }
+        return q.fileTree(qb) {
+          include "tmp/kotlin-classes/${w}/**", "intermediates/javac/${w}/**/classes/**",
+                  "intermediates/built_in_kotlinc/${w}/**/classes/**", "classes/kotlin/${w}/**", "classes/java/${w}/**"
           exclude unitgenExcludes
         }
-      }))
+      }
+      // Tests of one module also run code of the modules it depends on: every report reads the execution
+      // data of all test tasks in this run (-Punitgen.tasks), so that code counts in its own module's
+      // report. Those tasks are named by path, so ordering after them creates no other task.
+      map.each { path, task ->
+        if (path == p.path) return
+        def q = p.rootProject.findProject(path)
+        if (q == null) return
+        r.mustRunAfter("${path == ':' ? '' : path}:${task}")
+        def exec = new File(q.layout.buildDirectory.get().asFile, "jacoco/${task}.exec")
+        r.executionData.from(p.files({ exec.exists() ? [exec] : [] }))
+      }
+      r.classDirectories.from(p.files({ classesOf(p, v) }))
       r.sourceDirectories.from(p.files('src/main/java', 'src/main/kotlin'))
       r.reports {
         xml.required = true

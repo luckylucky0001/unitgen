@@ -27,9 +27,9 @@ filtering them is the hard part. Design notes and a comparison with existing too
 
 ## Validation
 
-Run end to end (write tests → verify → mutate → report) on 16 open-source projects with the real
-toolchains, DevEco Studio 26 and Xcode 16.4. Six of them were done from scratch by an AI that had
-read only this README and the Skill. Some results:
+Run end to end (write tests → verify → mutate → report) on 20 open-source projects with the real
+toolchains: DevEco Studio 26, Xcode 16.4 and the Android SDK (Gradle). Nine of them were done from
+scratch by an AI that had read only this README and the Skill. Some results:
 
 | Project | Platform | Target file | Coverage | Mutation score |
 |---|---|---|---|---|
@@ -39,8 +39,11 @@ read only this README and the Skill. Some results:
 | [harmony-utils](https://github.com/787107497/harmony-utils) 122★ | HarmonyOS · hvigor | `DateHelper.ets` | 0% → 98% | 100% |
 | [LinysBrowser_NEXT](https://github.com/awaLiny2333/LinysBrowser_NEXT) 292★ | HarmonyOS · hvigor | `url-ext.ets` | 0% → 100% | 97% |
 | [DSBridge-HarmonyOS](https://github.com/751496032/DSBridge-HarmonyOS) 182★ | HarmonyOS · hvigor | `BaseBridge.ts` | 0% → 94% | 88% |
+| [architecture-samples](https://github.com/android/architecture-samples) 45.9k★ | Android · Gradle | `TaskNetworkDataSource.kt` | 0% → 100% | 100% |
+| [Pokedex](https://github.com/skydoves/Pokedex) 8.4k★ | Android · Gradle (multi-module) | `DetailRepositoryImpl.kt` | 89% → 100% | 100% |
+| [ObjectMapper](https://github.com/tristanhimmelman/ObjectMapper) 9.1k★ | iOS · Xcode + Simulator | `Map.swift` | 75% → 98% | 100% |
 
-All 28 target files, the method, suspected bugs found in these projects, and the unitgen issues
+All 35 target files, the method, suspected bugs found in these projects, and the unitgen issues
 found and fixed along the way: [docs/VALIDATION.md](docs/VALIDATION.md) (Chinese).
 
 ## Install
@@ -52,7 +55,7 @@ found and fixed along the way: [docs/VALIDATION.md](docs/VALIDATION.md) (Chinese
 | all | Node.js ≥ 22.18 (`node -v`). Without one on PATH, the Node bundled with DevEco Studio is used |
 | HarmonyOS | Recommended: [DevEco Studio](https://developer.huawei.com/consumer/cn/deveco-studio/), found automatically. unitgen then runs local unit tests with the real hvigor, ArkTS compiler and Previewer runtime; no emulator or device needed. The project must declare `@ohos/hypium` in devDependencies (≥ 1.0.19 for coverage) and have run `ohpm install`. Without DevEco, a built-in Node shim runs pure-logic code only |
 | iOS | Xcode. SwiftPM packages run with `swift test`; `.xcodeproj` projects on an iOS Simulator. With only the Command Line Tools, only Swift Testing tests in Swift packages run |
-| Android | JDK 17+ (`JAVA_HOME`) and the Android SDK (`ANDROID_HOME`, or the project's `local.properties`) |
+| Android | JDK 17+ (`JAVA_HOME`) and the Android SDK (`ANDROID_HOME`, or the project's `local.properties`). On Apple silicon use an arm64 JDK (e.g. `brew install openjdk@17`): an x86_64 JDK under Rosetta builds slowly |
 
 **Install unitgen**:
 
@@ -193,8 +196,9 @@ runs the test file:
   again until the test file changes, so repeated runs work through all candidates. Until all are
   evaluated, the gate says so ("on 19 of 71 candidates"): the score is a sample.
 
-Time per mutant: about 1–3 s with hvigor, 3–10 s with SwiftPM/Gradle, 10–25 s with Xcode (use
-`--max 10`).
+Time per mutant: about 1–3 s with hvigor, 3–10 s with SwiftPM/Gradle, 20–40 s with Xcode (use
+`--max 10`). A mutant that loops forever counts as killed only when its timeout expires (adapted to
+how long the finished mutants took, at least 20 s), so loop-heavy code makes a run slower.
 
 ## Platforms
 
@@ -220,12 +224,19 @@ Time per mutant: about 1–3 s with hvigor, 3–10 s with SwiftPM/Gradle, 10–2
 - The brief names the test framework. Packages with `swift-tools-version` < 6.0 need XCTest: a
   plain `swift test` in their CI never runs Swift Testing. The same applies to Xcode targets older
   than iOS 13 / macOS 10.15. Otherwise Swift Testing is used.
-- Xcode builds go to `.unitgen/DerivedData`, so an open Xcode is not disturbed.
+- Xcode builds go to `.unitgen/DerivedData`, so an open Xcode is not disturbed. unitgen's own
+  xcodebuild runs turn on `ENABLE_TESTABILITY` (needed for `@testable import`) and turn off legacy
+  gcov coverage settings (they zero llvm coverage). This applies to those runs only; the project is
+  not changed.
 
 **Android**
 - Discovers each module's unit-test task (flavors included) and injects a JaCoCo init script with
   `-I`; no build file is changed.
-- JVM local unit tests (`src/test`) only. The first build downloads Gradle dependencies.
+- Code of one module exercised by another module's tests counts as covered. When a module does not
+  build (for example a dependency needs a newer compileSdk), the baseline still measures the
+  others, names that module with Gradle's reason, and `targets` lists its files last.
+- JVM local unit tests (`src/test`) only. The first build downloads Gradle dependencies. For a
+  module that declares no test framework (no JUnit / kotlin-test), the brief says to pick another.
 
 ## What unitgen changes in your project
 
@@ -310,7 +321,7 @@ Common: -C <dir> (project root; default: found upwards from the current director
 | `DEVECO_STUDIO_HOME` / `DEVECO_SDK_HOME` | where DevEco is, when not in `/Applications/DevEco-Studio.app` |
 | `UNITGEN_QUIET=1` | no build progress in the terminal (logs are still written) |
 | `UNITGEN_VERBOSE=1` | print the commands run |
-| `UNITGEN_ENV=<env.sh>` | toolchain environment file applied to the unitgen process only |
+| `UNITGEN_ENV=<env.sh>` | toolchain environment file applied to the unitgen process only (default: `unitgen-env/env.sh` next to the unitgen checkout, if it exists) |
 
 Build progress and diagnostics go to stderr, `--json` results to stdout: do not merge them before
 parsing. When piping output, use a shell with `pipefail` to keep unitgen's exit code.
@@ -324,8 +335,8 @@ parsing. When piping output, use a shell with `pipefail` to keep unitgen's exit 
 - **iOS**: UI tests and devices are out of scope. Each xcodebuild run takes tens of seconds. With
   only the Command Line Tools, a project's existing XCTest tests cannot run (0% baseline).
 - **Android**: JVM local unit tests only; without Robolectric or `isReturnDefaultValues`,
-  `android.util.Log` and similar calls throw. This version was not re-tested on Android projects,
-  only regression-tested on a JVM project.
+  `android.util.Log` and similar calls throw. APK installation, device APIs and Compose UI tests are
+  out of scope.
 - **Windows**: not tested.
 
 ## Development

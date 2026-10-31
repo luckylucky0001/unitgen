@@ -193,7 +193,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
 
   const examples = adapter.exampleTests(m, abs).map((f) => {
     const t = stripLicense(readFile(f)).split("\n");
-    const more = t.length > 120 ? ` (first 120 of ${t.length} lines; open the full file: its expected values and error messages are reliable oracles even if it cannot run here)` : "";
+    const more = t.length > 120 ? ` (first 120 of ${t.length} lines; open the full file: its expected values and error messages are reliable oracles)` : "";
     return `// ${relPath(f, adapter.root)}${more}\n${t.slice(0, 120).join("\n")}`;
   });
 
@@ -221,7 +221,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     src,
     "```",
   ];
-  if (related) sections.push("", "## Related declarations in the same module", "```", related, "```");
+  if (related) sections.push("", "## Related declarations (this module, and types it imports from other modules)", "```", related, "```");
   if (doubles) sections.push("", "## Existing test doubles for types used by the target (prefer these over mocks)", "```", doubles, "```");
   if (examples.length) sections.push("", "## Existing tests in this module (follow their style, imports and fakes/helpers; the framework rules above win if they differ)", "```", examples.join("\n\n"), "```");
   if (existingGenerated) sections.push("", "## Current content of the generated test file (extend it; keep passing tests)", "```", existingGenerated, "```");

@@ -21,7 +21,7 @@ report    汇总成 .unitgen/REPORT.md
 
 ## 验证情况
 
-在 DevEco Studio 26 和 Xcode 16.4 的真实工具链上，用 16 个开源项目完整走过「写测试 → verify → mutate → report」，其中 6 个由只读过本 README 和 Skill 的 AI 从零开始完成。部分结果：
+在 DevEco Studio 26、Xcode 16.4 和 Android SDK（Gradle）的真实工具链上，用 20 个开源项目完整走过「写测试 → verify → mutate → report」，其中 9 个由只读过本 README 和 Skill 的 AI 从零开始完成。部分结果：
 
 | 项目 | 平台 | 目标文件 | 覆盖率 | 变异得分 |
 |---|---|---|---|---|
@@ -31,8 +31,11 @@ report    汇总成 .unitgen/REPORT.md
 | [harmony-utils](https://github.com/787107497/harmony-utils) 122★ | 鸿蒙 · hvigor | `DateHelper.ets` | 0% → 98% | 100% |
 | [LinysBrowser_NEXT](https://github.com/awaLiny2333/LinysBrowser_NEXT) 292★ | 鸿蒙 · hvigor | `url-ext.ets` | 0% → 100% | 97% |
 | [DSBridge-HarmonyOS](https://github.com/751496032/DSBridge-HarmonyOS) 182★ | 鸿蒙 · hvigor | `BaseBridge.ts` | 0% → 94% | 88% |
+| [architecture-samples](https://github.com/android/architecture-samples) 45.9k★ | Android · Gradle | `TaskNetworkDataSource.kt` | 0% → 100% | 100% |
+| [Pokedex](https://github.com/skydoves/Pokedex) 8.4k★ | Android · Gradle（多模块） | `DetailRepositoryImpl.kt` | 89% → 100% | 100% |
+| [ObjectMapper](https://github.com/tristanhimmelman/ObjectMapper) 9.1k★ | iOS · Xcode + 模拟器 | `Map.swift` | 75% → 98% | 100% |
 
-全部 28 个目标文件的数字、验证方法、在这些项目里发现的疑似 bug，以及验证中发现并修复的 unitgen 问题，见 [docs/VALIDATION.md](docs/VALIDATION.md)。
+全部 35 个目标文件的数字、验证方法、在这些项目里发现的疑似 bug，以及验证中发现并修复的 unitgen 问题，见 [docs/VALIDATION.md](docs/VALIDATION.md)。
 
 ## 安装
 
@@ -43,7 +46,7 @@ report    汇总成 .unitgen/REPORT.md
 | 所有平台 | Node.js ≥ 22.18（`node -v`）。PATH 里没有合适的 Node 时，自动使用 DevEco Studio 自带的 Node |
 | 鸿蒙 | 推荐安装 [DevEco Studio](https://developer.huawei.com/consumer/cn/deveco-studio/)，unitgen 会自动找到它，用真实的 hvigor、ArkTS 编译器和 Previewer 运行时跑本地单测，不需要模拟器或真机。工程要在 devDependencies 里声明 `@ohos/hypium`（≥ 1.0.19 才能拿到覆盖率），并执行过 `ohpm install`。没有 DevEco 时改用内置的 Node shim，只适合纯逻辑代码 |
 | iOS | Xcode。SwiftPM 包用 `swift test`，`.xcodeproj` 工程在 iOS 模拟器上跑。只有 Command Line Tools 时只能跑 Swift Package 里的 Swift Testing 测试 |
-| Android | JDK 17+（`JAVA_HOME`）和 Android SDK（`ANDROID_HOME`，或工程里的 `local.properties`） |
+| Android | JDK 17+（`JAVA_HOME`）和 Android SDK（`ANDROID_HOME`，或工程里的 `local.properties`）。Apple 芯片的 Mac 请用 arm64 的 JDK（例如 `brew install openjdk@17`），x86_64 的 JDK 在 Rosetta 下构建很慢 |
 
 **安装 unitgen**：
 
@@ -163,7 +166,7 @@ unitgen generate --llm 'cmd:<从 stdin 读提示词、向 stdout 输出代码的
 - **得分** = killed /（killed + survived）。编译不过的变异会被丢弃，不计分。默认门禁 80%（`--min-score`）。
 - 每次最多运行 `--max` 个变异（默认 15），已经判定过的变异在测试文件改动之前不会重跑，多跑几次就能评估完全部候选。没评估完时门禁会写明「on 19 of 71 candidates」，这时的得分只是抽样结果。
 
-单次变异的耗时：hvigor 约 1–3 秒，SwiftPM/Gradle 3–10 秒，Xcode 10–25 秒（建议 `--max 10`）。
+单次变异的耗时：hvigor 约 1–3 秒，SwiftPM/Gradle 3–10 秒，Xcode 20–40 秒（建议 `--max 10`）。进入死循环的变异体要等到超时才算杀死（按已完成变异体的耗时自适应，最少 20 秒），所以循环多的代码一轮会慢不少。
 
 ## 各平台说明
 
@@ -178,11 +181,12 @@ unitgen generate --llm 'cmd:<从 stdin 读提示词、向 stdout 输出代码的
 **iOS**
 - 只有 `Package.swift` 时走 SwiftPM，只有 `.xcodeproj`/`.xcworkspace` 时走 Xcode + iOS 模拟器。两者都有时默认 SwiftPM；想用模拟器（例如要测 UIKit 代码），每条命令都加 `--adapter xcode`。
 - 测试框架以 brief 为准。`swift-tools-version` < 6.0 的包要求 XCTest，因为它们的 CI 里普通的 `swift test` 不会跑 Swift Testing；部署目标低于 iOS 13 / macOS 10.15 的 Xcode 工程也一样。其余情况用 Swift Testing。
-- Xcode 的构建产物放在 `.unitgen/DerivedData`，不影响你打开着的 Xcode。
+- Xcode 的构建产物放在 `.unitgen/DerivedData`，不影响你打开着的 Xcode。unitgen 自己的 xcodebuild 运行会打开 `ENABLE_TESTABILITY`（`@testable import` 需要），并关掉老的 gcov 覆盖率开关（它们会让 llvm 覆盖率全是 0），这些只作用于这次运行，不改工程。
 
 **Android**
 - 自动发现每个模块的单测任务（包括 flavor），用 `-I` 注入 JaCoCo 初始化脚本，不改任何构建文件。
-- 只覆盖 JVM 本地单测（`src/test`）。第一次构建会下载 Gradle 依赖，比较慢。
+- 一个模块的测试执行到的其他模块代码也计入覆盖率。某个模块构建不了时（例如依赖要求更高的 compileSdk），基线照样测量其他模块，并列出这个模块和 Gradle 给的原因，它的文件排在 `targets` 最后。
+- 只覆盖 JVM 本地单测（`src/test`）。第一次构建会下载 Gradle 依赖，比较慢。没有声明测试框架的模块（没有 JUnit / kotlin-test），brief 会提示换一个模块。
 
 ## unitgen 会动工程里的哪些文件
 
@@ -249,7 +253,7 @@ status                     基线、已接受、已隔离的数量
 | `DEVECO_STUDIO_HOME` / `DEVECO_SDK_HOME` | DevEco 不在 `/Applications/DevEco-Studio.app` 时指定位置 |
 | `UNITGEN_QUIET=1` | 终端不显示构建进度（日志照写） |
 | `UNITGEN_VERBOSE=1` | 打印执行的命令 |
-| `UNITGEN_ENV=<env.sh>` | 只对 unitgen 进程生效的工具链环境文件 |
+| `UNITGEN_ENV=<env.sh>` | 只对 unitgen 进程生效的工具链环境文件（不设时，若 unitgen 目录旁边有 `unitgen-env/env.sh` 就自动使用它） |
 
 构建进度和诊断信息输出到 stderr，`--json` 的结果输出到 stdout，不要把两者合并后再解析。用管道记录输出时，请用支持 `pipefail` 的 shell，以保留 unitgen 的退出码。
 
@@ -257,7 +261,7 @@ status                     基线、已接受、已隔离的数量
 
 - **鸿蒙**：跑的是本地单测（Previewer 运行时），系统 API 大多是模拟实现。设备相关逻辑、`ohosTest`（Instrument Test）和 UI 测试不在范围内。shim 只对纯逻辑可信。struct 里的私有方法、模块没有导出的代码测不到，brief 会提前提示。
 - **iOS**：UI 测试和真机不在范围内。xcodebuild 每次运行要几十秒。只有 Command Line Tools 时，工程已有的 XCTest 用例跑不了，基线为 0%。
-- **Android**：只有 JVM 本地单测；没有 Robolectric 或 `isReturnDefaultValues` 时，`android.util.Log` 等调用会抛异常。这一版本没有在 Android 工程上重新实测，只用 JVM 工程做了回归。
+- **Android**：只有 JVM 本地单测；没有 Robolectric 或 `isReturnDefaultValues` 时，`android.util.Log` 等调用会抛异常。APK 安装、真机 API 和 Compose UI 测试不在范围内。
 - **Windows**：没有实测。
 
 ## 开发

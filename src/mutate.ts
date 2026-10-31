@@ -49,6 +49,8 @@ export interface MutationReport {
   history?: MutantResult[];
   /** Mutant runs of this invocation that produced no test results. */
   errors?: number;
+  /** Glob of the per-mutant logs. */
+  logs?: string;
 }
 
 export function mutationGate(r: MutationReport, minimum = 80): { status: "PASSED" | "FAILED" | "NOT_APPLICABLE"; minimum: number; reason?: string } {
@@ -232,7 +234,7 @@ function isCallStatement(t: string): boolean {
 /** `name = value`, `a.b.c = value`, `n += 1` on one line (not a declaration, not `this.`/`self.`). */
 function isPlainAssignment(t: string): boolean {
   const m = maskStrings(t);
-  return !KEYWORD_START.test(t) && /^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\s*([+\-*\/%]|\?\?)?=(?![=>])/.test(m)
+  return !KEYWORD_START.test(t) && /^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*|\[[^\]]*\])*\s*([+\-*\/%]|\?\?)?=(?![=>])/.test(m)
     && !/^(this|self)\./.test(m) && balanced(t) && !/[{(\[]\s*$/.test(m);
 }
 
@@ -417,7 +419,8 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
     }
     // Returned template literals (`return \`${a}-${b}\``) are built strings too.
     const tpl = /\breturn\s+(`[^`]*`)/.exec(comment >= 0 ? original.slice(0, comment) : original);
-    if (tpl && tpl[1].length > 2) {
+    // Not a Swift escaped identifier (``return `default` ``).
+    if (tpl && tpl[1].length > 2 && !/^`[A-Za-z_]\w*`$/.test(tpl[1])) {
       const at = tpl.index + tpl[0].length - tpl[1].length;
       out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + "``" + original.slice(at + tpl[1].length) });
     }
@@ -644,6 +647,7 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
       `\nIf a survivor cannot change observable behaviour (equivalent mutant), exclude just that mutant by its id, e.g. unitgen mutate ${relTest} --equivalent ${surv[0].id} (a bare line number excludes every mutant on the line), and say why with unitgen note`
     : "";
   const report: MutationReport = { testFile: relTest, target: relPath(absTarget, adapter.root), killed, crashes, survived, stillborn, score, results, feedback, candidates: all.length,
+    logs: state.file("logs", `mutant-${path.basename(absTest).replace(/\W+/g, "_")}-*.log`),
     excluded: excluded.length, triedTotal: current.length, history: [...latest.values()],
     errors: results.filter((r) => r.outcome === "error").length };
   const acc = state.data.accepted.find((a) => a.testFile === relTest);
@@ -665,5 +669,6 @@ export function formatMutation(r: MutationReport): string {
     ? `all ${r.candidates} candidate mutants evaluated with the current test file (${ran ? `${ran} run now` : "nothing new to run; result from earlier runs"})`
     : `${tried} of ${r.candidates} candidate mutants evaluated with the current test file (${ran} run now); re-run to evaluate the rest, or use --max ${r.candidates}`;
   const note = `\n${scope}` + (r.excluded ? `\n${r.excluded} mutant(s) excluded as equivalent (not run)` : "");
-  return r.feedback ? `${head}${note}\n\n${r.feedback}` : `${head}${note}`;
+  const logs = r.logs && r.results.length ? `\nlogs: ${r.logs}` : "";
+  return r.feedback ? `${head}${note}${logs}\n\n${r.feedback}` : `${head}${note}${logs}`;
 }

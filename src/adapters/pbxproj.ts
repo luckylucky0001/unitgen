@@ -124,12 +124,23 @@ export class Pbxproj {
     if (target.files.includes(file)) return undefined;
     // Group: the one whose full path is the file's directory, preferring groups holding the target's files.
     const dir = path.dirname(file);
-    const groups = [...this.objects.values()].filter((o) => o.isa === "PBXGroup" && this.fullPath(o.id) === dir);
-    if (!groups.length) throw new Error(`no Xcode group maps to ${dir}; add the file in Xcode once, or put it next to an existing test file`);
-    const group = groups[0];
+    let group = [...this.objects.values()].find((o) => o.isa === "PBXGroup" && this.fullPath(o.id) === dir);
+    let refPath = name;
+    if (!group) {
+      // A group whose file references carry a subdirectory (group `Tests`, file `ObjectMapperTests/A.swift`):
+      // add the new file the same way, next to its neighbours.
+      for (const o of this.objects.values()) {
+        if (o.isa !== "PBXGroup") continue;
+        const child = this.list(o.body, "children").map((c) => c.split(" ")[0])
+          .find((c) => this.objects.get(c)?.isa === "PBXFileReference" && path.dirname(this.fullPath(c)) === dir);
+        if (child) { group = o; refPath = path.relative(this.fullPath(o.id), file).split(path.sep).join("/"); break; }
+      }
+    }
+    if (!group) throw new Error(`no Xcode group maps to ${dir}; add the file in Xcode once, or put it next to an existing test file`);
     const fileRef = this.newId();
     const buildFile = this.newId();
-    const fr = `\t\t${fileRef} /* ${name} */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ${name}; sourceTree = "<group>"; };\n`;
+    const quoted = /^[\w./-]+$/.test(refPath) ? refPath : `"${refPath}"`;
+    const fr = `\t\t${fileRef} /* ${name} */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ${quoted}; sourceTree = "<group>"; };\n`;
     const bf = `\t\t${buildFile} /* ${name} in Sources */ = {isa = PBXBuildFile; fileRef = ${fileRef} /* ${name} */; };\n`;
     let t = this.text;
     t = t.replace("/* End PBXFileReference section */", `${fr.trimEnd()}\n/* End PBXFileReference section */`);
