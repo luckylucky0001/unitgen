@@ -12,7 +12,9 @@ export interface AcceptedTest {
   attempts: number;
   at: string;
   /** Latest mutation run; `first` keeps the score of the first run (before strengthening). */
-  mutation?: { killed: number; survived: number; stillborn: number; score: number; first?: number; none?: boolean; crashes?: number; equivalent?: number; testHash?: string; stale?: boolean; evaluated?: number; candidates?: number };
+  mutation?: { killed: number; survived: number; stillborn: number; score: number; first?: number; none?: boolean; crashes?: number; equivalent?: number; testHash?: string; stale?: boolean; evaluated?: number; candidates?: number;
+    /** The latest run that evaluated every candidate (kept when a later run is only a sample). */
+    complete?: { score: number; evaluated: number; testHash?: string; at: string } };
   /** Runner that measured this file (see Adapter.runnerName). */
   runner?: string;
 }

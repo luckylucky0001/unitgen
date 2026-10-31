@@ -503,3 +503,22 @@ test("Swift: backtick identifiers are not strings; subscript assignments can be 
   assert.ok(ops.includes("2:delete assignment"));
   assert.ok(!ops.some((o) => o.startsWith("3:string")));
 });
+
+test("brief declarations: top-level and member declarations only, never a function's locals", async () => {
+  const { declarationLines } = await import("../src/context.ts");
+  const ts = [
+    "export function newNote(title: string): Note {",
+    "  const now: number = nowMs();",
+    "  return { title: title, at: now };",
+    "}",
+    "export class Store {",
+    "  count: number = 0;",
+    "  static readonly MAX = 3;",
+    "  add(n: number): void {",
+    "    let next = this.count + n;",
+    "  }",
+    "}",
+    "export const LIMIT = 10;",
+  ].join("\n");
+  assert.deepEqual(declarationLines(ts, "a.ets"), ["export function newNote(title: string): Note", "export class Store", "  add(n: number): void", "export const LIMIT = 10;"]);
+});

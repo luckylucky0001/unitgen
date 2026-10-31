@@ -42,7 +42,7 @@ baseline:  --allow-failing    keep a baseline although some existing tests fail 
 targets:   --limit <n> (20)  --all-kinds
 brief:     --out <file>      --feedback <file>
 verify:    --target <source> --reruns <n> (1)  --allow-no-gain  --quarantine
-mutate:    --target <source> --max <n> (15) --min-score <percent> (80)
+mutate:    --target <source> --max <n> (15) --min-score <percent> (80) --require-all (fail on a sample)
            --equivalent <id|line>[,...]  exclude mutants judged equivalent (12.2 = one mutant, 12 = a line); repeatable
 generate:  --llm anthropic|claude|cmd:<sh> --model <id> --limit <n> (5) --attempts <n> (3) [files...]
            --max <n> (15 mutants/attempt) --min-score <percent> (80)
@@ -74,6 +74,7 @@ export const CLI_OPTIONS = {
   attempts: { type: "string" },
   max: { type: "string" },
   "min-score": { type: "string" },
+  "require-all": { type: "boolean" },
   equivalent: { type: "string", multiple: true },
   help: { type: "boolean", short: "h" },
 } as const;
@@ -265,7 +266,7 @@ export async function main(argv: string[]): Promise<number> {
         state.save();
       }
       const r = await mutate(adapter, state, rest[0], path.resolve(root, tgt), max);
-      const gate = mutationGate(r, minScore);
+      const gate = mutationGate(r, minScore, !!o["require-all"]);
       print(`${formatMutation(r)}\ngate: ${gate.status} (minimum ${minScore}%)${gate.reason ? ` — ${gate.reason}` : ""}`, { ...r, gate });
       return gate.status === "FAILED" ? 2 : 0;
     }

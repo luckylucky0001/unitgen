@@ -164,7 +164,7 @@ unitgen generate --llm 'cmd:<从 stdin 读提示词、向 stdout 输出代码的
 - **survived**：改了代码测试照样通过。输出会给出变异的编号（如 `[12.2]`）和改动后的那一行。补一条能让它失败的断言，`verify` 后再 `mutate`。
 - **等价变异**：改动根本不影响行为（例如一个之后会被覆盖的初始值）。用 `unitgen mutate <测试文件> --equivalent 12.2` 排除，并用 `unitgen note "…"` 写明理由。效果只能通过模拟 API 才能看到的变异不算等价。
 - **得分** = killed /（killed + survived）。编译不过的变异会被丢弃，不计分。默认门禁 80%（`--min-score`）。
-- 每次最多运行 `--max` 个变异（默认 15），已经判定过的变异在测试文件改动之前不会重跑，多跑几次就能评估完全部候选。没评估完时门禁会写明「on 19 of 71 candidates」，这时的得分只是抽样结果。
+- 每次最多运行 `--max` 个变异（默认 15），已经判定过的变异在测试文件改动之前不会重跑，多跑几次就能评估完全部候选。没评估完时门禁会写明「on 19 of 71 candidates」，这时的得分只是抽样结果；加 `--require-all` 则抽样不算通过。报告里会同时给出最近一次完整评估的得分。
 
 单次变异的耗时：hvigor 约 1–3 秒，SwiftPM/Gradle 3–10 秒，Xcode 20–40 秒（建议 `--max 10`）。进入死循环的变异体要等到超时才算杀死（按已完成变异体的耗时自适应，最少 20 秒），所以循环多的代码一轮会慢不少。
 
@@ -229,7 +229,7 @@ baseline                   跑原有测试 + 覆盖率          --allow-failing
 targets                    按未覆盖逻辑给文件排序        --limit <n>（20）--all-kinds
 brief <源文件>             生成写测试用的上下文          --out <文件> --feedback <文件>
 verify <测试文件>          门禁                          --target <源文件> --reruns <n>（1）--allow-no-gain --quarantine
-mutate <测试文件>          变异测试                      --target <源文件> --max <n>（15）--min-score <百分比>（80）
+mutate <测试文件>          变异测试                      --target <源文件> --max <n>（15）--min-score <百分比>（80）--require-all
                                                          --equivalent <编号|行号>[,...]（可重复）
 generate                   无人值守循环                  --llm anthropic|claude|cmd:<sh> --model <id> --limit <n>（5）
                                                          --attempts <n>（3）--max <n> --min-score <百分比>

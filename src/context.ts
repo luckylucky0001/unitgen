@@ -1,4 +1,5 @@
 // Build the generation brief: everything a model needs to write one good test file.
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Adapter, Module } from "./adapters/types.ts";
 import { ranges } from "./coverage.ts";
@@ -24,21 +25,32 @@ const RULES = `Rules (a test that breaks any of these is rejected):
 6. Keep tests small, independent and named after the behaviour they check. Prefer 5-25 focused tests over one giant test.
 7. Only use test libraries named in the Conventions section or imported by the existing tests below. Do not add dependencies.`;
 
-function declarationLines(text: string, file = ""): string[] {
+export function declarationLines(text: string, file = ""): string[] {
   // A keyword followed by a name (`type Foo`, `object Bar`), not a field called `type:` / `object:`.
   const re = /^\s*(public |open |internal |private |fileprivate |protected |export |static |final |abstract |override |data |sealed |inline |suspend |async |mutating |@\w+\s+)*((func|fun|class|struct|enum|protocol|interface|object|typealias|val|var|let|const|case|function|type)\s+[A-Za-z_$`]|(init|constructor)\b)/;
   // TypeScript/ArkTS methods have no keyword: `sendMessage(x: string): Promise<void> {`.
   const tsMethod = /^\s+(public |protected |static |async |override |readonly )*[A-Za-z_$][\w$]*\s*(<[^>]*>)?\([^)]*\)\s*(:\s*[^={;]+)?\s*\{\s*$/;
   const isTs = /\.(ets|ts)$/.test(file);
-  return text.split("\n").filter((l) => {
-    if (/^\s*(private|fileprivate)\b/.test(l)) return false;
-    // Variables only at top level or as members (shallow indent), not locals inside function bodies.
-    const indent = l.length - l.trimStart().length;
-    // ArkTS/TS code is conventionally indented by 2 (members at 2, locals at 4+); Kotlin/Swift by 4.
-    if (/^\s*(val|var|let|const)\b/.test(l)) return indent <= (isTs ? 2 : 4);
-    if (re.test(l)) return true;
-    return isTs && tsMethod.test(l) && !/^\s*(if|for|while|switch|catch|return|function|else)\b/.test(l);
-  }).map((l) => l.replace(/\{\s*$/, "").trimEnd());
+  // Block nesting, so variables count only at top level or directly in a type body, never as locals
+  // of a function (whatever the indentation style).
+  const stack: ("type" | "code")[] = [];
+  const typeHead = /\b(class|struct|enum|protocol|interface|object|extension|actor)\b/;
+  const out: string[] = [];
+  for (const l of text.split("\n")) {
+    const code = l.replace(/\/\/.*$/, "").replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, "\"\"");
+    const inBody = stack.length === 0 || stack[stack.length - 1] === "type";
+    let keep = false;
+    if (/^\s*(private|fileprivate)\b/.test(l)) keep = false;
+    else if (/^\s*(val|var|let|const)\b/.test(l)) keep = inBody;
+    else if (re.test(l)) keep = inBody || /^\s*(public |internal |export |static |override |open )*(func|fun|function|init|constructor|case)\b/.test(l);
+    else keep = isTs && inBody && tsMethod.test(l) && !/^\s*(if|for|while|switch|catch|return|function|else)\b/.test(l);
+    if (keep) out.push(l.replace(/\{\s*$/, "").trimEnd());
+    for (const c of code) {
+      if (c === "{") stack.push(typeHead.test(code) && !/\b(func|fun|function)\b/.test(code) ? "type" : "code");
+      else if (c === "}") stack.pop();
+    }
+  }
+  return out;
 }
 
 /** Signatures of other module files whose type names the target references. */
@@ -59,10 +71,19 @@ function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: 
       }
     }
   }
+  // TS/ArkTS relative imports (`import { nowMs } from '../util/IdGen'`): those files are what the code
+  // calls, functions included, so they come first whatever they define.
+  const relImports = new Set<string>();
+  for (const im of text.matchAll(/^\s*import\s+[^;]*?\s+from\s+['"](\.{1,2}\/[^'"]+)['"]/gm)) {
+    const base = path.resolve(path.dirname(source), im[1]);
+    const hit = [base, `${base}.ets`, `${base}.ts`, path.join(base, "index.ets"), path.join(base, "index.ts")].find((f) => exists(f) && fs.statSync(f).isFile());
+    if (hit && hit !== source) relImports.add(hit);
+  }
+  for (const f of relImports) if (!files.includes(f)) files.push(f);
   const scored = files.map((f) => {
     const t = readFile(f);
     const defs = (t.match(/\b(class|struct|enum|protocol|interface|object|typealias)\s+([A-Z]\w*)/g) ?? []).map((s) => s.split(/\s+/)[1]);
-    const hits = defs.filter((d) => idents.has(d) && !own.has(d)).length;
+    const hits = defs.filter((d) => idents.has(d) && !own.has(d)).length + (relImports.has(f) ? 1000 : 0);
     return { f, t, hits };
   }).filter((x) => x.hits > 0).sort((a, b) => b.hits - a.hits);
   for (const { f, t } of scored) {
