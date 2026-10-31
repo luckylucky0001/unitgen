@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { Adapter, TestCase, TestRun } from "./adapters/types.ts";
 import { type Coverage, mergeCoverage, newlyCovered, ranges } from "./coverage.ts";
 import type { State } from "./state.ts";
-import { exists, readFile, relPath } from "./util.ts";
+import { canonical, exists, readFile, relPath } from "./util.ts";
 
 export type Verdict = "accepted" | "compile_error" | "test_failures" | "flaky" | "no_assertions" | "no_gain" | "no_tests" | "infra_error" | "mutation_failures";
 
@@ -25,6 +25,8 @@ export interface VerifyResult {
   deltaLines?: number;
   /** The file was accepted before this (failed) verify: it stops counting until it passes again. */
   lapsed?: boolean;
+  /** The brief named another path for tests of this target. */
+  placement?: string;
   suspects: string[];
   feedback: string;
   logFile?: string;
@@ -78,6 +80,11 @@ export async function verify(adapter: Adapter, state: State, testFile: string, o
       verdict, testFile: abs, target, tests: [], failed: [], gained: {}, gainedLines: 0, targetGained: 0, suspects: [],
       feedback: "", seconds: (Date.now() - start) / 1000, ...extra,
     };
+    if (target && r.verdict !== "infra_error") {
+      const m = adapter.moduleFor(target);
+      const want = m ? canonical(adapter.placement(target, m).path) : undefined;
+      if (want && want !== canonical(abs)) r.placement = relPath(want, adapter.root);
+    }
     finish(adapter, state, r, opts);
     return r;
   };
@@ -238,6 +245,7 @@ export function formatVerify(r: VerifyResult, root: string): string {
     for (const [f, ls] of Object.entries(r.gained)) lines.push(`  ${relPath(f, root)}: ${ranges(ls)}`);
   }
   if (r.suspects.length && r.verdict === "accepted") lines.push(`suspected bugs flagged: ${r.suspects.length}`, ...r.suspects.map((s) => `  ${s}`));
+  if (r.placement) lines.push(`note: the brief puts tests of this target at ${r.placement}; this file is elsewhere, so the project's own test setup may not run it.`);
   if (r.lapsed) lines.push(`note: this file was ACCEPTED before. Until it passes verify again it does not count (coverage, report, mutate); its history is kept.`);
   if (r.feedback) lines.push("", r.feedback);
   if (r.logFile) lines.push("", `log: ${r.logFile}`);

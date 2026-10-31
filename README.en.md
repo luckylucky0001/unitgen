@@ -194,7 +194,8 @@ runs the test file:
   scored. The gate requires 80% by default (`--min-score`).
 - Each run evaluates at most `--max` mutants (default 15). Mutants already decided are not run
   again until the test file changes, so repeated runs work through all candidates. Until all are
-  evaluated, the gate says so ("on 19 of 71 candidates"): the score is a sample.
+  evaluated, the gate says so ("on 19 of 71 candidates"): the score is a sample; with
+  `--require-all` a sample does not pass. The report also shows the last complete result.
 
 Time per mutant: about 1–3 s with hvigor, 3–10 s with SwiftPM/Gradle, 20–40 s with Xcode (use
 `--max 10`). A mutant that loops forever counts as killed only when its timeout expires (adapted to
@@ -296,7 +297,7 @@ baseline                   existing tests + coverage        --allow-failing
 targets                    rank files by uncovered logic    --limit <n> (20) --all-kinds
 brief <source>             context for writing the test     --out <file> --feedback <file>
 verify <test-file>         the gate                         --target <source> --reruns <n> (1) --allow-no-gain --quarantine
-mutate <test-file>         mutation testing                 --target <source> --max <n> (15) --min-score <percent> (80)
+mutate <test-file>         mutation testing                 --target <source> --max <n> (15) --min-score <percent> (80) --require-all
                                                             --equivalent <id|line>[,...] (repeatable)
 generate                   unattended loop                  --llm anthropic|claude|cmd:<sh> --model <id> --limit <n> (5)
                                                             --attempts <n> (3) --max <n> --min-score <percent>

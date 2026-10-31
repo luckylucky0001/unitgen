@@ -53,7 +53,8 @@ export interface MutationReport {
   logs?: string;
 }
 
-export function mutationGate(r: MutationReport, minimum = 80): { status: "PASSED" | "FAILED" | "NOT_APPLICABLE"; minimum: number; reason?: string } {
+/** `requireAll`: a pass on a sample of the candidates is not enough (`mutate --require-all`). */
+export function mutationGate(r: MutationReport, minimum = 80, requireAll = false): { status: "PASSED" | "FAILED" | "NOT_APPLICABLE"; minimum: number; reason?: string } {
   if (r.candidates === 0 || (r.results.length > 0 && r.results.every((x) => x.outcome === "equivalent"))) return { status: "NOT_APPLICABLE", minimum };
   const errors = r.results.filter((x) => x.outcome === "error"); // this run only
   if (errors.length) {
@@ -67,7 +68,8 @@ export function mutationGate(r: MutationReport, minimum = 80): { status: "PASSED
   if (r.score * 100 < minimum) return { status: "FAILED", minimum, reason: `score ${(r.score * 100).toFixed(0)}% is below ${minimum}%` };
   // A pass on a sample is a pass, but say so: the rest may still hold survivors.
   const tried = r.triedTotal ?? r.results.length;
-  if (tried < r.candidates) return { status: "PASSED", minimum, reason: `on ${tried} of ${r.candidates} candidates; ${r.candidates - tried} not evaluated yet, which may still survive (re-run mutate to evaluate them)` };
+  if (tried < r.candidates && requireAll) return { status: "FAILED", minimum, reason: `only ${tried} of ${r.candidates} candidates evaluated (--require-all): re-run mutate, or raise --max to ${r.candidates}` };
+  if (tried < r.candidates) return { status: "PASSED", minimum, reason: `on ${tried} of ${r.candidates} candidates; ${r.candidates - tried} not evaluated yet, which may still survive (re-run mutate to evaluate them, or use --require-all)` };
   return { status: "PASSED", minimum };
 }
 
@@ -653,7 +655,11 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   const acc = state.data.accepted.find((a) => a.testFile === relTest);
   if (acc) {
     const first = acc.mutation?.first ?? Math.round(score * 100) / 100;
-    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first, crashes, equivalent: excluded.length, testHash: fileHash(absTest), evaluated: current.length, candidates: all.length };
+    const hash = fileHash(absTest);
+    const complete = current.length >= all.length && all.length > 0
+      ? { score: Math.round(score * 100) / 100, evaluated: current.length, testHash: hash, at: state.stamp() }
+      : acc.mutation?.complete;
+    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first, crashes, equivalent: excluded.length, testHash: hash, evaluated: current.length, candidates: all.length, ...(complete ? { complete } : {}) };
     state.save();
   }
   writeFile(prevFile, JSON.stringify({ ...report, results: report.history }, null, 2));

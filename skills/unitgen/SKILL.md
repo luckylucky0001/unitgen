@@ -133,7 +133,8 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
 5. **Finish:** `"$UNITGEN" report` writes `.unitgen/REPORT.md`. Summarise it for the user with
    the numbers, not adjectives: coverage before → after per target (lines), tests added, the
    runner, mutation score with evaluated/candidate counts (a gate PASSED "on 19 of 71 candidates"
-   is a sample: say so, or run mutate again until all are evaluated), crash-only kills, discarded and
+   is a sample: say so, or run mutate again until all are evaluated; `--require-all` makes a sample
+   fail the gate), crash-only kills, discarded and
    equivalent mutants (and why), suspected bugs with their evidence, and what could not be
    covered and why (system APIs, a device, a module that does not build, ...).
 

@@ -188,6 +188,9 @@ test("mutation quality gate rejects survivors below threshold and infrastructure
   const none = { ...report, candidates: 1, killed: 0, survived: 0, score: 0, triedTotal: 1, results: [{ line: 1, op: "", original: "", mutated: "", outcome: "stillborn" }] } as MutationReport;
   assert.equal(mutationGate(none).status, "NOT_APPLICABLE");
   assert.equal(mutationGate({ ...none, candidates: 3 }).status, "FAILED");
+  // --require-all: a sample is not enough.
+  assert.equal(mutationGate({ ...report, killed: 4, survived: 1, score: 0.8, triedTotal: 5, candidates: 9 }, 80, true).status, "FAILED");
+  assert.equal(mutationGate({ ...report, killed: 4, survived: 1, score: 0.8, triedTotal: 9, candidates: 9 }, 80, true).status, "PASSED");
   // A pass on a sample says so.
   assert.match(mutationGate({ ...report, killed: 4, survived: 1, score: 0.8, triedTotal: 5, candidates: 9 }).reason ?? "", /on 5 of 9 candidates/);
 });
