@@ -421,3 +421,25 @@ test("`a ?? fallback` is mutated to the fallback; `??=` and keywords are left al
   const m = mutantsFor(ts, [1, 2, 3, 4]).filter((x) => x.op === "?? -> fallback").map((x) => `${x.line}:${x.mutated}`);
   assert.deepEqual(m, ["1:this.children = [];", "2:const n = 0;", "3:return 'anon';"]);
 });
+
+test("commands run in a subdirectory find the project root; a HarmonyOS module directory is not one", async (t) => {
+  const fs = await import("node:fs"), os = await import("node:os"), path = await import("node:path");
+  const { findProjectRoot } = await import("../src/adapters/index.ts");
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "unitgen-root-")));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const app = path.join(dir, "app"), mod = path.join(app, "entry"), deep = path.join(mod, "src", "main", "ets");
+  fs.mkdirSync(deep, { recursive: true });
+  fs.writeFileSync(path.join(app, "build-profile.json5"), '{ "app": {}, "modules": [{ "name": "entry", "srcPath": "./entry" }] }');
+  fs.writeFileSync(path.join(app, "oh-package.json5"), "{}");
+  fs.writeFileSync(path.join(mod, "build-profile.json5"), '{ "apiType": "stageMode" }');
+  fs.writeFileSync(path.join(mod, "oh-package.json5"), "{}");
+  fs.writeFileSync(path.join(mod, "hvigorfile.ts"), "");
+  assert.equal(findProjectRoot(deep), app);
+  const pkg = path.join(dir, "pkg"), src = path.join(pkg, "Sources", "Lib");
+  fs.mkdirSync(src, { recursive: true });
+  fs.writeFileSync(path.join(pkg, "Package.swift"), "// swift-tools-version:5.9\n");
+  assert.equal(findProjectRoot(src), pkg);
+  const none = path.join(dir, "none");
+  fs.mkdirSync(none);
+  assert.equal(findProjectRoot(none), none);
+});

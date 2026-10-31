@@ -1,7 +1,7 @@
 // unitgen: coverage-guided unit test backfilling for iOS, Android and HarmonyOS projects.
 import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { ADAPTER_IDS, detectAdapter } from "./adapters/index.ts";
+import { ADAPTER_IDS, detectAdapter, findProjectRoot } from "./adapters/index.ts";
 import { buildBrief } from "./context.ts";
 import { summarize } from "./coverage.ts";
 import { generate, recoverGeneration } from "./generate.ts";
@@ -98,7 +98,7 @@ export async function main(argv: string[]): Promise<number> {
     process.stdout.write(`${own.length ? own.join("\n") : `unknown command: ${cmd}`}\n\nCommon: -C <dir>  --adapter <id>  --module <name>  --json\n`);
     return 0;
   }
-  const root = canonical(o.project ?? process.cwd());
+  const root = canonical(o.project ?? findProjectRoot(process.cwd(), o.adapter));
   const adapter = detectAdapter(root, o.adapter);
   // File arguments may be given relative to the project root (as `targets` prints them) when -C is used.
   const fileArg = (p: string | undefined) => p && canonical(!path.isAbsolute(p) && !exists(p) && exists(path.resolve(adapter.root, p)) ? path.resolve(adapter.root, p) : p);
