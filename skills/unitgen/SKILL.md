@@ -46,7 +46,9 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
 0. **Start clean:** `git status`. If an earlier session was interrupted, run any unitgen command
    first (`"$UNITGEN" status`): it takes over a stale lock and restores interrupted mutations and
    temporary edits (it says so). Production code must show no changes before you continue.
-1. **Doctor:** read the `runner:` line. On HarmonyOS it says whether the real toolchain (hvigor:
+1. **Doctor:** read every line. iOS: Xcode or Command Line Tools, and a `note:` when an
+   `.xcodeproj` exists next to `Package.swift` (pass `--adapter xcode` on every command to use the
+   iOS Simulator, e.g. for UIKit code). HarmonyOS: the `runner:` line says whether the real toolchain (hvigor:
    ArkTS compiler + Previewer runtime) or the Node shim is used, and why — for example
    `ohpm install` not run, `@ohos/hypium` not declared, an old hypium, `compileSdkVersion` not
    matching the installed SDK. Tell the user what would enable the real toolchain; do not edit

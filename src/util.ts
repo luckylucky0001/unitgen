@@ -336,5 +336,9 @@ export function preferOwnTest(all: string[], source: string | undefined, fallbac
   if (!source) return fallback.slice(0, limit);
   const base = path.basename(source).replace(/\.[^.]+$/, "");
   const own = all.filter((f) => new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(Test|Tests|Spec)?(\.test)?\.[^.]+$`).test(path.basename(f)) && !/UnitGen|\.unitgen\./.test(path.basename(f)));
-  return [...new Set([...own, ...fallback])].slice(0, limit);
+  // Then tests whose names share a word with the source (ISOFormatter -> TestFormatters).
+  const words = (s: string) => (s.match(/[A-Z]{2,}(?=[A-Z][a-z]|$)|[A-Z]?[a-z]+|\d+/g) ?? []).map((w) => w.toLowerCase().replace(/s$/, "")).filter((w) => w.length > 3 && !["test", "spec", "unitgen"].includes(w));
+  const mine = new Set(words(base));
+  const related = all.filter((f) => !/UnitGen|\.unitgen\./.test(path.basename(f)) && words(path.basename(f).replace(/\.[^.]+$/, "")).some((w) => mine.has(w)));
+  return [...new Set([...own, ...related, ...fallback])].slice(0, limit);
 }

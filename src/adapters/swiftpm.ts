@@ -90,6 +90,8 @@ export class SwiftPMAdapter implements Adapter {
     lines.push(`swift: ${v.out.split("\n").find((l) => l.includes("Swift version"))?.trim()}`);
     const t = this.tc();
     lines.push(t.clt ? "toolchain: Command Line Tools (no Xcode) -> Swift Testing only, XCTest targets skipped during runs" : "toolchain: Xcode");
+    const xcodeproj = fs.readdirSync(this.root).find((f) => f.endsWith(".xcodeproj") || f.endsWith(".xcworkspace"));
+    if (xcodeproj) lines.push(`note: ${xcodeproj} exists too; this run uses SwiftPM (macOS). Pass --adapter xcode on every command to run in the iOS Simulator instead (needed for UIKit code).`);
     try {
       const d = this.loadDump();
       const ts: DumpTarget[] = d.targets;

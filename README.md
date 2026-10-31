@@ -52,7 +52,7 @@ unitgen 采用的就是调研结论推荐的路线：平台无关的 LLM 闭环 
 
 ```bash
 git clone https://github.com/luckylucky0001/unitgen.git ~/unitgen
-cd ~/unitgen && npm install
+cd ~/unitgen && npm ci
 mkdir -p ~/.local/bin && ln -sfn ~/unitgen/bin/unitgen ~/.local/bin/unitgen
 export PATH="$HOME/.local/bin:$PATH"          # 写进 ~/.zshrc 可永久生效
 unitgen --help
@@ -76,6 +76,8 @@ unitgen mutate <测试文件>             # 变异测试，给出没被发现的
 unitgen reject <测试文件> "原因"       # 放弃并隔离
 unitgen report        # .unitgen/REPORT.md
 ```
+
+`.unitgen/` 是 unitgen 在工程里的工作目录（状态、日志、报告），建议加进工程的 `.gitignore`。
 
 鸿蒙工程先在工程根目录执行一次 `ohpm install`（DevEco Studio 打开工程时也会自动执行）；同时有 `Package.swift` 和 `.xcodeproj` 的 iOS 工程，想走 Xcode + 模拟器时，每条命令都加 `--adapter xcode`。
 
