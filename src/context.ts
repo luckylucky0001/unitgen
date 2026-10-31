@@ -79,6 +79,27 @@ function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: 
 // Supertypes too generic to say "this class can stand in for something the target uses".
 const GENERIC_SUPERTYPES = new Set(["Error", "Exception", "RuntimeException", "Throwable", "Object", "Any", "NSObject", "Equatable", "Hashable", "Codable", "Serializable", "Comparable", "Sendable"]);
 
+/** The source of the named type declarations only (from the declaration to its closing brace). */
+function declarationsOf(text: string, names: string[]): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  for (const name of names) {
+    const start = lines.findIndex((l) => new RegExp(`\\b(class|object|struct|enum|actor)\\s+${name}\\b`).test(l));
+    if (start < 0) continue;
+    let depth = 0;
+    for (let i = start; i < lines.length; i++) {
+      out.push(lines[i]);
+      for (const c of lines[i].replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\/\/.*$/g, "")) {
+        if (c === "{") depth++;
+        if (c === "}") depth--;
+      }
+      if (depth <= 0 && i > start) break;
+      if (depth <= 0 && lines[i].includes("}")) break;
+    }
+  }
+  return out.join("\n");
+}
+
 /** Existing fakes/stubs in the module's test sources that implement types the target uses. */
 function testDoubles(adapter: Adapter, m: Module, text: string, budget: number): string {
   const idents = new Set((text.match(/\b[A-Z][A-Za-z0-9_]{2,}\b/g) ?? []).filter((x) => !GENERIC_SUPERTYPES.has(x)));
@@ -100,7 +121,11 @@ function testDoubles(adapter: Adapter, m: Module, text: string, budget: number):
       const impl = [...t.matchAll(/\b(?:class|object|struct)\s+(\w+)[^{\n]*?(?::|implements|extends)\s*([^{\n]+)/g)]
         .filter((mm) => (mm[2].match(/\b[A-Z]\w+/g) ?? []).some((x) => idents.has(x)));
       if (!impl.length) continue;
-      const chunk = `// ${relPath(f, adapter.root)}\n${declarationLines(t, f).join("\n")}`;
+      // In a test file only the doubles themselves are useful, not every test method around them.
+      const isTestFile = /XCTestCase|@Test\b|@Suite\b|\bdescribe\(|@org\.junit|import org\.junit|import kotlin\.test/.test(t);
+      const body = isTestFile ? declarationsOf(t, impl.map((mm) => mm[1]).filter((n) => /Fake|Stub|Mock|InMemory|Dummy|Spy|Test\w+Repository/.test(n) || !/Tests?$/.test(n))) : t;
+      if (!body.trim()) continue;
+      const chunk = `// ${relPath(f, adapter.root)}\n${declarationLines(body, f).join("\n")}`;
       if (used + chunk.length > budget) return parts.join("\n\n");
       parts.push(chunk);
       used += chunk.length;

@@ -283,7 +283,7 @@ test("generate feeds mutation failures back to the model and accepts strengthene
     placement: () => ({ path: testFile, suiteName: "AnswerUnitGenTest" }), exampleTests: () => [],
     prepareTestFile: () => {}, countAssertions: () => 1,
     async runTests(req) {
-      const failed = req.label.startsWith("mutant-") && req.label !== "mutant-0-clean" && fs.readFileSync(testFile, "utf8").includes("strong");
+      const failed = req.label.startsWith("mutant-") && !req.label.endsWith("-0-clean") && fs.readFileSync(testFile, "utf8").includes("strong");
       return { ok: !failed, compiled: true, tests: [{ name: "AnswerUnitGenTest.answer", status: failed ? "failed" : "passed", message: failed ? "AssertionError: expected 1" : undefined }],
         coverage: req.coverage ? { [target]: { 1: 1 } } : undefined, logFile: "fixture", excerpt: "", seconds: 0.01 };
     },
@@ -306,7 +306,7 @@ test("generate feeds mutation failures back to the model and accepts strengthene
 
   const runTests = adapter.runTests;
   adapter.runTests = async (req) => {
-    if (req.label === "mutant-0-clean") throw new RunCancelled();
+    if (req.label.endsWith("-0-clean")) throw new RunCancelled();
     return await runTests(req);
   };
   await assert.rejects(generate(adapter, state, weak, { files: [target], limit: 1, attempts: 1, reruns: 1, mutationMax: 1 }), RunCancelled);

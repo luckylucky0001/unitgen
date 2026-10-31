@@ -22,6 +22,8 @@ export interface Mutant {
 
 export interface MutantResult extends Mutant {
   outcome: "killed" | "killed-crash" | "survived" | "equivalent" | "stillborn" | "error";
+  /** Content hash of the test file the outcome was measured with. */
+  testHash?: string;
 }
 
 export interface MutationReport {
@@ -43,11 +45,13 @@ export interface MutationReport {
   triedTotal?: number;
   /** Latest outcome of every mutant evaluated so far (re-runs re-check survivors first). */
   history?: MutantResult[];
+  /** Mutant runs of this invocation that produced no test results. */
+  errors?: number;
 }
 
 export function mutationGate(r: MutationReport, minimum = 80): { status: "PASSED" | "FAILED" | "NOT_APPLICABLE"; minimum: number; reason?: string } {
   if (r.candidates === 0 || (r.results.length > 0 && r.results.every((x) => x.outcome === "equivalent"))) return { status: "NOT_APPLICABLE", minimum };
-  const errors = r.results.filter((x) => x.outcome === "error");
+  const errors = r.results.filter((x) => x.outcome === "error"); // this run only
   if (errors.length) {
     return { status: "FAILED", minimum, reason: `${errors.length} mutant run(s) produced no test results (${errors.map((e) => `line ${e.line}`).join(", ")}): the test run crashed or exited early; see the mutant logs. Fix the cause (e.g. a test awaiting a promise that never settles) and re-run` };
   }
@@ -163,10 +167,22 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
         out.push({ line: ln, op: "negate condition", original, mutated });
       }
     }
-    // Integer constants other than 0/1 (limits, factors, sizes): n -> n + 1.
-    const num = /(?<![\w.$#])(?<!\|\s*)([2-9]|[1-9]\d{1,5})(?![\w.])(?!\s*\|)/.exec(masked);
-    if (num && !/^\s*(case\b|import\b|#)/.test(original)) {
+    // Integer constants other than 0/1 (limits, factors, sizes, error codes): n -> n + 1. In a
+    // `case X: return 2001` line only the part after the label (the label itself is a pattern).
+    const caseLabel = /^\s*case\b[^:]*:/.exec(masked);
+    const from = caseLabel ? caseLabel[0].length : 0;
+    const numRe = /(?<![\w.$#])(?<!\|\s*)([2-9]|[1-9]\d{1,5})(?![\w.])(?!\s*\|)/g;
+    numRe.lastIndex = from;
+    const num = /^\s*(import\b|#)/.test(original) ? null : numRe.exec(masked);
+    if (num) {
       out.push({ line: ln, op: `${num[1]} -> ${Number(num[1]) + 1}`, original, mutated: original.slice(0, num.index) + String(Number(num[1]) + 1) + original.slice(num.index + num[1].length) });
+    }
+    // Returned string literals (messages, keys, formats): does a test look at the text at all?
+    const ret = /\breturn\s+("(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+')/.exec(original);
+    if (ret && !/\\\(|\$\{/.test(ret[1])) {
+      const at = ret.index + ret[0].length - ret[1].length;
+      const q = ret[1][0];
+      out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + q + q + original.slice(at + ret[1].length) });
     }
     // Statement deletion: does any test notice the call (or the stored value) never happens?
     if (isCallStatement(t)) {
@@ -250,105 +266,126 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   if (!lines.length) throw new Error(`${relTest} covers no line of ${relPath(absTarget, adapter.root)}`);
   const original = readFile(absTarget);
   const generated = mutantsFor(original, lines);
-  // Mutants the user judged equivalent (`--equivalent 12` = whole line, `12.2` = one mutant) are not run.
-  const eqSpec = new Set((state.data.equivalent ?? {})[relTest]?.map(String) ?? []);
-  const isEq = (mu: Mutant) => eqSpec.has(String(mu.line)) || (mu.id !== undefined && eqSpec.has(mu.id));
+  const key = (mu: Mutant) => `${mu.line}|${mu.op}|${mu.mutated}`;
+  // Mutants the user judged equivalent are not run: `12` = every mutant on line 12, `12.2` = one
+  // mutant. Ids are resolved to a stable key (line, operator, mutated text) the first time they are
+  // used, so a later unitgen version that numbers mutants differently cannot exclude the wrong one.
+  const eqAll = (state.data.equivalent ??= {});
+  const specs = (eqAll[relTest] ?? []).map(String).map((x) => {
+    if (!/^\d+\.\d+$/.test(x)) return x;
+    const mu = generated.find((g) => g.id === x);
+    if (!mu) { log(`warning: --equivalent ${x}: no such mutant on the covered lines (ignored)`); return x; }
+    return `key:${key(mu)}`;
+  });
+  eqAll[relTest] = [...new Set(specs)];
+  state.save();
+  const isEq = (mu: Mutant) => specs.includes(String(mu.line)) || specs.includes(`key:${key(mu)}`);
   const excluded = generated.filter(isEq);
   const all = generated.filter((mu) => !isEq(mu));
   // Re-runs: re-check previous survivors first (did strengthening work?), then mutants never tried,
-  // and only then ones already killed — so repeated runs walk through the whole candidate set.
+  // then mutants whose outcome was measured with an older version of the test file. Outcomes are keyed
+  // by line, operator and mutated text (changed code yields new mutants) and count only for the test
+  // content they were measured with; a mutant that does not compile stays discarded.
+  const testHash = fileHash(absTest);
   const prevFile = state.file("mutation", `${path.basename(absTest)}.json`);
   const prev = readJson<{ results?: MutantResult[] } | null>(prevFile, null)?.results ?? [];
-  const key = (m: Mutant) => `${m.line}|${m.op}|${m.mutated}`;
-  const prevOutcome = new Map(prev.map((r) => [key(r), r.outcome]));
-  const rank = (m: Mutant) => { const o = prevOutcome.get(key(m)); return o === "survived" ? 0 : o === undefined ? 1 : 2; };
-  const ordered = [...all].sort((a, b) => rank(a) - rank(b));
-  const fresh = ordered.filter((m) => rank(m) < 2);
+  const prevBy = new Map(prev.map((r) => [key(r), r]));
+  const valid = (r: MutantResult | undefined) => !!r && (r.outcome === "stillborn" || r.testHash === testHash);
+  const rank = (mu: Mutant) => {
+    const r = prevBy.get(key(mu));
+    if (!r) return 1;
+    if (r.outcome === "survived" || r.outcome === "error") return 0;
+    return valid(r) ? 3 : 2;
+  };
+  const fresh = all.filter((mu) => rank(mu) < 3);
   // Pick more than needed: mutants that do not compile are replaced by the next candidates.
-  const candidates = [...pickMutants(fresh, Math.min(fresh.length, max * 2)), ...pickMutants(ordered.filter((m) => rank(m) === 2), max * 2)];
-  if (!candidates.length && !excluded.length) {
+  const candidates = [0, 1, 2].flatMap((k) => pickMutants(fresh.filter((mu) => rank(mu) === k), max * 2));
+  if (!all.length && !excluded.length) {
     const acc0 = state.data.accepted.find((a) => a.testFile === relTest);
     if (acc0) {
       acc0.mutation = { killed: 0, survived: 0, stillborn: 0, score: 1, first: acc0.mutation?.first, none: true };
       state.save();
     }
     return { testFile: relTest, target: relPath(absTarget, adapter.root), killed: 0, crashes: 0, survived: 0, stillborn: 0, score: 1, results: [], candidates: 0,
-      feedback: `nothing to mutate: the ${lines.length} covered lines contain no operators, simple conditions or call statements unitgen can change` };
+      feedback: `nothing to mutate: the ${lines.length} covered lines contain no operators, constants, simple conditions or statements unitgen can change` };
   }
-  const backup = state.file("mutation.backup");
-  fs.copyFileSync(absTarget, backup);
-  writeFile(journal(state), JSON.stringify({ target: absTarget, backup }));
   const results: MutantResult[] = [];
-  try {
-    const clean = await adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: "mutant-0-clean" });
-    if (!clean.ok || clean.tests.some((t) => t.status === "failed")) {
-      throw new Error(`${relTest} does not pass on the unmodified code; fix it (unitgen verify) before mutating`);
-    }
-    // Mutants can loop forever (e.g. a binary search bound): cap each run and count a timeout as killed.
-    const timeoutSec = Math.max(60, Math.ceil(clean.seconds * 4) + 30);
-    if (!candidates.length) throw new Error("every remaining mutant is marked equivalent; nothing to run");
-    for (const [i, mu] of candidates.entries()) {
-      if (results.filter((r) => r.outcome !== "stillborn").length >= max) break;
-      const lines2 = original.split("\n");
-      lines2.splice(mu.line - 1, (mu.endLine ?? mu.line) - mu.line + 1, mu.mutated);
-      fs.writeFileSync(absTarget, lines2.join("\n"));
-      const r = await adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: `mutant-${i + 1}`, timeoutSec });
-      let outcome: MutantResult["outcome"];
-      if (r.infraError === "timeout" || /TIMEOUT after/.test(r.excerpt)) outcome = "killed";
-      else if (r.infraError) outcome = "error";
-      else if (!r.compiled) outcome = "stillborn";
-      else if (!r.ok || r.tests.some((t) => t.status === "failed")) {
-        // Killed by a crash (ReferenceError/TypeError, index out of range, a process that died) rather than
-        // by an assertion: still a detected change, but flag it.
-        const asserted = r.tests.some((t) => t.status === "failed" && /assert|expect|Expectation|AssertionError|expected|XCTAssert|#require/i.test(t.message ?? ""));
-        outcome = asserted ? "killed" : "killed-crash";
+  if (candidates.length) {
+    const backup = state.file("mutation.backup");
+    fs.copyFileSync(absTarget, backup);
+    writeFile(journal(state), JSON.stringify({ target: absTarget, backup }));
+    const base = path.basename(absTest).replace(/\W+/g, "_");
+    try {
+      const clean = await adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: `mutant-${base}-0-clean` });
+      if (!clean.ok || clean.tests.some((t) => t.status === "failed")) {
+        throw new Error(`${relTest} does not pass on the unmodified code; fix it (unitgen verify) before mutating`);
       }
-      else outcome = r.tests.length ? "survived" : "error";
-      results.push({ ...mu, outcome });
-      const shown = outcome === "stillborn" ? "did not compile (discarded)" : outcome;
-      log(`  mutant ${i + 1} (budget ${max}, ${all.length} candidates) [${mu.id}] line ${mu.line} (${mu.op}): ${shown}`);
+      // Mutants can loop forever (e.g. a binary search bound): cap each run and count a timeout as killed.
+      const timeoutSec = Math.max(60, Math.ceil(clean.seconds * 4) + 30);
+      for (const [i, mu] of candidates.entries()) {
+        if (results.filter((r) => r.outcome !== "stillborn").length >= max) break;
+        const lines2 = original.split("\n");
+        lines2.splice(mu.line - 1, (mu.endLine ?? mu.line) - mu.line + 1, mu.mutated);
+        fs.writeFileSync(absTarget, lines2.join("\n"));
+        const r = await adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: `mutant-${base}-${mu.id}`, timeoutSec });
+        let outcome: MutantResult["outcome"];
+        if (r.infraError === "timeout" || /TIMEOUT after/.test(r.excerpt)) outcome = "killed";
+        else if (r.infraError) outcome = "error";
+        else if (!r.compiled) outcome = "stillborn";
+        else if (!r.ok || r.tests.some((t) => t.status === "failed")) {
+          // Killed by a crash (ReferenceError/TypeError, index out of range, a process that died) rather than
+          // by an assertion: still a detected change, but flag it.
+          const asserted = r.tests.some((t) => t.status === "failed" && /assert|expect|Expectation|AssertionError|expected|XCTAssert|#require/i.test(t.message ?? ""));
+          outcome = asserted ? "killed" : "killed-crash";
+        }
+        else outcome = r.tests.length ? "survived" : "error";
+        results.push({ ...mu, outcome, testHash });
+        const shown = outcome === "stillborn" ? "did not compile (discarded)" : outcome;
+        log(`  mutant ${i + 1} (budget ${max}, ${fresh.length} not yet killed of ${all.length}) [${mu.id}] line ${mu.line} (${mu.op}): ${shown}`);
+      }
+    } finally {
+      fs.writeFileSync(absTarget, original);
+      fs.unlinkSync(backup);
+      fs.unlinkSync(journal(state));
     }
-  } finally {
-    fs.writeFileSync(absTarget, original);
-    fs.unlinkSync(backup);
-    fs.unlinkSync(journal(state));
   }
-  const killed = results.filter((r) => r.outcome === "killed" || r.outcome === "killed-crash").length;
-  const crashes = results.filter((r) => r.outcome === "killed-crash").length;
-  const survived = results.filter((r) => r.outcome === "survived").length;
-  const stillborn = results.filter((r) => r.outcome === "stillborn").length;
+  // Cumulative over every run: the latest outcome of each current candidate mutant.
+  const latest = new Map<string, MutantResult>();
+  for (const r of [...prev, ...results]) latest.set(key(r), r);
+  const current: MutantResult[] = all.flatMap((mu) => {
+    const r = latest.get(key(mu));
+    return r && (valid(r) || r.outcome === "survived") ? [{ ...r, id: mu.id }] : [];
+  });
+  const count = (o: MutantResult["outcome"][]) => current.filter((r) => o.includes(r.outcome)).length;
+  const killed = count(["killed", "killed-crash"]), crashes = count(["killed-crash"]), survived = count(["survived"]), stillborn = count(["stillborn"]);
   const score = killed + survived ? killed / (killed + survived) : 0;
-  const surv = results.filter((r) => r.outcome === "survived");
+  const surv = current.filter((r) => r.outcome === "survived");
   const feedback = surv.length
     ? `These changes to ${relPath(absTarget, adapter.root)} were NOT detected by any test. Add assertions that would fail for each:\n` +
-      surv.map((s) => `- [${s.id}] line ${s.line} (${s.op}):\n    ${s.original.trim()}\n  → ${s.mutated.trim()}`).join("\n") +
+      surv.map((x) => `- [${x.id}] line ${x.line} (${x.op}):\n    ${x.original.trim()}\n  → ${x.mutated.trim()}`).join("\n") +
       `\nIf a survivor cannot change observable behaviour (equivalent mutant), exclude just that mutant by its id, e.g. unitgen mutate ${relTest} --equivalent ${surv[0].id} (a bare line number excludes every mutant on the line), and say why with unitgen note`
     : "";
-  // Across runs: which candidates were ever evaluated (re-runs walk through the rest).
-  // Mutants that did not compile count as tried too: re-running them would only fail to compile again.
-  const tried = new Set([...prev.map(key), ...results.map(key)]);
-  const triedTotal = all.filter((mu) => tried.has(key(mu))).length;
   const report: MutationReport = { testFile: relTest, target: relPath(absTarget, adapter.root), killed, crashes, survived, stillborn, score, results, feedback, candidates: all.length,
-    excluded: excluded.length, triedTotal, history: [...prev.filter((r) => !results.some((x) => key(x) === key(r))), ...results] };
+    excluded: excluded.length, triedTotal: current.length, history: [...latest.values()],
+    errors: results.filter((r) => r.outcome === "error").length };
   const acc = state.data.accepted.find((a) => a.testFile === relTest);
   if (acc) {
     const first = acc.mutation?.first ?? Math.round(score * 100) / 100;
     acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first, crashes, equivalent: excluded.length, testHash: fileHash(absTest) };
     state.save();
   }
-  writeFile(state.file("mutation", `${path.basename(absTest)}.json`), JSON.stringify({ ...report, results: report.history }, null, 2));
+  writeFile(prevFile, JSON.stringify({ ...report, results: report.history }, null, 2));
   return report;
 }
 
 export function formatMutation(r: MutationReport): string {
-  if (!r.candidates) return `mutation: NOT_APPLICABLE — ${r.feedback}`;
+  if (!r.candidates) return `mutation: NOT_APPLICABLE — ${r.feedback || "every mutant is excluded as equivalent"}`;
   const ran = r.results.length;
   const tried = r.triedTotal ?? ran;
-  const note = (tried >= r.candidates
-    ? ran < r.candidates ? `\nall ${r.candidates} candidate mutants have been evaluated (${ran} this run)` : ""
-    : `\nevaluated ${tried} of ${r.candidates} candidate mutants so far (${ran} this run); re-run to try the next ones, or use --max ${r.candidates} for all`)
-    + (r.excluded ? `\n${r.excluded} mutant(s) excluded as equivalent (not run)` : "");
-  const head0 = `mutation score: ${(r.score * 100).toFixed(0)}%  (killed ${r.killed}${r.crashes ? `, of which ${r.crashes} only by a crash, not an assertion` : ""}, survived ${r.survived}, did not compile ${r.stillborn})  ${r.testFile} -> ${r.target}`;
-  const head = head0 + note;
-  return r.feedback ? `${head}\n\n${r.feedback}` : head;
+  const head = `mutation score: ${(r.score * 100).toFixed(0)}%  (killed ${r.killed}${r.crashes ? `, of which ${r.crashes} only by a crash, not an assertion` : ""}, survived ${r.survived}, did not compile ${r.stillborn})  ${r.testFile} -> ${r.target}`;
+  const scope = tried >= r.candidates
+    ? `all ${r.candidates} candidate mutants evaluated with the current test file (${ran ? `${ran} run now` : "nothing new to run; result from earlier runs"})`
+    : `${tried} of ${r.candidates} candidate mutants evaluated with the current test file (${ran} run now); re-run to evaluate the rest, or use --max ${r.candidates}`;
+  const note = `\n${scope}` + (r.excluded ? `\n${r.excluded} mutant(s) excluded as equivalent (not run)` : "");
+  return r.feedback ? `${head}${note}\n\n${r.feedback}` : `${head}${note}`;
 }

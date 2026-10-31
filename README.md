@@ -43,10 +43,10 @@ unitgen 采用的就是调研结论推荐的路线：平台无关的 LLM 闭环 
 
 | 用途 | 需要 |
 |---|---|
-| CLI 本身 | Node.js ≥ 22.18（`node -v` 检查） |
+| CLI 本身 | Node.js ≥ 22.18（`node -v` 检查）；PATH 里没有合适的 Node 时自动使用 DevEco Studio 自带的 Node |
 | Android | JDK 17+（`JAVA_HOME`）、Android SDK（`ANDROID_HOME` 或工程里的 `local.properties`） |
-| iOS | Xcode（或仅 Command Line Tools：只能跑 Swift Package + Swift Testing） |
-| 鸿蒙 | 无额外要求（没有 DevEco 时用内置的 Node shim 跑纯逻辑；有 hvigor 则用 hvigor） |
+| iOS | Xcode（SwiftPM 包和 .xcodeproj 工程，后者在 iOS 模拟器上跑）；只有 Command Line Tools 时只能跑 Swift Package + Swift Testing |
+| 鸿蒙 | 推荐安装 DevEco Studio（自动发现，用真实 hvigor + ArkTS 编译器 + Previewer 运行时，不需要模拟器）；工程需在 devDependencies 里声明 `@ohos/hypium`（≥ 1.0.19 才能在 Previewer 里拿到覆盖率）并执行过 `ohpm install`。没有 DevEco 时用内置的 Node shim 跑纯逻辑 |
 
 ```bash
 git clone https://github.com/luckylucky0001/unitgen.git ~/unitgen
@@ -123,11 +123,11 @@ UNITGEN_ENV=/absolute/path/to/unitgen-env.sh /absolute/path/to/unitgen/bin/unitg
 - 长时间测试/构建使用异步子进程，构建输出实时写入日志并发送到 stderr；每 30 秒输出运行状态。`UNITGEN_QUIET=1` 只关闭终端进度，仍写日志。
 - `--json` 的结果在 stdout，stderr 是进度/诊断。不要把两者合并后当 JSON 解析。管道记录时使用支持 `pipefail` 的 shell，保留 unitgen 的实际退出码。
 - 退出码：`0` 通过；`1` 命令/环境/参数错误；`2` 质量门禁失败；`130` 用户取消。
-- `baseline` 必须构建、测试成功且有实际测试和覆盖率；失败返回非零，保留旧覆盖率作为证据，同时标记基线无效。`verify` 和 `generate` 要求成功基线。因此没有可运行测试的 Swift/ArkTS 工程需要先补充可运行的种子测试，不再把失败/空基线当作有效的 0% 基线。
+- `baseline` 只跑工程**原有**的测试（unitgen 生成的测试不计入「改造前」）。构建失败、测试失败或覆盖率拿不到时返回非零并标记基线无效，输出里写明原因和失败的用例；`--allow-failing` 可以在列出失败用例的前提下保留基线。没有任何测试的鸿蒙工程直接得到有效的 0% 基线（shim/hvigor 的覆盖率由 unitgen 自己统计，「没跑出东西」不会被误当成 0%）。`verify`、`mutate`、`generate` 要求成功的基线，并且要求和基线用同一个运行器（例如都用 hvigor）。
 - `mutate` 默认要求 `--min-score 80`，未达标或变异运行遇到环境错误返回 `2`；没有可生成的变异体明确标记 `NOT_APPLICABLE`（退出 `0`），不把它解释成断言强度 100%。仍须报告抽样数、幸存项和仅由崩溃检出的数量。
 - `generate` 在 verify 后执行 mutate，将未通过的变异反馈给模型继续补强；重试耗尽则隔离该文件，并返回 `2`。`--max` 控制每轮变异预算；目前没有原生 `--llm trae`，TRAE 用户优先使用上面的 Skill 流程。
-- 一个项目一次只允许一个 CLI 命令，包括读取/恢复命令。正常 SIGINT/SIGTERM 会取消运行中的测试子进程并在 finally 中恢复源码、释放锁。macOS/Linux 会终止测试进程组；Windows 使用 `taskkill /T`，该平台尚未实测。
-- 强杀（SIGKILL）无法执行 finally。先确认 `.unitgen/run.lock` 中的 PID 及其构建子进程均已停止，再手动移除这个残留锁；下一条命令会按 journal 恢复中断的变异。不要删除活跃锁，也不要把 Agent 停止回复等同于后台构建已经停止。
+- 一个项目一次只允许一个 CLI 命令，包括读取/恢复命令。超时、SIGINT/SIGTERM 会终止测试的**整棵进程树**：包括自己另开进程组的测试助手（如 `swiftpm-testing-helper`，死循环的变异体曾让它在后台一直涨内存），然后恢复源码、释放锁。Windows 使用 `taskkill /T`，该平台尚未实测。
+- 被强杀（SIGKILL、关掉终端、Agent 会话中断）之后不需要手动处理：锁文件记录了监督进程、worker 和所有后代进程（PID + 启动时间），下一条命令会确认它们都已退出，或者自动停掉能确认身份的残留进程，然后接管锁，还原被变异的源码、被临时替换的 `List.test.ets` 和 `Package.swift`。只有仍有无法确认的构建进程在跑时才会提示你，并给出具体的 kill 命令。
 
 Android 的验证范围是 JVM 本地单测；APK 安装、真机 API 和 UI 测试需要另外验证。
 
@@ -143,11 +143,14 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 
 | | 识别 | 运行与覆盖率 | 生成测试位置 |
 |---|---|---|---|
-| iOS | `Package.swift` | `swift test --enable-code-coverage`，解析 llvm-cov 导出（与 `llvm-cov export -format=lcov` 逐行一致） | 独立 test target `<Target>UnitGenTests`（Package.swift 末尾带标记的块） |
+| iOS（SwiftPM） | `Package.swift` | `swift test --enable-swift-testing --enable-code-coverage`，解析 llvm-cov 导出（与 `llvm-cov export -format=lcov` 逐行一致） | 独立 test target `<Target>UnitGenTests`（Package.swift 末尾带标记的块） |
+| iOS（Xcode） | `.xcodeproj` / `.xcworkspace`（两者并存时 `--adapter xcode`） | `xcodebuild test` + iOS 模拟器，`-only-testing` 隔离，`xccov` 读覆盖率 | 现有测试 target 里的 `<类>UnitGenTests.swift`，需要时登记到 project.pbxproj |
 | Android | `settings.gradle(.kts)` | 自动发现每个模块的单测任务（含 flavor），`-I` 注入 JaCoCo init script，**不改任何构建文件**；兼容 configuration cache / isolated projects | `src/test/<kotlin|java>/<包路径>/<类>UnitGenTest.kt`，`--tests` 只跑这一个类，`--rerun` 防缓存 |
-| 鸿蒙 | `build-profile.json5` | 有 hvigor 用 hvigor；否则 Node shim：TS 转译 .ets + hypium 兼容实现 + 直接读 V8 块覆盖并自行映射回 .ets 行（比 c8 的行规则严格：一行里有没执行的代码就算未覆盖）+ ArkTS 语法限制 lint | `<module>/src/test/<文件>.unitgen.test.ets`，自动登记到 `List.test.ets` |
+| 鸿蒙 | `build-profile.json5`（或 git 忽略了它时的 `build-profile.template.json5`） | 默认 hvigor：自动发现 DevEco，按 DevEco 本地测试流程（`isLocalTest`/`unitTestMode`/`buildRoot=.test`）在 Previewer 里跑，真实 ArkTS 编译器；verify/mutate 时把 `List.test.ets` 临时指向被测文件，别处编译不过的旧测试不影响；读 `coverageReport.json`。备选 Node shim：TS 转译 .ets、ArkUI struct/@Builder 挖空、hypium 兼容实现、按 source map 逐段映射 V8 覆盖率、ArkTS 限制 lint | `<module>/src/test/<文件>.unitgen.test.ets`，自动登记到 `List.test.ets` |
 
-## 验证结果（2026-10-21，本机：macOS + Command Line Tools，无 Xcode / DevEco）
+ROUND2_PLACEHOLDER
+
+## 第一轮验证结果（2026-10-21，本机：macOS + Command Line Tools，无 Xcode / DevEco）
 
 四轮共 9 个独立子代理只读 Skill 完成了大部分目标（标 ★），其余由我按同一流程完成。
 
@@ -199,9 +202,9 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 
 ## 已知限制
 
-- iOS：只支持 SwiftPM 包；纯 Xcode 工程（xcodeproj + 模拟器）尚未实现。只有 Command Line Tools 时 XCTest 不可用，已有 XCTest 用例跑不了（baseline 为 0%），只能用 Swift Testing。
+- iOS：SwiftPM 包和 Xcode 工程（iOS 模拟器）都已实测；xcodebuild 每次运行几十秒，变异测试要控制 `--max`。只有 Command Line Tools 时 XCTest 不可用，已有 XCTest 用例跑不了（baseline 为 0%），只能用 Swift Testing。UI 测试、真机不在范围内。
 - Android：只覆盖 JVM 本地单测（src/test）；`android.util.Log` 等在没有 Robolectric / `isReturnDefaultValues` 时会抛异常，相应分支不会被覆盖。
-- 鸿蒙：没有 hvigor 时的 shim 只对纯逻辑可信；`@kit.*`/`@ohos.*` 系统 API、ArkUI 全局量/装饰器、UI 组件（struct）文件都是空桩；未安装的 ohpm 包、shim 解析不了的语法、缺失的全局量都报 `INFRA_ERROR`（不会被当成测试错误）。shim 的覆盖率按「行内所有代码都执行才算覆盖」计，比 c8 严格（c8 会把提前 return 之后的 case 行误算为已覆盖，已修正）。ArkTS lint 只覆盖常见限制，最终仍需在 DevEco/hvigor 跑一遍。hvigor 原生路径已实现但未在真机工具链上验证。
+- 鸿蒙：hvigor 路径已在 DevEco Studio 26（HarmonyOS 26.0.0 SDK）上实测；跑的是本地单测（Previewer 运行时），系统 API 大多是模拟实现，设备相关逻辑和 `ohosTest`（Instrument Test）/UI 测试不在范围内。`compileSdkVersion` 写死成旧版本、`hvigor-config.json5` 锁定插件版本但没有 `~/.npmrc` 的工程，hvigor 无法构建，unitgen 会自动改用 shim 并说明原因。shim 只对纯逻辑可信：`@kit.*`/`@ohos.*` 是空桩，ArkUI struct/@Builder 被挖空，不跑 ArkTS 编译器（用 lint 近似，实测仍有漏网，例如 `expect(void 调用)`）。struct 里的私有方法、模块未导出的代码都无法测试，brief 会提前警告。
 
 ## 开发
 
@@ -210,6 +213,6 @@ npm run typecheck   # tsc --noEmit
 npm test            # node --test（解析器、门禁相关单测）
 ```
 
-调试：`UNITGEN_VERBOSE=1` 打印执行的命令；`UNITGEN_KEEP_COV=1` 保留 SwiftPM 的覆盖率 JSON。
+调试：`UNITGEN_VERBOSE=1` 打印执行的命令；`UNITGEN_KEEP_COV=1` 保留 SwiftPM 的覆盖率 JSON 和鸿蒙 shim 的转译产物/V8 原始数据。
 
-安全性：`mutate` 临时改被测源码，写日志 `.unitgen/mutation-in-progress.json`，任何 unitgen 命令启动时都会自动还原（已验证：运行中直接杀掉进程，下次启动即还原）；iOS 隔离验证时临时挪开的同 target 测试文件同理。
+安全性：`mutate` 临时改被测源码，写日志 `.unitgen/mutation-in-progress.json`；鸿蒙 hvigor 运行时临时替换 `List.test.ets`（`.unitgen/harmony-list.json`），iOS 隔离验证时临时挪开同 target 的测试文件、改写 `Package.swift`。任何 unitgen 命令启动和退出时都会在持有锁的前提下还原它们。已实测：Agent 会话在三个工程的变异运行中途被整体杀掉，下一条 `unitgen status` 自动接管过期锁并还原了全部源码。
