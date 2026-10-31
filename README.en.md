@@ -343,8 +343,9 @@ parsing. When piping output, use a shell with `pipefail` to keep unitgen's exit 
   `android.util.Log` and similar calls throw. APK installation, device APIs and Compose UI tests are
   out of scope.
 - **Windows**: CI runs all unit tests on windows-latest and, through `bin\unitgen.cmd`, doctor,
-  baseline, verify, mutate and report end to end on a Gradle/Java project. HarmonyOS and iOS were not
-  tested on Windows (iOS needs macOS anyway). The TRAE installer is a shell script: on Windows copy
+  baseline, verify, mutate and report end to end on a Gradle/Java project. The HarmonyOS Node shim is
+  also run end to end on Windows; the hvigor path (DevEco for Windows) was not tested, and iOS needs
+  macOS anyway. The TRAE installer is a shell script: on Windows copy
   the Skill directory by hand.
 
 ## Development

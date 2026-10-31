@@ -16,13 +16,14 @@ unitgen 在真实开源项目上的验证过程、结果，以及验证中发现
 - 全部单测和 typecheck；
 - 通过 `bin\unitgen.cmd` 启动：`--help`，以及在空目录里 `doctor` 以退出码 1 给出明确提示；
 - 端到端（`scripts/e2e-jvm.mjs`，Linux、macOS 上同样跑）：生成一个 Gradle/Java 小工程，路径里故意带空格，依次跑 doctor、baseline、targets、verify、mutate、report，要求 verify 为 ACCEPTED、变异门禁通过。
+- 鸿蒙端到端（`scripts/e2e-harmony-shim.mjs`，三个系统都跑）：生成一个 ArkTS 小工程，用 Node shim 跑同样的流程，并检查生成的测试登记进了 `List.test.ets`。DevEco 需要华为账号下载，CI 里装不了，所以 Windows 上的 hvigor 路径仍没有实测。
 
 第一次在 Windows 上跑时发现的问题：
 - 5 个单测的夹具写死了 POSIX 路径（测试本身的问题）；
 - 鸿蒙覆盖率按源码目录匹配文件时没有统一路径格式，Windows 上盘符大小写或 `/` 与 `\` 不同就会丢掉覆盖率数据（代码问题，已修）。
 - Android/Gradle：JaCoCo 用 `/` 写源文件路径（`calc/Calc.java`），unitgen 拿它去匹配 Windows 的 `\` 路径，一个类都对不上，基线是 0/0（端到端测试发现，代码问题，已修）。同时 Windows 上解析路径改用 `realpathSync.native`，把 `C:\Users\RUNNER~1` 这种 8.3 短路径展开成工具报告的长路径。
 
-另外补上了 Windows 支持：`bin\unitgen.cmd`；`gradlew.bat`、`hvigorw.bat` 这类 `.bat`/`.cmd` 经 `cmd.exe` 运行并正确加引号（Node 20 起不允许直接 spawn）；查找命令时考虑 `PATHEXT`；`--llm cmd:` 在 Windows 上用 `cmd.exe`。鸿蒙（DevEco for Windows）和 Xcode 在 Windows 上没有实测。
+另外补上了 Windows 支持：`bin\unitgen.cmd`；`gradlew.bat`、`hvigorw.bat` 这类 `.bat`/`.cmd` 经 `cmd.exe` 运行并正确加引号（Node 20 起不允许直接 spawn）；查找命令时考虑 `PATHEXT`；`--llm cmd:` 在 Windows 上用 `cmd.exe`。鸿蒙的 hvigor 路径（DevEco for Windows）在 Windows 上没有实测；Xcode 不适用于 Windows。
 
 ## 第四轮：从 main 开箱测试，含 Android（2026-10-31）
 

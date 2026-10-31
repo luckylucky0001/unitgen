@@ -32,6 +32,8 @@ jobs:
           if ($LASTEXITCODE -ne 1) { exit 1 } else { exit 0 }
         if: runner.os == 'Windows'
         shell: pwsh
+      # End to end on a generated HarmonyOS project with the Node shim (no DevEco needed), every OS.
+      - run: node scripts/e2e-harmony-shim.mjs
       # End to end on a generated Gradle/Java project through the platform's launcher (one Node version).
       - uses: actions/setup-java@v4
         if: matrix.node == '24'
