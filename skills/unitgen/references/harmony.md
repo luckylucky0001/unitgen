@@ -83,3 +83,7 @@ export default function urlUnitGenTest() {
   identity (`===`).
 - System APIs are stubs (shim) or mostly mocks (Previewer): test the logic around them, never
   what they return.
+- The Previewer runtime iterates strings by UTF-16 code unit in `Array.from(str)`
+  (`Array.from('💩').length === 2`), unlike Node. Expected values for non-BMP text must come from
+  the spec/oracle; if the code under test relies on code-point iteration, that is a finding
+  (`UNITGEN-SUSPECT`), not a test mistake.
