@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Coverage, mergeCoverage, parseJacocoXml } from "../coverage.ts";
-import { errorExcerpt, exists, log, preferOwnTest, readFile, readJson, relPath, run, stripAnsi, walkFiles, writeJson } from "../util.ts";
+import { errorExcerpt, exists, log, preferOwnTest, readFile, readJson, relPath, run, stripAnsi, walkFiles, which, writeJson } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const INIT_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data", "unitgen-jacoco.init.gradle");
@@ -32,8 +32,8 @@ export class GradleAdapter implements Adapter {
   }
 
   private gradlew(): string[] {
-    const w = path.join(this.root, "gradlew");
-    return exists(w) ? [w] : ["gradle"];
+    const w = path.join(this.root, process.platform === "win32" ? "gradlew.bat" : "gradlew");
+    return exists(w) ? [w] : [process.platform === "win32" ? which("gradle") ?? "gradle.bat" : "gradle"];
   }
 
   doctor(): Doctor {

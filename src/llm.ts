@@ -53,7 +53,8 @@ function command(cmd: string): LlmBackend {
   return {
     name: `cmd:${cmd}`,
     async complete(prompt) {
-      const r = await runAsync(["sh", "-c", cmd], { input: prompt, timeoutSec: 900 });
+      const shell = process.platform === "win32" ? [process.env.ComSpec ?? "cmd.exe", "/d", "/s", "/c", cmd] : ["sh", "-c", cmd];
+      const r = await runAsync(shell, { input: prompt, timeoutSec: 900 });
       if (!r.ok) throw new Error(`model command failed: ${r.out.slice(0, 500)}`);
       return r.out;
     },

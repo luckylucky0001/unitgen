@@ -234,3 +234,17 @@ test("gradle: settings includes over several lines, no includeBuild; failures pe
   assert.match(gradleExcerpt(out).split("\n")[0], /^e: .*Unresolved reference/);
   assert.ok(!gradleExcerpt(out).includes("deprecated"));
 });
+
+test("Windows: .bat/.cmd run through cmd.exe with quoted arguments; other commands unchanged", async () => {
+  const { spawnable, winQuote } = await import("../src/util.ts");
+  assert.equal(winQuote("plain"), "plain");
+  assert.equal(winQuote("C:\\Program Files\\x"), '"C:\\Program Files\\x"');
+  assert.equal(winQuote('a"b'), '"a""b"');
+  const [file, args, verbatim] = spawnable(["C:\\p\\gradlew.bat", "-I", "C:\\My Dir\\init.gradle", ":app:test"], "win32");
+  assert.match(file, /cmd(\.exe)?$/i);
+  assert.deepEqual(args.slice(0, 3), ["/d", "/s", "/c"]);
+  assert.equal(args[3], '"C:\\p\\gradlew.bat -I "C:\\My Dir\\init.gradle" :app:test"');
+  assert.equal(verbatim, true);
+  assert.deepEqual(spawnable(["node", "x.js"], "win32"), ["node", ["x.js"], false]);
+  assert.deepEqual(spawnable(["./gradlew", "test"], "darwin"), ["./gradlew", ["test"], false]);
+});
