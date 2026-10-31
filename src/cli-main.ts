@@ -107,6 +107,7 @@ export async function main(argv: string[]): Promise<number> {
   if (!Number.isSafeInteger(reruns) || reruns < 0) throw new Error("--reruns must be a non-negative integer");
   const state = new State(adapter.root);
   recover(state); // a crashed `mutate` must never leave production code modified
+  adapter.recover?.();
   recoverGeneration(state);
   const mods = o.module ? adapter.modules().filter((m) => m.name === o.module) : undefined;
   if (o.module && !mods?.length) throw new Error(`unknown module ${o.module}; see \`unitgen modules\``);

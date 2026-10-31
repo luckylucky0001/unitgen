@@ -63,7 +63,7 @@ test("cancellation terminates child process groups", { skip: process.platform ==
 });
 
 test("a second invocation cannot recover or mutate a locked project", (t) => {
-  const dir = temp(t), release = acquireProjectLock(dir);
+  const dir = temp(t), { release } = acquireProjectLock(dir);
   fs.writeFileSync(path.join(dir, "settings.gradle"), "include ':app'\n");
   const target = path.join(dir, "A.kt"), backup = path.join(dir, "backup");
   fs.writeFileSync(target, "mutated"); fs.writeFileSync(backup, "original");
@@ -77,7 +77,35 @@ test("a second invocation cannot recover or mutate a locked project", (t) => {
     assert.equal(fs.readFileSync(target, "utf8"), "mutated");
   }
   finally { release(); }
-  acquireProjectLock(dir)();
+  acquireProjectLock(dir).release();
+});
+
+test("a lock left by a killed command is taken over and the interrupted mutation restored", { skip: process.platform === "win32" }, (t) => {
+  const dir = temp(t);
+  fs.writeFileSync(path.join(dir, "settings.gradle"), "include ':app'\n");
+  fs.mkdirSync(path.join(dir, ".unitgen"), { recursive: true });
+  const target = path.join(dir, "A.kt"), backup = path.join(dir, "backup");
+  fs.writeFileSync(target, "mutated"); fs.writeFileSync(backup, "original");
+  fs.writeFileSync(path.join(dir, ".unitgen", "mutation-in-progress.json"), JSON.stringify({ target, backup }));
+  // A PID that cannot be running: the previous command and its builds are gone.
+  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+  fs.writeFileSync(path.join(dir, ".unitgen", "run.lock"), JSON.stringify({ pid: Number(dead), at: "earlier", worker: Number(dead), builds: [Number(dead)] }));
+  const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+  const result = spawnSync(process.execPath, [cli, "status", "-C", dir], { encoding: "utf8", env: { ...process.env, UNITGEN_QUIET: "1" } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /removed a stale lock/);
+  assert.equal(fs.readFileSync(target, "utf8"), "original");
+  assert.equal(fs.existsSync(path.join(dir, ".unitgen", "run.lock")), false);
+});
+
+test("a stale lock whose build is still running is not taken over", { skip: process.platform === "win32" }, async (t) => {
+  const dir = temp(t);
+  fs.mkdirSync(path.join(dir, ".unitgen"), { recursive: true });
+  const build = (await import("node:child_process")).spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  t.after(() => { try { process.kill(-build.pid!, "SIGKILL"); } catch { /* gone */ } });
+  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+  fs.writeFileSync(path.join(dir, ".unitgen", "run.lock"), JSON.stringify({ pid: Number(dead), at: "earlier", builds: [build.pid] }));
+  assert.throws(() => acquireProjectLock(dir, () => {}), new RegExp(`still running \\(${build.pid}\\).*kill -TERM -${build.pid}`));
 });
 
 test("help and empty commands accept leading common options outside a project", (t) => {

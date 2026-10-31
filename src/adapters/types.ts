@@ -93,6 +93,8 @@ export interface Adapter {
   estimateText?(text: string): string;
   /** Warnings to put at the top of a brief (missing packages, stubbed APIs, ...). */
   briefWarnings?(source: string): string[];
+  /** Undo temporary project edits a killed run left behind (parked files, swapped test lists). Runs under the project lock. */
+  recover?(): void;
   /** Undo prepareTestFile side effects when a file is quarantined (optional). */
   forgetTestFile?(testFile: string, m: Module): void;
   runTests(req: RunRequest): Promise<TestRun>;

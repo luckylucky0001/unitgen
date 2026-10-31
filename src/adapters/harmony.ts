@@ -1,4 +1,3 @@
-import { runAsync } from "../util.ts";
 // HarmonyOS / OpenHarmony (ArkTS) via hvigor when available, otherwise the Node "shim" runner.
 //
 // Shim mode transpiles .ets with TypeScript, runs hypium-style tests against a compatible API
@@ -12,7 +11,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Coverage, parseLcov } from "../coverage.ts";
 import { estimateExecutable } from "../targets.ts";
-import { errorExcerpt, exists, json5Parse, preferOwnTest, readFile, readJson, relPath, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
+import { errorExcerpt, exists, json5Parse, log, preferOwnTest, readFile, readJson, relPath, runAsync, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -580,6 +579,10 @@ export class HarmonyAdapter implements Adapter {
     return path.join(this.stateDir, "harmony-list.json");
   }
 
+  recover(): void {
+    this.restoreIfCrashed();
+  }
+
   /** A run that was killed while List.test.ets was swapped for an isolated one: put the original back. */
   private restoreIfCrashed(): void {
     const j = readJson<{ list: string; backup: string | null }[] | null>(this.listJournal(), null);
@@ -587,6 +590,7 @@ export class HarmonyAdapter implements Adapter {
     for (const e of j) {
       if (e.backup === null) fs.rmSync(e.list, { force: true });
       else if (exists(e.backup)) { fs.copyFileSync(e.backup, e.list); fs.rmSync(e.backup, { force: true }); }
+      log(`restored ${relPath(e.list, this.root)} after an interrupted run`);
     }
     fs.rmSync(this.listJournal(), { force: true });
   }
