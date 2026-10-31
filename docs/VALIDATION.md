@@ -2,10 +2,31 @@
 
 unitgen 在真实开源项目上的验证过程、结果，以及验证中发现并修复的问题。使用说明见 [README](../README.md)。
 
+- [第四轮：从 main 开箱测试，含 Android](#第四轮从-main-开箱测试含-android2026-10-31)：Android SDK 装好后的 Android 工程，以及新的 Xcode / 鸿蒙工程
 - [第三轮：开箱测试](#第三轮开箱测试2026-10-31从-github-全新安装)：6 个项目，只给 README 和 Skill 的子代理从零开始使用
 - [第二轮：真实工具链](#第二轮验证2026-10-31deveco-studio-26--xcode-164真实工具链)：DevEco Studio 26 + Xcode 16.4，10 个项目
 - [发现并修复的 unitgen 问题](#发现并修复的-unitgen-问题)
 - [第一轮：只有 Command Line Tools](#第一轮验证结果2026-10-21本机macos--command-line-tools无-xcode--deveco)
+
+## 第四轮：从 main 开箱测试，含 Android（2026-10-31）
+
+第三轮的修复合并进 main 之后，再用同样的方法测 main：子代理只拿到 README 和 Skill，从 GitHub 克隆 main 开始。这一轮本机装好了 Android SDK（command-line tools、platform 35/36、arm64 的 JDK 17），所以 Android 也实测了。
+
+| 项目 | 平台 · 运行器 | 目标文件 | 目标文件覆盖率 | 变异得分 |
+|---|---|---|---|---|
+| [ObjectMapper](https://github.com/tristanhimmelman/ObjectMapper) 9,124★ | iOS · Xcode + iOS 模拟器 | `Map.swift` | 75% → **98%** | 80% → 100%（评估 23/45，抽样；2 个靠崩溃，3 个判为等价） |
+| [ObjectMapper](https://github.com/tristanhimmelman/ObjectMapper) 9,124★ | iOS · Xcode + iOS 模拟器 | `DictionaryTransform.swift` | 57% → **100%**（42 / 42 行） | 当时没有可生成的变异（下标赋值还没有删除变异，已补上） |
+| [joplin-hap](https://github.com/Lancenas/joplin-hap) 9★ | 鸿蒙 · hvigor | `ItemSerializer.ets` | 0% → **99%**（0 → 248 / 251 行） | 80% → 100%（评估 69/69；4 个靠崩溃，3 个判为等价） |
+| [joplin-hap](https://github.com/Lancenas/joplin-hap) 9★ | 鸿蒙 · hvigor | `MarkdownRenderer.ets` | 0% → **99%**（0 → 190 / 191 行） | 98%（评估 116/116；29 个靠崩溃，大多是死循环；14 个判为等价） |
+| [Pokedex](https://github.com/skydoves/Pokedex) 8,375★ | Android · Gradle（多模块） | `DetailRepositoryImpl.kt` | 89% → **100%**（17 → 19 / 19 行） | 100%（4/4） |
+| [Pokedex](https://github.com/skydoves/Pokedex) 8,375★ | Android · Gradle | `TypeResponseConverter.kt` | 27% → **100%**（3 → 11 / 11 行） | 没有可生成的变异 |
+| [architecture-samples](https://github.com/android/architecture-samples) 45,878★ | Android · Gradle | `TaskNetworkDataSource.kt` | 0% → **100%**（0 → 18 / 18 行） | 33% → 100%（3/3）：两个存活的变异是删掉 `delay(...)`，`runTest` 的虚拟时间让它们看不出来，补了对 `testScheduler.currentTime` 的断言后杀死 |
+
+只跑到基线的项目：[PhoneNumberKit](https://github.com/marmelroy/PhoneNumberKit)（5,394★，Xcode）修复前基线是 0%，修复后 55.2%（见下表）；[android-showcase](https://github.com/igorwojda/android-showcase)（6,811★，Android，6 个模块）修复前只识别出一个错误的模块，修复后 53 个测试、31.4%。
+
+- 每个项目的生产代码都没有改动。鸿蒙这一轮没有发现阻塞性问题，只有输出和文档上的小问题（已修）。
+- 这轮发现的问题都列在下面「发现并修复的 unitgen 问题」的最后几行，每个修复都在发现它的那个项目上复验过。
+- 子代理在 joplin-hap 里标出 4 个疑似 bug，例如 `markdownToHtml('#tag')` 进入死循环、字面量反斜杠加 `n` 序列化后不能还原。
 
 ## 第三轮：开箱测试（2026-10-31，从 GitHub 全新安装）
 
@@ -28,7 +49,7 @@ unitgen 在真实开源项目上的验证过程、结果，以及验证中发现
 - 子代理在这些项目里共标出 12 个疑似 bug（`UNITGEN-SUSPECT`：SwiftDate 4、Aigis 5、CoolMallArkTS 2、harmony-utils 1），例如 harmony-utils 的 `DateHelper.getDateByStr` 把「日」当成「时」用（每月 24–31 日得到 Invalid Date），Aigis 的 HOTP 计数器 ≥ 2^32 时丢掉高位、base32 的 `=` 填充被吃掉，CoolMallArkTS 的分类树在混用嵌套和扁平数据时同一节点出现两次。
 - 每个项目的生产代码都没有改动；`git status` 里只有新增的测试文件、`.unitgen/` 和 unitgen 自己登记测试用的文件。
 - 开箱测试发现的工具问题全部修了，列在下面「发现并修复的 unitgen 问题」里（从「hvigor 守护进程模式下，一个死循环变异体…」那一行开始）。修完后在原项目上复验，例如：CoolMallArkTS 上死循环变异体不再拖垮后面的变异体；Aigis 上被写坏的 hvigor 覆盖率文件能自动修复；SwiftyJSON 放在 `/tmp` 下时 Xcode 基线从 0/0 恢复到 814/922；harmony-utils 上编译错误不再被 151 条警告淹没；qs-arkts 的 utils_encode 在 hvigor 下编译不过的变异体从 84 个里的 14 个降到 95 个里的 2 个。
-- 没有覆盖到的：Android 这一轮没有测（本机没有 Android SDK，Gradle 路径只用 JVM 工程做了回归）；Windows 没有测。
+- 没有覆盖到的：Android 这一轮没有测（当时本机没有 Android SDK，见第四轮）；Windows 没有测。
 
 ## 第二轮验证（2026-10-31，DevEco Studio 26 + Xcode 16.4，真实工具链）
 
@@ -163,6 +184,16 @@ unitgen 在真实开源项目上的验证过程、结果，以及验证中发现
 | 鸿蒙 hvigor | 警告很多的模块（harmony-utils：151 条 ArkTS:WARN）里，COMPILE_ERROR 只给出 80 行警告、看不到真正的错误：hvigor 在 stdout 管道写完前就退出，超过约 64 KB 的部分丢失 | 输出不完整时改读 hvigor 自己的 `.hvigor/outputs/build-logs/build.log`；终端只显示 hvigor 进度和错误（基线的 stderr 从 10,751 行降到 336 行），完整输出照样写日志 |
 | 鸿蒙 brief/targets | import 解析跨到了下一条 import：项目自己的枚举 `DateType` 被当成系统 API，相关行标成 `!~`，文件被排成 platform | 一条 import 不再跨过另一条 import |
 | 变异测试 | hvigor 下枚举比较链（`type == DateType.YmdHms \|\| type == DateType.YmdHm`）、`if / else if` 链、字面量写在左边（`undefined !== a && null !== a`）里的取反仍然编译不过：DateHelper 56 个里 16 个 | 收窄判断覆盖这三种写法；对照实测结果，去掉的 16 个全是编译不过的，没有误伤 |
+| Android | `settings.gradle.kts` 里跨多行的 `include(...)` 没被解析，`includeBuild("build-logic")` 反而被当成模块（android-showcase：doctor 报 1 个模块，基线说「没有覆盖任何代码」） | 完整解析 `include(...)`、跳过 `includeBuild`、支持 `projectDir` 重映射；一个模块都找不到时 doctor 报错 |
+| Android | 一个模块构建失败就让整个基线作废，也不说是哪个模块（Pokedex 的 `:app`：依赖要求 compileSdk 37、manifest 合并 minSdk 冲突） | 其他模块照常测量；构建失败的模块连同 Gradle 给的原因一起列出，它的文件排到 `targets` 最后 |
+| Android | 失败原因取到一行废弃警告（「It will be removed in version 10.0 of the Android Gradle plugin」），真正的 `e:` 编译错误被跳过 | 先给 Kotlin `e:`、javac `error:` 和 Gradle 的「What went wrong」 |
+| Android | 一个模块的测试执行到的其他模块代码不计覆盖率（Pokedex：core-data 的测试跑到的 PokedexClient 显示 0%） | 每个模块的报告读入本次所有测试任务的执行数据；Pokedex 基线从 36.6% 变为 68.1% |
+| Android | 没有测试框架依赖的模块，brief 不提示，verify 报 COMPILE_ERROR「Unresolved reference 'junit'」并算一次尝试 | brief 给出 ⚠️；verify 报 INFRA_ERROR |
+| Android | 基线把 `tasks --all` 和整个 Gradle 日志打到终端（2.3k–4.5k 行） | 终端只显示失败和结果；一次 verify 共 14 行输出，完整日志照写 |
+| iOS Xcode | 工程关掉了 `ENABLE_TESTABILITY` 时，brief 建议的 `@testable import` 编译不过（ObjectMapper）；工程开着老的 gcov 开关时覆盖率全是 0，却被当成有效的 0% 基线（PhoneNumberKit） | unitgen 自己的 xcodebuild 运行加上 `ENABLE_TESTABILITY=YES` 并关掉 gcov 开关（不改工程）；测试通过却一行都没执行时报覆盖率问题。PhoneNumberKit 基线从 0% 变为 55.2% |
+| iOS Xcode | 测试 group 的 path 是 `Tests`、文件 path 是 `ObjectMapperTests/X.swift` 这种常见布局下，生成的测试无法登记到 pbxproj | 按同目录已有文件的写法登记 |
+| 变异测试 | Swift 的反引号标识符（``return `default` ``）被当成模板字符串变异，注定编译不过；`result[key] = value` 这类下标赋值没有变异体；UIKit 的 cell/view 子类被排成 logic | 修正这三处 |
+| 运行 | `mutate` 不打印日志路径；鸿蒙 doctor 退回 shim 时仍显示「status: OK」 | mutate 给出日志路径；可以修复的退回原因显示为 warning |
 | 基线 | 重跑基线时，已经接受的生成测试被算进「改造前」（报告写成 6% → 34%，实际起点是 0） | 基线只跑项目原有的测试（四种运行器都处理了） |
 | 基线 | 因为平台桩而失败的旧测试让基线作废；shim 和 hvigor 的数据混在一起 | shim 下自动容忍这类失败（会列出来），其他情况用 `--allow-failing`；记录运行器，不一致时拒绝 verify |
 | 变异测试 | Swift 的 `if cond {`、尾随闭包、成员赋值、`case .x: return 2001`、返回的字符串都没有变异体：Rainbow 的 ConditionalStyleBuilder 只有 2 个候选，Kingfisher 的「100%」是虚高 | 补上这些算子；不再生成 `$0 → $1`、类型联合 `0 \| 1` 这类注定编译不过的变异 |

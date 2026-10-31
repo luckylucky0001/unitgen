@@ -133,7 +133,7 @@ export async function main(argv: string[]): Promise<number> {
   switch (cmd) {
     case "doctor": {
       const d = adapter.doctor();
-      print([`adapter: ${adapter.id} (${adapter.platform})`, `root: ${adapter.root}`, ...d.lines, d.ok ? "status: OK" : "status: PROBLEMS FOUND"].join("\n"), { adapter: adapter.id, platform: adapter.platform, ...d });
+      print([`adapter: ${adapter.id} (${adapter.platform})`, `root: ${adapter.root}`, ...d.lines, !d.ok ? "status: PROBLEMS FOUND" : d.lines.some((l) => /^warning:/.test(l)) ? "status: OK, with warnings (see above)" : "status: OK"].join("\n"), { adapter: adapter.id, platform: adapter.platform, ...d });
       return d.ok ? 0 : 1;
     }
     case "modules": {

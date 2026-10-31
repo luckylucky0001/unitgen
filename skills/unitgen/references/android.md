@@ -13,6 +13,14 @@
   must match the directory.
 - Test-helper modules (`:core:testing`, `*-test`), benchmarks, Hilt modules, Room
   `@Dao`/`@Database` declarations and Compose UI files are ranked low or skipped.
+- The baseline counts code of one module that another module's tests execute. A module that does
+  not build is named in the baseline's `note:` with Gradle's reason; its files are listed last by
+  `targets` and cannot be verified until the project fixes it (report it, do not edit build files).
+- A module without a test framework (no JUnit / kotlin-test on its test classpath, no existing
+  tests) gets a ⚠️ in the brief: pick a target elsewhere; code there is often covered through other
+  modules' tests.
+- `runTest` skips `delay(...)` in virtual time: assert on `testScheduler.currentTime` when the delay
+  itself is behaviour (a simulated latency, a debounce), or the mutant that deletes it survives.
 
 ## Writing the test
 

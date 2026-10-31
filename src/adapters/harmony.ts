@@ -376,6 +376,8 @@ export class HarmonyAdapter implements Adapter {
       : ` (hvigor local unit tests in the Previewer runtime: ${tc?.hvigor ?? "hvigorw not found"})`}`);
     if (tc) lines.push(`toolchain: ${tc.home ?? path.dirname(tc.hvigor)}${tc.sdk ? `; SDK ${tc.sdk}${tc.sdkVersion ? ` (${tc.sdkVersion})` : ""}` : ""}`);
     if (mode === "hvigor" && blocker) { ok = false; lines.push(`hvigor mode cannot run: ${blocker}`); }
+    // Falling back to the shim works, but the user can usually fix the cause and get the real toolchain.
+    if (mode === "shim" && blocker && process.env.UNITGEN_HARMONY_MODE !== "shim" && tc) lines.push(`warning: using the Node shim because ${blocker}; fix that to run the real ArkTS compiler and Previewer (hvigor)`);
     const hyp = this.hypium();
     if (hyp?.version) {
       lines.push(`hypium: ${hyp.version}${hyp.hasMessage ? "" : " (no expect().message())"}`);

@@ -116,8 +116,8 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
         equivalent: leave it, note it, and report the score as it is.
       - The gate (default `--min-score 80`) counts every mutant evaluated with the current test
         file; exit 2 means it failed (the test stays accepted). `--max` caps one run: about
-        1–3 s per mutant with hvigor, 3–10 s with SwiftPM/Gradle, 10–25 s with Xcode, so use
-        `--max 10` on Xcode. `--max` counts mutants that compiled; ones that do not compile are
+        1–3 s per mutant with hvigor, 3–10 s with SwiftPM/Gradle, 20–40 s with Xcode, so use
+        `--max 10` on Xcode. A mutant that hangs costs its whole timeout (≥ 20 s). `--max` counts mutants that compiled; ones that do not compile are
         replaced by the next candidates. Re-run to evaluate more candidates.
       - Kills by a crash (exception, index out of range, hang) rather than an assertion are
         reported separately; mutants that do not compile are discarded. The source is always
