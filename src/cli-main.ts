@@ -48,6 +48,7 @@ generate:  --llm anthropic|claude|cmd:<sh> --model <id> --limit <n> (5) --attemp
            --max <n> (15 mutants/attempt) --min-score <percent> (80)
 
 Environment: UNITGEN_HARMONY_MODE=hvigor|shim (HarmonyOS runner), DEVECO_STUDIO_HOME / DEVECO_SDK_HOME,
+             UNITGEN_HVIGOR_DAEMON=0 (cold hvigor builds instead of the daemon),
              UNITGEN_QUIET=1 (no build progress), UNITGEN_VERBOSE=1 (print commands), UNITGEN_ENV=<env.sh>.
 
 Exit codes: 0 passed (or mutation not applicable), 1 command/environment error,

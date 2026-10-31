@@ -214,3 +214,36 @@ test("Swift declarations: signatures are not mutated, bodies are; calls with arg
     "3:fun answer() = 0", "4:func f(x: Int = 2) -> Int { return x - 1 }", "4:func f(x: Int = 2) -> Int { return x + 0 }",
     "5:if !contains(.withYear) {", "6:format += \"\""]);
 });
+
+test("List.test.ets loses imports of generated tests deleted by hand, keeps everything else", async (t) => {
+  const fs = await import("node:fs"), os = await import("node:os"), path = await import("node:path");
+  const { HarmonyAdapter } = await import("../src/adapters/harmony.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "unitgen-list-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const testRoot = path.join(dir, "entry", "src", "test");
+  fs.mkdirSync(testRoot, { recursive: true });
+  fs.writeFileSync(path.join(testRoot, "kept.unitgen.test.ets"), "export default function keptUnitGenTest() {}\n");
+  const list = path.join(testRoot, "List.test.ets");
+  fs.writeFileSync(list, [
+    "import goneUnitGenTest from './gone.unitgen.test';",
+    "import keptUnitGenTest from './kept.unitgen.test';",
+    "import localUnitTest from './LocalUnit.test';",
+    "export default function testsuite() {",
+    "  goneUnitGenTest();",
+    "  keptUnitGenTest();",
+    "  localUnitTest();",
+    "}",
+    "",
+  ].join("\n"));
+  const a = new HarmonyAdapter(dir, path.join(dir, ".unitgen"));
+  (a as unknown as { pruneDeletedTests(m: { testRoot: string }): void }).pruneDeletedTests({ testRoot });
+  assert.equal(fs.readFileSync(list, "utf8"), [
+    "import keptUnitGenTest from './kept.unitgen.test';",
+    "import localUnitTest from './LocalUnit.test';",
+    "export default function testsuite() {",
+    "  keptUnitGenTest();",
+    "  localUnitTest();",
+    "}",
+    "",
+  ].join("\n"));
+});

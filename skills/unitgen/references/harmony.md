@@ -36,6 +36,9 @@
   lists its files last.
 - `hvigor-config.json5` pinning a plugin version needs `~/.npmrc` (npm download); without it
   unitgen uses the shim and says so.
+- A test or mutant that never returns wedges the hvigor daemon. unitgen stops this project's
+  daemon and its Previewer after a timeout or cancellation (and before a run if one is left over),
+  so you never need to kill them yourself; `UNITGEN_HVIGOR_DAEMON=0` uses cold builds instead.
 
 ## Writing the test
 

@@ -40,7 +40,11 @@ async function supervise(): Promise<number> {
         try {
           if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
           else process.kill(-pid, hard ? "SIGKILL" : "SIGTERM");
-        } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH") console.error(`unitgen: could not stop PID ${pid}: ${e}`); }
+        } catch (e) {
+          // EPERM: the group exists only as a zombie leader (macOS); its members are handled by killTracked.
+          const code = (e as NodeJS.ErrnoException).code;
+          if (code !== "ESRCH" && code !== "EPERM") console.error(`unitgen: could not stop PID ${pid}: ${e}`);
+        }
       };
       const killTracked = (hard: boolean) => {
         snapshot();

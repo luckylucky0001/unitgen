@@ -24,6 +24,8 @@ export interface MutantResult extends Mutant {
   outcome: "killed" | "killed-crash" | "survived" | "equivalent" | "stillborn" | "error";
   /** Content hash of the test file the outcome was measured with. */
   testHash?: string;
+  /** Runner that measured it (Adapter.runnerName): the HarmonyOS shim and hvigor can disagree. */
+  runner?: string;
 }
 
 export interface MutationReport {
@@ -329,7 +331,8 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   const prevFile = state.file("mutation", `${path.basename(absTest)}.json`);
   const prev = readJson<{ results?: MutantResult[] } | null>(prevFile, null)?.results ?? [];
   const prevBy = new Map(prev.map((r) => [key(r), r]));
-  const valid = (r: MutantResult | undefined) => !!r && (r.outcome === "stillborn" || r.testHash === testHash);
+  const runner = adapter.runnerName;
+  const valid = (r: MutantResult | undefined) => !!r && r.runner === runner && (r.outcome === "stillborn" || r.testHash === testHash);
   const rank = (mu: Mutant) => {
     const r = prevBy.get(key(mu));
     if (!r) return 1;
@@ -378,7 +381,8 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
         const timedOut = r.infraError === "timeout" || /TIMEOUT after/.test(r.excerpt);
         if (!timedOut && r.seconds > 0) done.push(r.seconds);
         let outcome: MutantResult["outcome"];
-        if (timedOut) outcome = "killed";
+        // A hang is detected, but not by an assertion.
+        if (timedOut) outcome = "killed-crash";
         else if (r.infraError) outcome = "error";
         else if (!r.compiled) outcome = "stillborn";
         else if (!r.ok || r.tests.some((t) => t.status === "failed")) {
@@ -388,7 +392,7 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
           outcome = asserted ? "killed" : "killed-crash";
         }
         else outcome = r.tests.length ? "survived" : "error";
-        results.push({ ...mu, outcome, testHash });
+        results.push({ ...mu, outcome, testHash, ...(runner ? { runner } : {}) });
         const shown = outcome === "stillborn" ? "did not compile (discarded)" : timedOut ? `killed (no result within ${timeoutSec}s: the mutant hangs)` : outcome;
         const left = fresh.length - results.length;
         log(`  mutant ${i + 1} (budget ${max}, ${left} still to decide of ${all.length}) [${mu.id}] line ${mu.line} (${mu.op}): ${shown}`);

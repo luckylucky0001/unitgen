@@ -132,7 +132,7 @@ UNITGEN_ENV=/absolute/path/to/unitgen-env.sh /absolute/path/to/unitgen/bin/unitg
 - `baseline` 只跑工程**原有**的测试（unitgen 生成的测试不计入「改造前」）。构建失败、测试失败或覆盖率拿不到时返回非零并标记基线无效，输出里写明原因和失败的用例；`--allow-failing` 可以在列出失败用例的前提下保留基线。没有任何测试的鸿蒙工程直接得到有效的 0% 基线（shim/hvigor 的覆盖率由 unitgen 自己统计，「没跑出东西」不会被误当成 0%）。`verify`、`mutate`、`generate` 要求成功的基线，并且要求和基线用同一个运行器（例如都用 hvigor）。
 - `mutate` 默认要求 `--min-score 80`，未达标或变异运行遇到环境错误返回 `2`；没有可生成的变异体明确标记 `NOT_APPLICABLE`（退出 `0`），不把它解释成断言强度 100%。仍须报告抽样数、幸存项和仅由崩溃检出的数量。
 - 速度：
-  - 鸿蒙的 hvigor 默认使用守护进程，热启动后单次运行约 1 秒，比冷启动快 3 倍左右；设 `UNITGEN_HVIGOR_DAEMON=0` 可以关闭。
+  - 鸿蒙的 hvigor 默认使用守护进程，热启动后单次运行约 1 秒，比冷启动快 3 倍左右；设 `UNITGEN_HVIGOR_DAEMON=0` 可以关闭。死循环的测试或变异体会把守护进程和它启动的 Previewer 卡住，而它们不在 unitgen 启动的进程树里。所以运行超时、被取消，或者开跑前发现本项目还有残留的 Previewer 时，unitgen 会停掉本项目的守护进程（`hvigorw --stop-daemon`），再按 PID + 启动时间清理命令行指向本项目 `.test/` 的 Previewer。下一次运行会冷启动一个新的守护进程，其他项目的守护进程不受影响。
   - 变异体的超时按已经跑完的变异体实际耗时自适应（3 倍中位数 + 10 秒，下限 20 秒），死循环的变异体不会每个都白等 60 秒。
   - 已经判定过的变异体，在测试文件没改动之前不会重跑。
 - `generate` 在 verify 后执行 mutate，将未通过的变异反馈给模型继续补强；重试耗尽则隔离该文件，并返回 `2`。`--max` 控制每轮变异预算；目前没有原生 `--llm trae`，TRAE 用户优先使用上面的 Skill 流程。
@@ -266,11 +266,13 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 | 鸿蒙 shim | TypeScript 把两行合成一行时有一行丢了覆盖率；`?.`/`&&` 短路让整行被判为未覆盖；`if (...) {` 后面的 `{` 让条件行被判为未覆盖 | 按 source map 逐段映射，忽略短路子表达式的范围 |
 | 鸿蒙 shim | 含 `struct` 的文件被整个换成桩，同一文件里导出的工具函数也测不了 | 只挖掉 struct/@Builder，其余代码正常加载 |
 | 鸿蒙 lint | 误报 `Record` 的下标访问；漏报 import 未导出的符号、`expect(void)`、`.message()` | 全部修正，并补了单测 |
+| 鸿蒙 hvigor | 手动删掉的生成测试（没走 `unitgen reject`）还留在 `List.test.ets` 的 import 里，项目自己的 DevEco 测试构建从此编译不过 | 每次运行前清掉指向已不存在的 `*.unitgen.test.ets` 的条目；其他测试的条目不动 |
 | 鸿蒙 起步 | 没有测试的工程、只有 DevEco 模板测试的工程、`build-profile.json5` 被 git 忽略的工程，都没法开始 | 0% 基线直接有效；读模板文件；doctor 说明原因 |
 | 鸿蒙 兼容 | `compileSdkVersion` 写死成旧版本、插件锁定需要 `~/.npmrc` 的工程，hvigor 无法构建 | doctor 提前识别并自动改用 shim，说明原因 |
 | iOS SwiftPM | `swift-tools-version` < 6.0 的包（大多数库都是）里，Swift Testing 的测试 0 个被执行，verify 报 NO_TESTS | 自动加 `--enable-swift-testing` |
 | iOS SwiftPM | 带 `main.swift` 的 `.target`（Ink 的 CLI、Rainbow 的 Playground）被排成第一个目标 | 当作可执行目标排除 |
 | 进程管理 | 死循环的变异体超时后只杀掉了 `swift test`，自己另开进程组的 `swiftpm-testing-helper` 一直在后台涨内存 | 杀整棵进程树；监督进程把后代进程的 PID + 启动时间记进锁文件 |
+| 进程管理 | hvigor 守护进程模式下，一个死循环变异体卡住 Previewer 后，后面所有变异体都被误判成「超时 = 杀死」（CoolMallArkTS 开箱实测时发现）；下一条 verify 无限挂起；卡住的 Previewer 占满一个 CPU 核、约 1 GB 内存，进程树清理够不着 | 超时、取消或开跑前发现残留时，停掉本项目的守护进程和它的 Previewer；单个测试文件的 hvigor 运行超时从 30 分钟降到 15 分钟；超时杀死的变异计为「仅崩溃检出」；变异结果按运行器区分，shim 测出的结果不会在 hvigor 下复用 |
 | 进程管理 | 被强杀后要手动确认 PID 再删锁，变异过的源码要等下一条命令才能还原 | 下一条命令自动接管过期锁，停掉能确认身份的残留进程，还原源码、`List.test.ets` 和 `Package.swift` |
 | 基线 | 重跑基线时，已经接受的生成测试被算进「改造前」（报告写成 6% → 34%，实际起点是 0） | 基线只跑项目原有的测试（四种运行器都处理了） |
 | 基线 | 因为平台桩而失败的旧测试让基线作废；shim 和 hvigor 的数据混在一起 | shim 下自动容忍这类失败（会列出来），其他情况用 `--allow-failing`；记录运行器，不一致时拒绝 verify |

@@ -74,6 +74,19 @@ export function processTree(roots: number[], table: ProcInfo[] = processTable())
   return [...seen.values()];
 }
 
+/** Processes whose command line matches `pred`, with their start time (for `signalAll`'s identity check). */
+export function processesMatching(pred: (command: string) => boolean): { pid: number; start: string; command: string }[] {
+  if (process.platform === "win32") return [];
+  const r = spawnSync("ps", ["-A", "-o", "pid=,lstart=,command="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" }, maxBuffer: 64 * 1024 * 1024 });
+  const out: { pid: number; start: string; command: string }[] = [];
+  for (const line of (r.stdout ?? "").split("\n")) {
+    // lstart under LC_ALL=C: "Sat Oct 31 11:25:28 2026"
+    const m = /^\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d\d:\d\d:\d\d\s+\d{4})\s+(.*)$/.exec(line);
+    if (m && Number(m[1]) !== process.pid && pred(m[3])) out.push({ pid: Number(m[1]), start: m[2], command: m[3] });
+  }
+  return out;
+}
+
 /**
  * Signal each process, and the process group of each group leader among them. Entries with a start
  * time are signalled only while that exact process (PID *and* start time) still exists: a PID seen

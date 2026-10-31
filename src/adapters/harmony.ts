@@ -5,13 +5,14 @@
 // platform calls); anything touching @kit.* / @ohos.* APIs is stubbed and should be verified with
 // hvigor on a real toolchain. Because the shim does not run the ArkTS compiler, generated tests are
 // also linted against the ArkTS language restrictions (arkts-no-any-unknown, ...).
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Coverage, parseLcov } from "../coverage.ts";
 import { estimateExecutable } from "../targets.ts";
-import { errorExcerpt, exists, json5Parse, log, preferOwnTest, readFile, readJson, relPath, runAsync, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
+import { errorExcerpt, exists, json5Parse, log, preferOwnTest, processesMatching, readFile, readJson, relPath, runAsync, RunCancelled, signalAll, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -235,6 +236,12 @@ export class HarmonyAdapter implements Adapter {
     return !!profilePath(root) && (exists(path.join(root, "oh-package.json5")) || exists(path.join(root, "hvigorfile.ts")));
   }
 
+  /** ohpm as a command to type: DevEco's bundled one is usually not on PATH. */
+  private ohpm(): string {
+    const bin = which("ohpm") ? undefined : this.toolchain()?.env.PATH?.split(path.delimiter).map((d) => path.join(d, "ohpm")).find(exists);
+    return bin ? (/\s/.test(bin) ? `"${bin}"` : bin) : "ohpm";
+  }
+
   private mode(): "hvigor" | "shim" {
     if (process.env.UNITGEN_HARMONY_MODE === "shim") return "shim";
     if (process.env.UNITGEN_HARMONY_MODE === "hvigor") return "hvigor";
@@ -247,7 +254,7 @@ export class HarmonyAdapter implements Adapter {
     if (!this.toolchain()) return "no DevEco Studio / Command Line Tools for HarmonyOS found (set DEVECO_STUDIO_HOME)";
     if (!profileIsReal(this.root)) return "build-profile.json5 is missing (only a template is committed)";
     if (!this.hypiumDeclared()) return "no oh-package.json5 declares @ohos/hypium (devDependencies), which local unit tests need";
-    if (!exists(path.join(this.root, "oh_modules"))) return "oh_modules/ is missing: run `ohpm install` in the project";
+    if (!exists(path.join(this.root, "oh_modules"))) return `oh_modules/ is missing: run \`${this.ohpm()} install\` in the project`;
     // hvigor refuses an explicit compileSdkVersion other than the installed SDK's API level.
     const tc = this.toolchain()!;
     const want = this.compileApi();
@@ -385,7 +392,7 @@ export class HarmonyAdapter implements Adapter {
     const declared = [path.join(this.root, "oh-package.json5"), ...ms.map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists)
       .some((p) => /"dependencies"\s*:\s*\{\s*"/.test(readFile(p).replace(/\/\/.*$/gm, "")));
     if (declared && !exists(path.join(this.root, "oh_modules")) && Object.keys(this.remoteDeps()).length) {
-      lines.push("warning: oh-package.json5 declares dependencies but oh_modules/ is missing: run `ohpm install`. Until then files importing those packages are ranked as `platform` and cannot be verified.");
+      lines.push(`warning: oh-package.json5 declares dependencies but oh_modules/ is missing: run \`${this.ohpm()} install\`. Until then files importing those packages are ranked as \`platform\` and cannot be verified.`);
     }
     const pkgs = [path.join(this.root, "oh-package.json5"), ...ms.map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists);
     if (!this.hypiumDeclared() && pkgs.length) {
@@ -541,7 +548,21 @@ export class HarmonyAdapter implements Adapter {
   }
 
   async runTests(req: RunRequest): Promise<TestRun> {
+    for (const m of req.modules ?? this.modules()) this.pruneDeletedTests(m);
     return this.mode() === "hvigor" ? this.runHvigor(req) : this.runShim(req);
+  }
+
+  /** A generated test deleted by hand (not via `unitgen reject`) leaves an import that breaks every DevEco test build. */
+  private pruneDeletedTests(m: Module): void {
+    const list = path.join(m.testRoot, "List.test.ets");
+    if (!exists(list)) return;
+    const re = new RegExp(`^import\\s+\\w+\\s+from\\s+'\\./([^']+${SUFFIX.replace(/\.ets$/, "").replace(/\./g, "\\.")})';$`, "gm");
+    for (const [, mod] of readFile(list).matchAll(re)) {
+      const f = path.join(m.testRoot, `${mod}.ets`);
+      if (exists(f)) continue;
+      this.forgetTestFile(f, m);
+      log(`removed ${relPath(f, this.root)} from ${relPath(list, this.root)}: the file no longer exists`);
+    }
   }
 
   platformLines(text: string): Set<number> {
@@ -652,7 +673,7 @@ export class HarmonyAdapter implements Adapter {
     const missing = [...new Set(tests.map((t) => /UNITGEN_MISSING_PACKAGE (\S+)/.exec(t.message ?? "")?.[1]).filter(Boolean))];
     if (missing.length) {
       return { ok: false, compiled: false, tests: [], logFile, seconds: (Date.now() - start) / 1000, excerpt: "",
-        infraError: `ohpm packages not installed: ${missing.join(", ")}. Run \`ohpm install\` in ${this.root} (needs the DevEco/ohpm toolchain), then verify again.` };
+        infraError: `ohpm packages not installed: ${missing.join(", ")}. Run \`${this.ohpm()} install\` in ${this.root}, then verify again.` };
     }
     // A ReferenceError for a global the project never declares is an ArkUI/system global the shim lacks.
     const projectText = mods.flatMap((m) => this.sourceFiles(m)).map((f) => readFile(f)).join("\n");
@@ -684,6 +705,31 @@ export class HarmonyAdapter implements Adapter {
 
   recover(): void {
     this.restoreIfCrashed();
+    // The interrupted command may have left the daemon running a hanging test.
+    const tc = this.mode() === "hvigor" ? this.toolchain() : undefined;
+    if (tc && this.ownPreviewers().length) this.resetHvigor(tc, "after an interrupted run");
+  }
+
+  /**
+   * Previewer processes running this project's local tests. The hvigor daemon starts them; they
+   * live in the daemon's process group, outside the tree of the command unitgen ran.
+   */
+  private ownPreviewers(): { pid: number; start: string }[] {
+    const roots = new Set([this.root, ...(() => { try { return [fs.realpathSync(this.root)]; } catch { return []; } })()]);
+    return processesMatching((cmd) => /[/\\]previewer[/\\].*Previewer\b/i.test(cmd)
+      && [...roots].some((r) => cmd.includes(`${r}${path.sep}`) && cmd.includes(`${path.sep}.test${path.sep}`)));
+  }
+
+  /**
+   * A test that never returns wedges the hvigor daemon: the killed client leaves the daemon and its
+   * Previewer behind, and every later run waits for that Previewer. Stop this project's daemon and
+   * its Previewers so the next run starts a fresh one.
+   */
+  private resetHvigor(tc: Toolchain, why: string): void {
+    spawnSync(tc.hvigor, ["--stop-daemon"], { cwd: this.root, env: { ...process.env, ...tc.env }, stdio: "ignore", timeout: 60_000 });
+    const left = this.ownPreviewers();
+    signalAll(left, true);
+    log(`stopped the hvigor daemon${left.length ? ` and ${left.length} Previewer process(es)` : ""} ${why}`);
   }
 
   /** A run that was killed while List.test.ets was swapped for an isolated one: put the original back. */
@@ -851,13 +897,21 @@ export class HarmonyAdapter implements Adapter {
         // small module); it picks up source changes like a cold build. UNITGEN_HVIGOR_DAEMON=0 disables it.
         process.env.UNITGEN_HVIGOR_DAEMON === "0" ? "--no-daemon" : "--daemon"];
     const args = [tc.hvigor, "--mode", "module", "-p", `module=${m.name}@default`, "-p", `product=${product}`, ...extra];
+    const daemon = extra.includes("--daemon");
+    // A Previewer of this project still running means a wedged daemon (e.g. a run killed by the user).
+    if (daemon && this.ownPreviewers().length) this.resetHvigor(tc, "left running by an earlier run");
     const restore = files ? this.swapList(m, files) : undefined;
     let r;
     try {
-      r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 1800, logFile: path.join(this.stateDir, "logs", `${label}.log`), env: tc.env });
+      // A single test file (verify, mutants) never needs the 30 minutes a whole project's build may take.
+      r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? (files ? 900 : 1800), logFile: path.join(this.stateDir, "logs", `${label}.log`), env: tc.env });
+    } catch (e) {
+      if (daemon && e instanceof RunCancelled) this.resetHvigor(tc, "after the cancelled run");
+      throw e;
     } finally {
       restore?.();
     }
+    if (daemon && r.timedOut) this.resetHvigor(tc, "after the timed-out run");
     const text = stripAnsi(r.out);
     const log = `$ ${args.join(" ")}\n${text}\n`;
     if (r.timedOut) return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: "", log, infraError: "timeout" };
