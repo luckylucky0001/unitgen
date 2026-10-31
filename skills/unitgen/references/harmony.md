@@ -13,7 +13,8 @@
     Requirements: `@ohos/hypium` in devDependencies, `ohpm install` done, no
     `compileSdkVersion` other than the installed SDK's API level. Each verify takes ~5–20 s;
     unitgen points `List.test.ets` at the file under test while it runs (restored afterwards,
-    also after a crash), so a broken existing test elsewhere does not block you.
+    also after a crash), so a broken existing test elsewhere does not block you. hvigor writes
+    local-test output to `<module>/.test/` (DevEco's own location; most projects git-ignore `**/.test`).
   - **Node shim** (`UNITGEN_HARMONY_MODE=shim`, or automatically when hvigor cannot run):
     TypeScript transpiles `.ets`, `@ohos/hypium` is replaced by a compatible implementation,
     every `@kit.*`/`@ohos.*` import is an inert stub, ArkUI `struct`/`@Builder` declarations are
