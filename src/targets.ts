@@ -28,8 +28,15 @@ export function estimateExecutable(text: string): number[] {
   const out: number[] = [];
   let inBlock = false;
   let unavailable = false;
+  let inImport = false;
   lines.forEach((raw, i) => {
     const l = raw.trim();
+    // Multi-line `import { a, b } from '...'` (TS/ArkTS) is not executable code.
+    if (inImport) {
+      if (/\bfrom\s+['"]|^\}\s*;?$|['"]\s*;?$/.test(l)) inImport = false;
+      return;
+    }
+    if (/^import\s*(type\s*)?\{[^}]*$/.test(l)) { inImport = true; return; }
     if (/@available\(\s*\*\s*,\s*unavailable/.test(l)) {
       unavailable = true;
       return;

@@ -1,4 +1,5 @@
 // Markdown summary of what unitgen measured and kept.
+import * as path from "node:path";
 import type { Adapter } from "./adapters/types.ts";
 import { mergeCoverage, summarize } from "./coverage.ts";
 import type { State } from "./state.ts";
@@ -60,9 +61,11 @@ export function buildReport(adapter: Adapter, state: State): string {
     if (d.accepted.some((x) => !x.mutation)) lines.push("", "Mutation score: `unitgen mutate <test-file>` (— = not run). Surviving mutants can be equivalent (no observable change); review them before adding assertions.");
     lines.push("");
   }
+  const targets = new Set(d.accepted.map((x) => x.target && path.resolve(adapter.root, x.target)).filter((x): x is string => !!x));
   const perFile = a.files
     .map((f) => ({ f, before: b.files.find((x) => x.file === f.file) }))
-    .filter(({ f, before }) => before && f.covered !== before.covered)
+    // Changed files, plus every target of an accepted test (an unchanged target is worth seeing too).
+    .filter(({ f, before }) => before && (f.covered !== before.covered || targets.has(f.file)))
     .sort((x, y) => (y.f.covered - (y.before?.covered ?? 0)) - (x.f.covered - (x.before?.covered ?? 0)));
   if (perFile.length) {
     lines.push("## Coverage by file", "", "| file | before | after |", "|---|---:|---:|");

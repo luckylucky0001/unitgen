@@ -154,7 +154,7 @@ export async function main(argv: string[]): Promise<number> {
       // runner explains them (Node shim: they use stubbed system APIs and pass only on the real toolchain).
       const tolerated = failed > 0 && !r.infraError && r.compiled && (!!o["allow-failing"] || !!r.failuresExplained);
       const runOk = (r.ok || tolerated) && r.compiled && !r.infraError;
-      const hasCoverage = r.tests.some((t) => t.status === "passed") && Object.keys(cov).length > 0;
+      const hasCoverage = r.tests.some((t) => t.status === "passed") && Object.keys(cov).length > 0 && !r.coverageProblem;
       // A project without (useful) tests is a valid 0% baseline only where unitgen measures coverage
       // itself (HarmonyOS Node shim). Elsewhere "nothing ran / nothing covered" usually means the
       // test task or coverage agent is misconfigured, so it stays an error.
@@ -168,6 +168,7 @@ export async function main(argv: string[]): Promise<number> {
       const baseline = { at: state.stamp(), ok: measured, tests: r.tests.length, failed, note, seconds: r.seconds, runner: adapter.runnerName };
       const otherRunner = state.data.accepted.filter((a) => a.runner && adapter.runnerName && a.runner !== adapter.runnerName);
       if (measured) {
+        state.data.unbuildable = r.unbuildable;
         state.baselineCoverage = cov;
         state.data.adapter = adapter.id;
         state.data.baseline = baseline;
@@ -182,6 +183,7 @@ export async function main(argv: string[]): Promise<number> {
       const why = !r.compiled ? "existing tests do not compile here"
         : r.infraError ? "environment problem"
         : failed ? `${failed} existing tests fail; fix them, or re-run with --allow-failing to measure the passing ones`
+        : r.coverageProblem ? r.coverageProblem
         : !hasCoverage ? "the existing tests ran but covered no project code (the coverage tool may not be attached)"
         : "build, tests and coverage must succeed";
       print([`tests: ${r.tests.length} (${failed} failed)  build: ${r.compiled ? "ok" : "FAILED"}  ${r.seconds.toFixed(0)}s`,
@@ -198,6 +200,14 @@ export async function main(argv: string[]): Promise<number> {
       const ts = rankTargets(adapter, state.knownCoverage(), { modules: mods, includeKinds: o["all-kinds"] ? ["logic", "model", "di", "ui", "entry", "platform"] : ["logic", "model"] });
       if (!o["all-kinds"]) log("showing logic/model files; add --all-kinds to include ui, platform, di and entry files");
       const lim = Number(o.limit ?? 20);
+      // Files in modules the runner cannot build go last: they cannot be verified here.
+      const blocked = state.data.unbuildable ?? {};
+      if (Object.keys(blocked).length) {
+        const inBlocked = (t: (typeof ts)[number]) => t.module in blocked;
+        const n = ts.filter(inBlocked).length;
+        ts.sort((a, b) => Number(inBlocked(a)) - Number(inBlocked(b)));
+        if (n) log(`${n} file(s) in modules the runner cannot build (${Object.keys(blocked).join(", ")}) are listed last; see \`unitgen baseline\` note`);
+      }
       if (!ts.length) log(o["all-kinds"] ? "nothing left to cover here (every file is covered or below 3 uncovered lines)" : "no logic/model file with uncovered lines here; `--all-kinds` lists ui/platform/di files too");
       print(formatTargets(ts.slice(0, lim), root), ts.slice(0, lim).map(({ uncoveredLines, ...t }) => t));
       return 0;

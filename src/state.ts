@@ -35,6 +35,8 @@ export interface StateData {
   notes: { at: string; text: string; kind: string }[];
   /** verify runs per test file (relative path), so the report shows real attempt counts. */
   attempts?: Record<string, number>;
+  /** Modules the last baseline could not build (name -> reason). */
+  unbuildable?: Record<string, string>;
   /** Per test file: lines (`12`) or single mutants (`12.2`) judged equivalent. */
   equivalent?: Record<string, (number | string)[]>;
 }

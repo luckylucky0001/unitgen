@@ -137,6 +137,9 @@ export async function verify(adapter: Adapter, state: State, testFile: string, o
   const targetGained = target ? (gained[target]?.length ?? 0) : gainedLines;
   const deltaLines = prev ? Object.values(newlyCovered(mergeCoverage(known, prev), cand)).reduce((a, b) => a + b.length, 0) : undefined;
   const mismatch = (run.coverageWarnings ?? []).filter(Boolean);
+  if (gainedLines === 0 && run.coverageProblem) {
+    return res("infra_error", { tests, logFile: run.logFile, suspects, feedback: `Tests pass, but coverage could not be measured: ${run.coverageProblem} This is an environment problem, not your test; do not add tests to chase it.` });
+  }
   if (gainedLines === 0 && mismatch.length) {
     return res("infra_error", { tests, logFile: run.logFile, suspects, feedback: `Tests pass, but the coverage tool discarded data for: ${mismatch.slice(0, 5).join(", ")} (class files do not match the executed bytecode). This is a unitgen/build-setup problem, not your test.` });
   }

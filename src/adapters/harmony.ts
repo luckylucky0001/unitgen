@@ -33,6 +33,33 @@ function profilePath(root: string): string | undefined {
   return undefined;
 }
 
+/** Installed @ohos/hypium: version and whether expect(...).message() exists (added in 1.0.19). */
+export function hypiumInfo(root: string): { version?: string; hasMessage: boolean } | undefined {
+  const ohm = path.join(root, "oh_modules");
+  const store = path.join(ohm, ".ohpm");
+  const dirs = [
+    ...(exists(store) ? fs.readdirSync(store).filter((d) => d.startsWith("@ohos+hypium@")).sort().reverse().map((d) => path.join(store, d, "oh_modules", "@ohos", "hypium")) : []),
+    path.join(ohm, "@ohos", "hypium"),
+  ].filter((d) => exists(path.join(d, "oh-package.json5")));
+  if (!dirs.length) return undefined;
+  const dir = dirs[0];
+  let version: string | undefined;
+  try { version = json5Parse(readFile(path.join(dir, "oh-package.json5"))).version; } catch { /* unknown */ }
+  const sources = walkFiles(path.join(dir, "src"), [".js", ".ts", ".ets"]).concat(walkFiles(dir, [".d.ts"]));
+  return { version, hasMessage: sources.some((f) => /\bmessage\s*\(/.test(readFile(f))) };
+}
+
+/** a < b for dotted numeric versions. */
+function versionLess(a: string, b: string): boolean {
+  const x = a.split(".").map(Number), y = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) < (y[i] ?? 0);
+  return false;
+}
+
+function json5ParseSafe(file: string): { name?: string } | undefined {
+  try { return json5Parse(readFile(file)); } catch { return undefined; }
+}
+
 function profileIsReal(root: string): boolean {
   return exists(path.join(root, "build-profile.json5"));
 }
@@ -237,6 +264,37 @@ export class HarmonyAdapter implements Adapter {
     } catch { return undefined; }
   }
 
+  private hyp?: ReturnType<typeof hypiumInfo> | null;
+  hypium(): ReturnType<typeof hypiumInfo> {
+    if (this.hyp === undefined) this.hyp = hypiumInfo(this.root) ?? null;
+    return this.hyp ?? undefined;
+  }
+
+  /** Uses of hypium API the project's installed version does not have. */
+  hypiumLint(text: string): string[] {
+    const h = this.hypium();
+    if (!h || h.hasMessage) return [];
+    const out: string[] = [];
+    text.split("\n").forEach((l, i) => {
+      if (/\.message\s*\(/.test(l.replace(/\/\/.*$/, ""))) out.push(`${i + 1}: expect(...).message() does not exist in the project's @ohos/hypium ${h.version ?? ""} (added in 1.0.19): remove it`);
+    });
+    return out;
+  }
+
+  /** Packages a module's sources import that neither its oh-package.json5 nor `file:` deps declare. */
+  private undeclaredDeps(m: Module): string[] {
+    const pkg = path.join(m.dir, "oh-package.json5");
+    let declared: Record<string, unknown> = {};
+    try { const j = json5Parse(readFile(pkg)); declared = { ...(j.dependencies ?? {}), ...(j.devDependencies ?? {}) }; } catch { /* none */ }
+    const used = new Set<string>();
+    for (const f of this.sourceFiles(m)) {
+      for (const x of readFile(f).matchAll(/from\s+['"]((?:@[\w-]+\/)?[\w][\w.-]*)[^'"]*['"]/g)) {
+        if (!/^@(kit|ohos|system|arkts|hms)\./.test(x[1]) && !x[1].startsWith(".")) used.add(x[1].split("/").slice(0, x[1].startsWith("@") ? 2 : 1).join("/"));
+      }
+    }
+    return [...used].filter((p) => !(p in declared) && p !== m.name && p !== json5ParseSafe(pkg)?.name);
+  }
+
   private hypiumDeclared(): boolean {
     return [path.join(this.root, "oh-package.json5"), ...this.modules().map((m) => path.join(m.dir, "oh-package.json5"))]
       .filter(exists).some((p) => readFile(p).includes("@ohos/hypium"));
@@ -296,6 +354,13 @@ export class HarmonyAdapter implements Adapter {
       : ` (hvigor local unit tests in the Previewer runtime: ${tc?.hvigor ?? "hvigorw not found"})`}`);
     if (tc) lines.push(`toolchain: ${tc.home ?? path.dirname(tc.hvigor)}${tc.sdk ? `; SDK ${tc.sdk}${tc.sdkVersion ? ` (${tc.sdkVersion})` : ""}` : ""}`);
     if (mode === "hvigor" && blocker) { ok = false; lines.push(`hvigor mode cannot run: ${blocker}`); }
+    const hyp = this.hypium();
+    if (hyp?.version) {
+      lines.push(`hypium: ${hyp.version}${hyp.hasMessage ? "" : " (no expect().message())"}`);
+      if (mode === "hvigor" && versionLess(hyp.version, "1.0.19")) {
+        lines.push(`warning: @ohos/hypium ${hyp.version} reports coverage through printSync, which the Previewer does not deliver for larger runs (1.0.6 delivered none at all). Upgrade the devDependency to 1.0.19 or newer if verify reports a coverage problem.`);
+      }
+    }
     if (mode === "shim") {
       if (!this.tsDir()) { ok = false; lines.push("typescript not found: run `npm install` in the unitgen directory"); }
     }
@@ -413,7 +478,8 @@ export class HarmonyAdapter implements Adapter {
       "  });",
       "}",
       "```",
-      "Matchers: assertEqual (===), assertDeepEquals, assertTrue, assertFalse, assertNull, assertUndefined, assertContain, assertClose(v, eps), assertLarger/assertLess(OrEqual), assertInstanceOf('TypeName'), assertThrowError('exact message') on a function, assertNaN, .not().assertX(), await expect(p).assertPromiseIsResolvedWith(v) / assertPromiseIsRejected().",
+      `Matchers: assertEqual (===), assertDeepEquals, assertTrue, assertFalse, assertNull, assertUndefined, assertContain, assertClose(v, eps), assertLarger/assertLess(OrEqual), assertInstanceOf('TypeName'), assertThrowError('exact message') on a function, assertNaN, .not().assertX(), await expect(p).assertPromiseIsResolvedWith(v) / assertPromiseIsRejected().${this.hypium()?.hasMessage ? " `.message('ctx')` before a matcher labels the failure." : " Do NOT use `.message()`: the project's @ohos/hypium does not have it (added in 1.0.19); put the context into the test name instead."}`,
+      "expect() takes a value: never pass a call that returns void.",
       "ArkTS restrictions (the real compiler rejects violations): no `any`/`unknown`; object literals must match a declared class/interface type; no destructuring assignment; no `var`; no function expressions (use arrows); no `for..in`; no indexed access on non-array objects (obj['k']); no `delete`; no object spread; declare explicit types for empty arrays (`const xs: number[] = []`).",
       "it(name, 0, fn): the second argument is the test attribute; always pass 0. Async tests: `it('x', 0, async () => { ... })`.",
       shim
@@ -489,7 +555,7 @@ export class HarmonyAdapter implements Adapter {
     const lint = files.filter((f) => f.endsWith(SUFFIX)).flatMap((f) => {
       const text = readFile(f);
       const imported = importedSources(f, text);
-      return [...arktsLint(text, imported.map((x) => x.text).join("\n")), ...importLint(text, imported)].map((x) => `${relPath(f, this.root)}:${x}`);
+      return [...arktsLint(text, imported.map((x) => x.text).join("\n")), ...importLint(text, imported), ...this.hypiumLint(text)].map((x) => `${relPath(f, this.root)}:${x}`);
     });
     // Coverage comes straight from V8 (NODE_V8_COVERAGE) on the transpiled JS under <work>/gen and is
     // mapped back to .ets lines here; see v8LineCoverage for why c8's line rule is not used.
@@ -641,6 +707,12 @@ export class HarmonyAdapter implements Adapter {
     }
     let mods = req.modules ?? this.modules();
     if (req.testFiles) mods = mods.filter((m) => req.testFiles!.some((f) => this.moduleFor(f)?.name === m.name));
+    // Old hypium versions compile `.message()` (loosely typed) but fail at runtime with an empty error.
+    const pre = (req.testFiles ?? []).flatMap((f) => this.hypiumLint(readFile(f)).map((x) => `${relPath(f, this.root)}:${x}`));
+    if (pre.length) {
+      writeFile(logFile, pre.join("\n"));
+      return { ok: false, compiled: false, tests: [], logFile, excerpt: pre.join("\n"), seconds: 0 };
+    }
     const tests: TestCase[] = [];
     const coverage: Coverage = {};
     const excerpts: string[] = [];
@@ -649,6 +721,8 @@ export class HarmonyAdapter implements Adapter {
     let infraError: string | undefined;
     let outside: string | undefined;
     let skipped = 0;
+    const unbuildable: Record<string, string> = {};
+    let coverageProblem: string | undefined;
     let combinedLog = "";
     for (const m of mods) {
       // hvigor's generated test entry imports src/test/List.test.ets: a module without one has no local tests.
@@ -678,7 +752,13 @@ export class HarmonyAdapter implements Adapter {
           // Full runs: a module whose production code does not build in local-test mode (e.g. resources
           // of a dependency that hvigor does not resolve there) is reported and skipped, not fatal.
           if (!req.testFiles && badProd.length && mods.length > 1) {
-            notes.push(`module ${m.name} skipped: its code does not compile in hvigor's local unit test mode (${[...new Set(badProd)].slice(0, 3).map((f) => relPath(f, this.root)).join(", ")}: ${r.excerpt.split("\n")[0].replace(/^.*?: /, "")}); its files cannot be verified with hvigor (UNITGEN_HARMONY_MODE=shim can test their pure logic)`);
+            const undeclared = this.undeclaredDeps(m);
+            const why = undeclared.length
+              ? `it imports ${undeclared.join(", ")} without declaring ${undeclared.length > 1 ? "them" : "it"} in ${relPath(path.join(m.dir, "oh-package.json5"), this.root)}, so hvigor builds the module without ${undeclared.length > 1 ? "their" : "its"} resources (add ${undeclared.length > 1 ? "them" : "it"} to the module's dependencies)`
+              : `its code does not compile with hvigor`;
+            const reason = `${why}: ${[...new Set(badProd)].slice(0, 2).map((f) => relPath(f, this.root)).join(", ")}: ${r.excerpt.split("\n")[0].replace(/^.*?: /, "")}`;
+            notes.push(`module ${m.name} skipped: ${reason}; its files cannot be verified with hvigor (UNITGEN_HARMONY_MODE=shim can test their pure logic)`);
+            unbuildable[m.name] = reason;
             skipped++;
             break;
           }
@@ -693,6 +773,7 @@ export class HarmonyAdapter implements Adapter {
         }
         tests.push(...r.tests);
         Object.assign(coverage, r.coverage);
+        if (r.coverageProblem) coverageProblem = r.coverageProblem;
         if (r.tests.some((t) => t.status === "failed")) ok = false;
         if (!r.tests.length && r.excerpt) excerpts.push(r.excerpt);
         break;
@@ -705,12 +786,13 @@ export class HarmonyAdapter implements Adapter {
     return {
       ok: ok && !infraError, compiled, tests, coverage: req.coverage ? coverage : undefined, logFile,
       excerpt: [...excerpts, ...failedMsgs.slice(0, 10)].filter(Boolean).join("\n"), seconds: (Date.now() - start) / 1000,
-      infraError, note: notes.join("; ") || undefined, emptyCoverageOk: true, compileErrorOutsideTests: outside,
+      infraError, note: [...notes, coverageProblem].filter(Boolean).join("; ") || undefined, emptyCoverageOk: true, compileErrorOutsideTests: outside, coverageProblem,
+      ...(Object.keys(unbuildable).length ? { unbuildable } : {}),
     };
   }
 
   private async hvigorModuleRun(m: Module, tc: Toolchain, files: string[] | undefined, req: RunRequest, label: string):
-    Promise<{ compiled: boolean; tests: TestCase[]; coverage: Coverage; errorFiles: string[]; excerpt: string; log: string; infraError?: string }> {
+    Promise<{ compiled: boolean; tests: TestCase[]; coverage: Coverage; errorFiles: string[]; excerpt: string; log: string; infraError?: string; coverageProblem?: string }> {
     const buildRoot = ".test";
     const out = path.join(m.dir, buildRoot, "default");
     const resultFile = path.join(out, "intermediates", "test", "coverage_data", "test_result.txt");
@@ -746,7 +828,17 @@ export class HarmonyAdapter implements Adapter {
     const single = files?.length === 1 ? files[0] : undefined;
     const tests = parseHypiumResults(readFile(resultFile)).map((t) => ({ ...t, file: single }));
     const coverage = exists(reportFile) ? this.dropTypeOnlyLines(parseHvigorCoverage(readFile(reportFile), m.sourceRoots)) : {};
-    return { compiled: true, tests, coverage, errorFiles: [], excerpt: "", log };
+    // Tests ran and passed, but not one line anywhere was recorded: the coverage data never arrived.
+    const passed = tests.filter((t) => t.status === "passed").length;
+    const anyHit = Object.values(coverage).some((lines) => Object.values(lines).some((h) => h > 0));
+    let coverageProblem: string | undefined;
+    if (req.coverage && passed > 0 && !anyHit) {
+      const v = this.hypium()?.version;
+      coverageProblem = `hvigor recorded 0 executed lines although ${passed} test(s) passed${exists(reportFile) ? "" : " (no coverageReport.json)"}: the coverage data never reached hvigor. `
+        + `${v && versionLess(v, "1.0.19") ? `@ohos/hypium ${v} sends it through printSync, which the Previewer drops: upgrade @ohos/hypium (devDependencies) to 1.0.19 or newer and run \`ohpm install\`. ` : ""}`
+        + "Or use UNITGEN_HARMONY_MODE=shim for pure-logic files.";
+    }
+    return { compiled: true, tests, coverage, errorFiles: [], excerpt: "", log, coverageProblem };
   }
 
   /**

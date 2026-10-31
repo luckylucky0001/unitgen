@@ -25,7 +25,8 @@ const RULES = `Rules (a test that breaks any of these is rejected):
 7. Only use test libraries named in the Conventions section or imported by the existing tests below. Do not add dependencies.`;
 
 function declarationLines(text: string, file = ""): string[] {
-  const re = /^\s*(public |open |internal |private |fileprivate |protected |export |static |final |abstract |override |data |sealed |inline |suspend |async |mutating |@\w+\s+)*(func|fun|init|class|struct|enum|protocol|interface|object|typealias|val|var|let|const|case|constructor|function|type)\b/;
+  // A keyword followed by a name (`type Foo`, `object Bar`), not a field called `type:` / `object:`.
+  const re = /^\s*(public |open |internal |private |fileprivate |protected |export |static |final |abstract |override |data |sealed |inline |suspend |async |mutating |@\w+\s+)*((func|fun|class|struct|enum|protocol|interface|object|typealias|val|var|let|const|case|function|type)\s+[A-Za-z_$`]|(init|constructor)\b)/;
   // TypeScript/ArkTS methods have no keyword: `sendMessage(x: string): Promise<void> {`.
   const tsMethod = /^\s+(public |protected |static |async |override |readonly )*[A-Za-z_$][\w$]*\s*(<[^>]*>)?\([^)]*\)\s*(:\s*[^={;]+)?\s*\{\s*$/;
   const isTs = /\.(ets|ts)$/.test(file);
@@ -179,12 +180,13 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     `- Test suite/class name: \`${place.suiteName}\`${place.packageName ? `  (package \`${place.packageName}\`)` : ""}`,
     place.importHint ? `- Import: \`${place.importHint}\`` : "",
     `- Coverage: ${measured ? `${covered.size}/${exec.size} executable lines covered by existing tests` : `0% (no existing test loads this file; ~${exec.size} executable lines estimated)`}; uncovered lines: ${capRanges(uncovered)}`,
-    ...(adapter.briefWarnings?.(abs) ?? []).map((w) => `- ⚠️ ${w}`),
+    ...(state.data.unbuildable?.[m.name] ? [`The last baseline could not build module \`${m.name}\` (${state.data.unbuildable[m.name]}): a test here cannot be verified with this runner. Pick a target in another module, or fix the module first.`] : [])
+      .concat(adapter.briefWarnings?.(abs) ?? []).map((w) => `- ⚠️ ${w}`),
     "",
     "## Conventions",
     adapter.conventions(m),
     "",
-    "## " + (examples.length ? RULES : RULES.replace("named in the Conventions section or imported by the existing tests below", "named in the Conventions section (this module has no existing tests to copy from)")),
+    "## " + (examples.length ? RULES : RULES.replace("named in the Conventions section or imported by the existing tests below", "named in the Conventions section (this module has no existing tests to copy from, apart from IDE templates)")),
     "",
     "## Source under test (\"!\" = not covered yet)",
     "```",

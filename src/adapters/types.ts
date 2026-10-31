@@ -38,6 +38,10 @@ export interface TestRun {
   note?: string;
   /** Why failing existing tests are expected in this environment (the baseline then tolerates them). */
   failuresExplained?: string;
+  /** Modules the runner could not build at all (name -> reason); their files cannot be verified. */
+  unbuildable?: Record<string, string>;
+  /** Coverage of the whole run is unusable (e.g. tests passed but no line was recorded anywhere). */
+  coverageProblem?: string;
   /** The build failed in code other than the test files run (e.g. production code). */
   compileErrorOutsideTests?: string;
   /** Coverage is measured by unitgen itself, so "tests ran, nothing covered" really means 0%. */
