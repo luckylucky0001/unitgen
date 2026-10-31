@@ -2,34 +2,32 @@
 
 [中文](README.md) · English
 
-Backfills unit tests for **iOS (Swift), Android (Kotlin/Java) and HarmonyOS (ArkTS)** projects: a
-command-line tool plus a Skill for AI coding agents (Claude Code, TRAE).
+unitgen adds unit tests to iOS (Swift), Android (Kotlin/Java) and HarmonyOS (ArkTS) projects. It is
+a command-line tool with a Skill for Claude Code and TRAE.
 
-The AI writes the tests. unitgen decides **what to test**: it ranks files by uncovered logic and
-gives the context needed to write a test. It also decides **which tests to keep**: a test file is
-accepted only if it compiles, passes, passes again on a re-run, contains assertions and raises
-line coverage. Mutation testing then checks that its assertions actually catch broken code.
+An AI writes the tests; unitgen picks the targets and checks the results. It ranks source files by
+uncovered logic and puts together the context for writing a test. A test file is kept only if it
+compiles, passes, passes again on a re-run, has assertions and adds coverage. Mutation testing then
+checks whether the assertions notice when the code is broken.
 
 ```
 doctor    detect the project type, check the toolchain
 baseline  run the project's own tests, record coverage before
 targets   rank source files by uncovered logic lines
 brief     context for one source file (source with uncovered lines marked, conventions, test doubles, similar tests)
-(the AI writes the test)
-verify    gate: compiles -> all pass -> re-run not flaky -> has assertions -> new coverage > 0
+(write the test)
+verify    check: compiles -> all pass -> re-run not flaky -> has assertions -> new coverage > 0
 mutate    mutation testing: change the code under test, see whether the test notices
-report    .unitgen/REPORT.md
+report    write .unitgen/REPORT.md
 ```
 
-The approach follows Meta's TestGen-LLM / ACH and Qodo Cover-Agent: generating tests is easy,
-filtering them is the hard part. Design notes and a comparison with existing tools:
-[docs/DESIGN.md](docs/DESIGN.md) (Chinese).
+The approach is based on Meta's TestGen-LLM / ACH and Qodo Cover-Agent. Design notes and a
+comparison with similar tools are in [docs/DESIGN.md](docs/DESIGN.md) (Chinese).
 
 ## Validation
 
-Run end to end (write tests → verify → mutate → report) on 20 open-source projects with the real
-toolchains: DevEco Studio 26, Xcode 16.4 and the Android SDK (Gradle). Nine of them were done from
-scratch by an AI that had read only this README and the Skill. Some results:
+The full workflow has been run on 20 open-source projects with real toolchains (DevEco Studio 26,
+Xcode 16.4, Android SDK + Gradle). Some results:
 
 | Project | Platform | Target file | Coverage | Mutation score |
 |---|---|---|---|---|
@@ -43,12 +41,12 @@ scratch by an AI that had read only this README and the Skill. Some results:
 | [Pokedex](https://github.com/skydoves/Pokedex) 8.4k★ | Android · Gradle (multi-module) | `DetailRepositoryImpl.kt` | 89% → 100% | 100% |
 | [ObjectMapper](https://github.com/tristanhimmelman/ObjectMapper) 9.1k★ | iOS · Xcode + Simulator | `Map.swift` | 75% → 98% | 100% |
 
-All 35 target files, the method, suspected bugs found in these projects, and the unitgen issues
-found and fixed along the way: [docs/VALIDATION.md](docs/VALIDATION.md) (Chinese).
+Numbers for all 35 target files, how they were measured, and suspected bugs found in these
+projects: [docs/VALIDATION.md](docs/VALIDATION.md) (Chinese).
 
 ## Install
 
-**Prerequisites**, only for the platforms you use:
+Set up the platforms you need:
 
 | Platform | Needs |
 |---|---|
@@ -57,7 +55,7 @@ found and fixed along the way: [docs/VALIDATION.md](docs/VALIDATION.md) (Chinese
 | iOS | Xcode. SwiftPM packages run with `swift test`; `.xcodeproj` projects on an iOS Simulator. With only the Command Line Tools, only Swift Testing tests in Swift packages run |
 | Android | JDK 17+ (`JAVA_HOME`) and the Android SDK (`ANDROID_HOME`, or the project's `local.properties`). On Apple silicon use an arm64 JDK (e.g. `brew install openjdk@17`): an x86_64 JDK under Rosetta builds slowly |
 
-**Install unitgen**:
+Install unitgen:
 
 ```bash
 git clone https://github.com/luckylucky0001/unitgen.git ~/unitgen
@@ -74,13 +72,13 @@ Windows (cmd or PowerShell): after `git clone`, run `npm ci` in the checkout and
 (or add `bin` to PATH and call `unitgen`). On Windows `UNITGEN_ENV` is a `.cmd` file that sets the
 toolchain paths with `set JAVA_HOME=...` and the like.
 
-**Check**: run `unitgen doctor` in your project. It names the project type, which runner it uses
-and why, and how to fix what is missing (for HarmonyOS, for example, the full path of DevEco's
-bundled ohpm).
+Then run `unitgen doctor` in your project. It shows the project type, which runner it will use and
+what is missing. For a HarmonyOS project without `ohpm install`, it prints the full path of DevEco's
+bundled ohpm.
 
 ## Use
 
-### 1. In Claude Code (recommended)
+### 1. In Claude Code
 
 Install the Skill:
 
@@ -257,7 +255,7 @@ Production code, existing tests and build configuration are never changed. Durin
 source under test is changed temporarily and always restored, also after a forced kill (by the
 next command).
 
-**Undo**: `unitgen reject <test-file> "why"` moves a generated test to `.unitgen/rejected/` and
+To undo: `unitgen reject <test-file> "why"` moves a generated test to `.unitgen/rejected/` and
 unregisters it. A generated test deleted by hand is removed from `List.test.ets` on the next run.
 Removing the SwiftPM block and `.unitgen/` restores the original state.
 
@@ -283,9 +281,8 @@ with the exact kill command. Never delete `.unitgen/run.lock` by hand.
 
 **`mutate` is slow.** Limit each run with `--max` and run it several times; `--max 10` on Xcode.
 
-**A compile error shows only warnings.** Fixed: when hvigor's output is cut off, unitgen reads
-hvigor's own `.hvigor/outputs/build-logs/build.log`. The full build output is always in
-`.unitgen/logs/`; every command ends with the log path.
+**Where is the full build output?** In `.unitgen/logs/`. Every command prints the log path when it
+finishes.
 
 **The project directory was moved or renamed.** No effect: `.unitgen` stores paths relative to the
 project root.
@@ -314,10 +311,10 @@ Common: -C <dir> (project root; default: found upwards from the current director
         --adapter harmony|gradle|swiftpm|xcode  --module <name>  --json (results on stdout, progress on stderr)
 ```
 
-**Exit codes**: 0 passed (or mutation not applicable); 1 command, argument or environment error;
+Exit codes: 0 passed (or mutation not applicable); 1 command, argument or environment error;
 2 quality gate failed; 130 cancelled.
 
-**Environment variables**:
+Environment variables:
 
 | Variable | Effect |
 |---|---|
@@ -330,23 +327,6 @@ Common: -C <dir> (project root; default: found upwards from the current director
 
 Build progress and diagnostics go to stderr, `--json` results to stdout: do not merge them before
 parsing. When piping output, use a shell with `pipefail` to keep unitgen's exit code.
-
-## Known limits
-
-- **HarmonyOS**: local unit tests in the Previewer runtime, where most system APIs are mocks.
-  Device-dependent logic, `ohosTest` (instrument tests) and UI tests are out of scope. The shim is
-  reliable for pure logic only. Private methods of structs and code a module does not export
-  cannot be tested; the brief warns about them.
-- **iOS**: UI tests and devices are out of scope. Each xcodebuild run takes tens of seconds. With
-  only the Command Line Tools, a project's existing XCTest tests cannot run (0% baseline).
-- **Android**: JVM local unit tests only; without Robolectric or `isReturnDefaultValues`,
-  `android.util.Log` and similar calls throw. APK installation, device APIs and Compose UI tests are
-  out of scope.
-- **Windows**: CI runs all unit tests on windows-latest and, through `bin\unitgen.cmd`, doctor,
-  baseline, verify, mutate and report end to end on a Gradle/Java project. The HarmonyOS Node shim is
-  also run end to end on Windows; the hvigor path (DevEco for Windows) was not tested, and iOS needs
-  macOS anyway. The TRAE installer is a shell script: on Windows copy
-  the Skill directory by hand.
 
 ## Development
 
