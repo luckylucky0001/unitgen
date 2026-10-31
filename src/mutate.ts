@@ -73,8 +73,9 @@ const OPERATORS: [string, RegExp, string][] = [
   [">= -> >", / >= /, " > "],
   ["< -> <=", / < /, " <= "],
   ["> -> >=", / > /, " >= "],
-  ["&& -> ||", / && /, " || "],
-  ["|| -> &&", / \|\| /, " && "],
+  // Also at the end of a line: multi-line conditions (`a ||` / `b`).
+  ["&& -> ||", / &&(?=\s|$)/, " ||"],
+  ["|| -> &&", / \|\|(?=\s|$)/, " &&"],
   ["+ -> -", / \+ /, " - "],
   ["- -> +", / - /, " + "],
   ["* -> /", / \* /, " / "],
@@ -148,7 +149,7 @@ function fieldWithoutDefault(text: string, name: string): boolean {
  * (For a plain `string`, `s && s.length` -> `||` still compiles, so truthiness alone is not enough.)
  */
 function nullGuard(masked: string, op: "&&" | "||", text: string): boolean {
-  const i = masked.indexOf(` ${op} `);
+  const i = masked.search(new RegExp(` ${op === "&&" ? "&&" : "\\|\\|"}(?=\\s|$)`));
   if (i < 0) return false;
   const left = masked.slice(0, i), right = masked.slice(i + op.length + 2);
   const g = op === "||"
@@ -212,8 +213,11 @@ const LOG_CALL = new RegExp([
   String.raw`^(await\s+)?((this|self)\.)?(?:[A-Za-z_$][\w$]*?)?(Log|Logger|LogUtils?|Logging)\s*\.\s*(v|d|i|w|e|f|debug|info|warn|warning|error|fatal|trace|verbose|log)\s*\(`,
 ].join("|"));
 
-export function mutantsFor(text: string, lines: number[]): Mutant[] {
-  const out = mutantsForLines(text, lines);
+/** `literalNarrowing`: the compiler narrows `x === 64` to the literal type (strict TS/ArkTS under hvigor). */
+export interface MutantOptions { literalNarrowing?: boolean }
+
+export function mutantsFor(text: string, lines: number[], opts: MutantOptions = {}): Mutant[] {
+  const out = mutantsForLines(text, lines, opts);
   const seen = new Map<number, number>();
   for (const m of out) {
     const n = (seen.get(m.line) ?? 0) + 1;
@@ -223,7 +227,42 @@ export function mutantsFor(text: string, lines: number[]): Mutant[] {
   return out;
 }
 
-function mutantsForLines(text: string, lines: number[]): Mutant[] {
+/**
+ * `c === 0x2D || c === 0x2E` (also spread over lines): flipping the first comparison to `!==`, or the
+ * `||` after it to `&&`, makes the type checker narrow `c` to that literal on the right-hand side and
+ * reject the next comparison of `c` ("no overlap"). The last comparison of a chain is fine.
+ * `at`: index of the mutated operator in the line; `op`: its text.
+ */
+function literalChain(src: string[], ln: number, at: number, op: string): boolean {
+  const lit = String.raw`(?:0x[\da-fA-F]+|\d+(?:\.\d+)?|\u0000+|true|false|null|undefined)`;
+  const line = maskStrings(src[ln - 1].replace(/\/\/.*$/, ""));
+  // The rest of the condition: following lines while each one ends in `||` / `&&`.
+  let next = "";
+  for (let j = ln, prev = line; j < src.length && j < ln + 20 && /(\|\||&&)\s*$/.test(prev); j++) {
+    prev = maskStrings(src[j].replace(/\/\/.*$/, ""));
+    next += " " + prev;
+  }
+  const before = line.slice(0, at), after = line.slice(at + op.length) + " " + next;
+  const v = (op.includes("=")
+    ? /([A-Za-z_$][\w$.]*)\s*$/.exec(before)
+    : new RegExp(String.raw`([A-Za-z_$][\w$.]*)\s*[!=]==?\s*${lit}\s*\)*\s*$`).exec(before))?.[1];
+  if (!v) return false;
+  if (op.includes("=") && !new RegExp(String.raw`^\s*${lit}`).test(after)) return false;
+  // A flipped comparison narrows the rest of the `||` chain; a new `&&` only its right operand.
+  let rest = op.includes("=") ? after.replace(new RegExp(String.raw`^\s*${lit}`), "") : after;
+  if (!op.includes("=")) {
+    let depth = 0;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "(") depth++;
+      else if (rest[i] === ")" && --depth < 0) { rest = rest.slice(0, i); break; }
+      else if (depth === 0 && rest.startsWith("||", i)) { rest = rest.slice(0, i); break; }
+    }
+  }
+  // `typeof v === 'object'` compares the typeof result, not v.
+  return new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${v.replace(/[.$]/g, "\\$&")}\s*[!=]==?\s*${lit}`).test(rest);
+}
+
+function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mutant[] {
   const src = text.split("\n");
   const out: Mutant[] = [];
   for (const ln of lines) {
@@ -251,6 +290,7 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
       const m = re.exec(masked);
       if (!m) continue;
       if ((op === "|| -> &&" && nullGuard(masked, "||", text)) || (op === "&& -> ||" && nullGuard(masked, "&&", text))) continue;
+      if (opts.literalNarrowing && /^(=== -> !==|!== -> ===|\|\| -> &&|&& -> \|\|)$/.test(op) && literalChain(src, ln, m.index, m[0])) continue;
       // `"0" + s` is a concatenation: `"0" - s` never compiles.
       if (op === "+ -> -" && (masked[m.index - 1] === "\u0000" || masked[m.index + m[0].length] === "\u0000")) continue;
       const mutated = original.slice(0, m.index) + rep + original.slice(m.index + m[0].length);
@@ -405,7 +445,7 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   const lines = Object.entries(cov[absTarget] ?? {}).filter(([, h]) => h > 0).map(([l]) => Number(l));
   if (!lines.length) throw new Error(`${relTest} covers no line of ${relPath(absTarget, adapter.root)}`);
   const original = readFile(absTarget);
-  const generated = mutantsFor(original, lines);
+  const generated = mutantsFor(original, lines, { literalNarrowing: /^hvigor/.test(adapter.runnerName ?? "") });
   // The original text is part of the key: deletions share their `mutated` placeholder, and a changed
   // source line must not inherit an outcome measured on different code.
   const key = (mu: Mutant) => `${mu.line}|${mu.op}|${mu.original}|${mu.mutated}`;

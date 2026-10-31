@@ -383,3 +383,30 @@ test("objects returned by system APIs are marked as mocks; a page exporting only
   ].join("\n");
   assert.equal(a.classify("/p/entry/src/main/ets/pages/EditPage.ets", page), "ui");
 });
+
+test("under a narrowing type checker, flips inside a literal comparison chain are not generated", () => {
+  const ts = [
+    "export function safe(c: number, format: string): boolean {",
+    "  return c === 0x2D ||",
+    "    c === 0x2E ||",
+    "    (c >= 0x30 && c <= 0x39) ||",
+    "    (format === 'RFC1738' && (c === 0x28 || c === 0x29));",
+    "}",
+    "export function isObj(val: Object | null): boolean {",
+    "  return val !== null && typeof val === 'object';",
+    "}",
+  ].join("\n");
+  const lines = ts.split("\n").map((_, i) => i + 1);
+  const ops = (narrow: boolean) => mutantsFor(ts, lines, { literalNarrowing: narrow }).map((m) => `${m.line}:${m.op}`);
+  const strict = ops(true), loose = ops(false);
+  // c === 0x2D -> !== narrows c to 45 for `c === 0x2E` (and the later 0x28/0x29): never compiles.
+  for (const o of ["2:=== -> !==", "3:=== -> !==", "5:|| -> &&"]) {
+    assert.ok(loose.includes(o) && !strict.includes(o), o);
+  }
+  // A `||` at the end of a line is mutated too; `c === 0x2E && (c >= 0x30 ...)` still compiles.
+  assert.ok(loose.includes("2:|| -> &&") && !strict.includes("2:|| -> &&"));
+  assert.ok(strict.includes("3:|| -> &&"));
+  // `format !== 'RFC1738'`: format is compared only once.
+  assert.ok(strict.includes("5:=== -> !=="));
+  assert.ok(strict.includes("8:!== -> ==="), "typeof compares its own result");
+});

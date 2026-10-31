@@ -282,6 +282,7 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 | iOS Xcode | 工程在 `/tmp` 这类符号链接路径下时，xccov 报的路径对不上，基线 0/0；brief 里 `@testable import SwiftyJSON_iOS` 用了 target 名（模块其实叫 `SwiftyJSON`）；部署目标 iOS 9 也建议用 Swift Testing；构建产物写进 `~/Library/.../DerivedData`（SwiftyJSON 开箱实测） | 所有路径统一解析符号链接；模块名读 `PRODUCT_MODULE_NAME`；部署目标低于 iOS 13 / macOS 10.15 时只建议 XCTest；构建放在 `.unitgen/DerivedData` |
 | verify | 环境错误（INFRA_ERROR）或一次失败的重新验证，会把已接受的测试连同覆盖率和变异历史一起丢掉，`mutate` 随后报一个看不懂的「pass --target」；INFRA_ERROR 退出码是 2 | 环境错误不改动状态，退出码改为 1；真正失败时该文件暂停计数，历史保留，再次通过后恢复；`status` 和 `mutate` 会说明原因 |
 | 变异测试 | 测试文件没变时，已知的幸存者每次都重跑（Aigis 一轮 21 次里 15 次是重复）；`x = .string`、`obj.secret = undefined` 这类赋值、抛出的错误消息、返回的模板字符串都没有变异体；`"0" + s` 被改成 `"0" - s`，`self.init(...)` 被删，都注定编译不过；每个变异体的完整测试输出刷屏 | 幸存者只在测试文件改动后重跑；补上这几类变异（赋值删除只在该行没有其他变异时生成）；跳过注定编译不过的两类；变异体的构建输出只写日志 |
+| 变异测试 | ArkTS 编译器会把 `c === 0x2D` 收窄成字面量类型：字符判断链 `c === 0x2D \|\| c === 0x2E \|\| …` 里把前面的 `===` 改成 `!==`、或把 `\|\|` 改成 `&&`，都编译不过（「types '45' and '46' have no overlap」）。qs-arkts 的 utils_encode 84 个变异里 14 个白跑 | 在 hvigor 下不生成这几类（链末尾那个比较、`typeof x === '…'` 照常生成；Node shim 不做类型检查，照常生成）。utils_encode 95 个候选全部判定，编译不过的降到 2 个，得分 92%。行末的 `\|\|`、`&&` 原先没有变异体，现在也有 |
 | 基线 | 重跑基线时，已经接受的生成测试被算进「改造前」（报告写成 6% → 34%，实际起点是 0） | 基线只跑项目原有的测试（四种运行器都处理了） |
 | 基线 | 因为平台桩而失败的旧测试让基线作废；shim 和 hvigor 的数据混在一起 | shim 下自动容忍这类失败（会列出来），其他情况用 `--allow-failing`；记录运行器，不一致时拒绝 verify |
 | 变异测试 | Swift 的 `if cond {`、尾随闭包、成员赋值、`case .x: return 2001`、返回的字符串都没有变异体：Rainbow 的 ConditionalStyleBuilder 只有 2 个候选，Kingfisher 的「100%」是虚高 | 补上这些算子；不再生成 `$0 → $1`、类型联合 `0 \| 1` 这类注定编译不过的变异 |
