@@ -142,3 +142,18 @@ test("ArkTS compiler errors are parsed with their files (paths with spaces)", as
   const out = "Error Message: Property 'uri' is missing. At File: /a b/entry/src/test/X.test.ets:20:3\nCOMPILE RESULT:FAIL";
   assert.deepEqual(parseArkTsErrors(out), [{ message: "Property 'uri' is missing.", file: "/a b/entry/src/test/X.test.ets", line: 20, col: 3 }]);
 });
+
+test("platformLines marks lines that call imported system APIs, not logging or local code", async () => {
+  const { HarmonyAdapter } = await import("../src/adapters/harmony.ts");
+  const a = new HarmonyAdapter("/nonexistent-project", "/nonexistent-project/.unitgen");
+  const text = [
+    "import { url } from '@kit.ArkTS';",
+    "import { hilog } from '@kit.PerformanceAnalysisKit';",
+    "export function host(s: string): string {",
+    "  hilog.info(0, 't', s);",
+    "  const u = url.URL.parseURL(s);",
+    "  return u.host.toLowerCase();",
+    "}",
+  ].join("\n");
+  assert.deepEqual([...a.platformLines(text)], [5]);
+});

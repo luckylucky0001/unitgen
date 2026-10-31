@@ -134,7 +134,7 @@ function testDoubles(adapter: Adapter, m: Module, text: string, budget: number):
   return parts.join("\n\n");
 }
 
-function numbered(text: string, uncovered: Set<number>, executable: Set<number>, keep?: (ln: number) => boolean): string {
+function numbered(text: string, uncovered: Set<number>, executable: Set<number>, keep?: (ln: number) => boolean, platform: Set<number> = new Set()): string {
   const lines = text.split("\n");
   const out: string[] = [];
   let skipping = false;
@@ -146,7 +146,7 @@ function numbered(text: string, uncovered: Set<number>, executable: Set<number>,
       return;
     }
     skipping = false;
-    const mark = uncovered.has(ln) ? "!" : executable.has(ln) ? " " : " ";
+    const mark = uncovered.has(ln) ? (platform.has(ln) ? "!~" : "! ") : "  ";
     out.push(`${mark}${String(ln).padStart(5)}| ${l}`);
   });
   return out.join("\n");
@@ -178,14 +178,17 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
   const place = adapter.placement(abs, m);
   const maxChars = opts.maxSourceChars ?? 70000;
 
-  let src = numbered(text, unc, exec);
+  // Lines that call system APIs which are stubs/mocks in this runner: covering them is possible,
+  // asserting on what those APIs return is not.
+  const platform = adapter.platformLines?.(text) ?? new Set<number>();
+  let src = numbered(text, unc, exec, undefined, platform);
   if (src.length > maxChars) {
     // Large file: keep declarations plus a window around uncovered lines.
     const declSet = new Set<number>();
     text.split("\n").forEach((l, i) => {
       if (declarationLines(l).length) declSet.add(i + 1);
     });
-    src = numbered(text, unc, exec, (ln) => declSet.has(ln) || uncovered.some((u) => Math.abs(u - ln) <= 4));
+    src = numbered(text, unc, exec, (ln) => declSet.has(ln) || uncovered.some((u) => Math.abs(u - ln) <= 4), platform);
   }
 
   const examples = adapter.exampleTests(m, abs).map((f) => {
@@ -213,7 +216,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     "",
     "## " + (examples.length ? RULES : RULES.replace("named in the Conventions section or imported by the existing tests below", "named in the Conventions section (this module has no existing tests to copy from, apart from IDE templates)")),
     "",
-    "## Source under test (\"!\" = not covered yet)",
+    `## Source under test ("!" = not covered yet${[...platform].some((l) => unc.has(l)) ? `; "!~" = not covered and calls a system API that is ${adapter.platformLinesNote ?? "not real here"}: cover the logic around it, never assert on what the API returns` : ""})`,
     "```",
     src,
     "```",

@@ -534,6 +534,20 @@ export class HarmonyAdapter implements Adapter {
     return this.mode() === "hvigor" ? this.runHvigor(req) : this.runShim(req);
   }
 
+  platformLines(text: string): Set<number> {
+    const names = [...usedPlatformImports(text), "AppStorage", "AppStorageV2", "PersistentStorage", "getContext"];
+    const out = new Set<number>();
+    text.split("\n").forEach((l, i) => {
+      if (/^\s*import\s/.test(l) || /^\s*\/\//.test(l)) return;
+      if (names.some((n) => new RegExp(`(?<![\\w$.])${n.replace(/\$/g, "\\$")}\\s*[.(]`).test(l))) out.add(i + 1);
+    });
+    return out;
+  }
+
+  get platformLinesNote(): string {
+    return this.mode() === "hvigor" ? "mostly a mock in the Previewer runtime" : "an inert stub under the Node shim";
+  }
+
   /** Runner description for the brief and reports. */
   get runnerName(): string {
     return this.mode() === "hvigor" ? "hvigor (ArkTS compiler + Previewer runtime)" : "Node shim";

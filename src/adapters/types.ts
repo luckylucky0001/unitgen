@@ -95,6 +95,10 @@ export interface Adapter {
   prepareTestFile(testFile: string, m: Module): void;
   /** Extra directories holding test helpers/fakes the module's tests can use (e.g. a :shared-test module). */
   testSupportDirs?(m: Module): string[];
+  /** Lines that call system APIs which are stubs or mocks under this runner (marked `!~` in briefs). */
+  platformLines?(text: string): Set<number>;
+  /** How those APIs behave here, for the brief legend (e.g. "a mock in the Previewer"). */
+  readonly platformLinesNote?: string;
   /** Source text used to estimate executable lines of a never-loaded file (e.g. without UI DSL blocks). */
   estimateText?(text: string): string;
   /** Warnings to put at the top of a brief (missing packages, stubbed APIs, ...). */
