@@ -88,7 +88,10 @@ function maskStrings(line: string): string {
   return line.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, (s) => "\u0000".repeat(s.length));
 }
 
-const KEYWORD_START = /^(return|val|var|let|const|if|else|for|while|do|throw|try|catch|finally|case|default|guard|defer|import|package|func|fun|class|struct|enum|interface|object|switch|when|break|continue|super|this\s*\(|init|override|private|public|internal|protected|static|export|function|async|await|yield|@)/;
+const KEYWORD_START = /^(return|val|var|let|const|if|else|for|while|do|throw|try|catch|finally|case|default|guard|defer|import|package|func|fun|class|struct|enum|interface|object|switch|when|break|continue|super|this\s*\(|init|deinit|subscript|get|set|willSet|didSet|extension|protocol|typealias|associatedtype|where|operator|precedencegroup|actor|mutating|nonmutating|convenience|required|lazy|weak|unowned|fileprivate|open|final|indirect|override|private|public|internal|protected|static|export|function|async|await|yield|@)\b|^@/;
+
+/** A declaration line (Swift/Kotlin/TS): its operators are part of a signature, not code (`static func + (`). */
+const DECLARATION = /^\s*((public|private|internal|fileprivate|open|static|class|final|override|mutating|nonmutating|convenience|required|prefix|postfix|infix|@\w+(\([^)]*\))?)\s+)*(func|fun|subscript|init|deinit|operator|precedencegroup)\b/;
 
 /** Parentheses and braces balance (strings masked) and never go negative. */
 function balanced(t: string): boolean {
@@ -152,7 +155,21 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
     const t = original.trim();
     if (!t || t.startsWith("//") || t.startsWith("*") || t.startsWith("/*") || t.startsWith("import ") || t.startsWith("@") || /^(case|default)\b.*:$/.test(t)) continue;
     if (LOG_CALL.test(t)) continue;
-    const masked = maskStrings(original.replace(/\/\/.*$/, (c) => " ".repeat(c.length)));
+    let masked = maskStrings(original.replace(/\/\/.*$/, (c) => " ".repeat(c.length)));
+    // On a declaration line only the body is code: `static func + (l, r) -> T {` has none,
+    // `fun answer() = 1` has `1`. Blank the signature so its operators are never mutated.
+    if (DECLARATION.test(original)) {
+      const open = masked.indexOf("(");
+      let depth = 0, close = -1;
+      for (let i = Math.max(0, open); open >= 0 && i < masked.length; i++) {
+        if (masked[i] === "(") depth++;
+        if (masked[i] === ")" && --depth === 0) { close = i; break; }
+      }
+      const rest = close >= 0 ? masked.slice(close + 1) : "";
+      const body = /\{|(?<![=!<>])=(?![=>])/.exec(rest);
+      const cut = body ? close + 1 + body.index + 1 : masked.length;
+      masked = " ".repeat(cut) + masked.slice(cut);
+    }
     for (const [op, re, rep] of OPERATORS) {
       const m = re.exec(masked);
       if (!m) continue;
@@ -166,7 +183,7 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
       out.push({ line: ln, op: "negate condition", original, mutated: original.slice(0, cond.index) + inner + original.slice(cond.index + cond[0].length) });
     } else {
       // Swift/Kotlin-style without parentheses: `if flag {`, `guard isReady else {`, `while hasMore {`.
-      const bare = /\b(if|guard|while)\s+(!?)([A-Za-z_$][\w$.]*(?:\(\))?)\s*(\{|else\b)/.exec(masked);
+      const bare = /\b(if|guard|while)\s+(!?)([A-Za-z_$][\w$.]*(?:\([^()]*\))?)\s*(\{|else\b)/.exec(masked);
       if (bare && !/^(let|var|case)$/.test(bare[3])) {
         const at = bare.index + bare[0].indexOf(bare[2] + bare[3], bare[1].length);
         const mutated = original.slice(0, at) + (bare[2] ? original.slice(at + 1) : `!${original.slice(at)}`);
@@ -182,6 +199,13 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
     const num = /^\s*(import\b|#)/.test(original) ? null : numRe.exec(masked);
     if (num) {
       out.push({ line: ln, op: `${num[1]} -> ${Number(num[1]) + 1}`, original, mutated: original.slice(0, num.index) + String(Number(num[1]) + 1) + original.slice(num.index + num[1].length) });
+    }
+    // Strings appended to an accumulator (`format += "yyyy"`): is the piece checked?
+    const append = /(\+=\s*)("(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+')\s*;?\s*$/.exec(maskStrings(original).indexOf("//") >= 0 ? original.slice(0, maskStrings(original).indexOf("//")) : original);
+    if (append && !/\\\(|\$\{/.test(append[2])) {
+      const at = append.index + append[1].length;
+      const q = append[2][0];
+      out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + q + q + original.slice(at + append[2].length) });
     }
     // Returned string literals (messages, keys, formats): does a test look at the text at all?
     // `masked` has comments blanked already; find the comment in the string-masked original.
@@ -366,7 +390,8 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
         else outcome = r.tests.length ? "survived" : "error";
         results.push({ ...mu, outcome, testHash });
         const shown = outcome === "stillborn" ? "did not compile (discarded)" : timedOut ? `killed (no result within ${timeoutSec}s: the mutant hangs)` : outcome;
-        log(`  mutant ${i + 1} (budget ${max}, ${fresh.length} not yet killed of ${all.length}) [${mu.id}] line ${mu.line} (${mu.op}): ${shown}`);
+        const left = fresh.length - results.length;
+        log(`  mutant ${i + 1} (budget ${max}, ${left} still to decide of ${all.length}) [${mu.id}] line ${mu.line} (${mu.op}): ${shown}`);
       }
     } finally {
       fs.writeFileSync(absTarget, original);
@@ -396,7 +421,7 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   const acc = state.data.accepted.find((a) => a.testFile === relTest);
   if (acc) {
     const first = acc.mutation?.first ?? Math.round(score * 100) / 100;
-    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first, crashes, equivalent: excluded.length, testHash: fileHash(absTest) };
+    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first, crashes, equivalent: excluded.length, testHash: fileHash(absTest), evaluated: current.length, candidates: all.length };
     state.save();
   }
   writeFile(prevFile, JSON.stringify({ ...report, results: report.history }, null, 2));

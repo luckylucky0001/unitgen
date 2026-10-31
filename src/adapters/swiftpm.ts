@@ -181,17 +181,28 @@ export class SwiftPMAdapter implements Adapter {
     };
   }
 
+  /** Major version from `// swift-tools-version:X.Y` (0 when unknown). */
+  private toolsMajor(): number {
+    const m = /^\/\/\s*swift-tools-version:\s*(\d+)/.exec(readFile(this.manifestPath()));
+    return m ? Number(m[1]) : 0;
+  }
+
   conventions(m: Module): string {
     const t = this.tc();
-    const fw = t.xctest
+    // Before tools-version 6.0 a plain `swift test` (what the project's CI runs) skips Swift Testing:
+    // generated tests must be XCTest there to keep running after unitgen is gone.
+    const legacy = t.xctest && this.toolsMajor() > 0 && this.toolsMajor() < 6;
+    const fw = legacy
+      ? `Use XCTest (\`import XCTest\`, \`final class <the suite name above>: XCTestCase\`, \`func testX()\`, \`XCTAssertEqual\`, \`XCTUnwrap\`, \`XCTAssertThrowsError\`). This package declares swift-tools-version ${this.toolsMajor()}.x: a plain \`swift test\` (and its CI) runs Swift Testing only from 6.0 on, so Swift Testing tests would silently never run there.`
+      : t.xctest
       ? "Use Swift Testing (`import Testing`, `@Suite struct ...`, `@Test func ...`, `#expect(...)`, `#require(...)`). XCTest is also available but prefer Swift Testing."
       : "Use Swift Testing ONLY (`import Testing`, `@Suite struct ...`, `@Test func ...`, `#expect(...)`, `try #require(...)`, `#expect(throws: SomeError.self) { ... }`). XCTest is NOT available in this environment: never `import XCTest`.";
     return [
       `Platform: iOS/Swift package, target \`${m.name}\`. Tests compile into the dedicated test target \`${m.meta?.testTarget}\` (directory ${relPath(m.testRoot, this.root)}).`,
       fw,
-      `Start the file with \`import Testing\`, \`import Foundation\` if needed, and \`@testable import ${m.name}\` (internal symbols are visible, private/fileprivate are not).`,
+      `Start the file with \`import ${legacy ? "XCTest" : "Testing"}\`, \`import Foundation\` if needed, and \`@testable import ${m.name}\` (internal symbols are visible, private/fileprivate are not).`,
       "Tests run on macOS via `swift test`: do not use UIKit/AppKit, the network, the real file system outside a temporary directory, or timers.",
-      "Use parameterized tests (`@Test(arguments: [...])`) for tables of inputs.",
+      legacy ? "For tables of inputs loop over an array of cases inside one test method; pass the case to XCTAssert's message." : "Use parameterized tests (`@Test(arguments: [...])`) for tables of inputs.",
       "Floating point: compare with a tolerance, e.g. `#expect(abs(x - 0.3) < 1e-9)`.",
       "Name clashes: Foundation (macOS 15+) defines types such as `Expression`, `Predicate`, `Measurement`. Only `import Foundation` when needed; if a type annotation is ambiguous, avoid the annotation or qualify it.",
       t.xctest ? "" : "The package's own XCTest suites cannot run here, but they are the best oracle: grep Tests/ for the API you test and reuse their inputs and expected values (port them to Swift Testing).",

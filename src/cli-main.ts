@@ -137,7 +137,7 @@ export async function main(argv: string[]): Promise<number> {
     }
     case "modules": {
       const ms = adapter.modules();
-      print(ms.map((m) => `${m.name.padEnd(32)} ${m.kind.padEnd(14)} src: ${m.sourceRoots.map((r) => relPath(r, root)).join(", ")}  ->  tests: ${relPath(m.testRoot, root)}`).join("\n"),
+      print(ms.map((m) => `${m.name.padEnd(32)} ${m.kind.padEnd(14)} src: ${m.sourceRoots.map((r) => relPath(r, root)).join(", ")}  ->  tests: ${relPath(m.testRoot, root)}${exists(m.testRoot) ? "" : " (does not exist yet)"}${adapter.id === "xcode" && !m.meta?.testTarget ? " (no unit-test target)" : ""}`).join("\n"),
         ms.map(({ meta, ...m }) => ({ ...m, meta: { ...meta, buildText: undefined } })));
       return 0;
     }

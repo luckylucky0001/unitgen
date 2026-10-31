@@ -205,3 +205,12 @@ test("review regressions: signalAll skips a PID whose start time no longer match
   await new Promise((r) => setTimeout(r, 200));
   assert.doesNotThrow(() => process.kill(p.pid!, 0));
 });
+
+test("Swift declarations: signatures are not mutated, bodies are; calls with arguments negate; += strings", () => {
+  const src = ["    static func + (lhs: A, rhs: A) -> A {", "    subscript(index: Int) -> Int {", "fun answer() = 1", "    func f(x: Int = 2) -> Int { return x + 1 }",
+    "        if contains(.withYear) {", "            format += \"yyyy\""].join("\n");
+  const ms = mutantsFor(src, [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(ms.map((m) => `${m.line}:${m.mutated.trim()}`), [
+    "3:fun answer() = 0", "4:func f(x: Int = 2) -> Int { return x - 1 }", "4:func f(x: Int = 2) -> Int { return x + 0 }",
+    "5:if !contains(.withYear) {", "6:format += \"\""]);
+});
