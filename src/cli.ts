@@ -4,8 +4,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { acquireProjectLock } from "./lock.ts";
-import { type ProcInfo, processTree, signalAll } from "./util.ts";
-import { detectAdapter } from "./adapters/index.ts";
+import { canonical, type ProcInfo, processTree, signalAll } from "./util.ts";
+import { detectAdapter, findProjectRoot } from "./adapters/index.ts";
 import { State } from "./state.ts";
 import { recover } from "./mutate.ts";
 import { CLI_OPTIONS } from "./cli-main.ts";
@@ -15,7 +15,7 @@ async function supervise(): Promise<number> {
   const argv = process.argv.slice(2);
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: CLI_OPTIONS });
   const help = !positionals.length || positionals[0] === "help" || values.help;
-  const adapter = help ? undefined : detectAdapter(path.resolve(values.project ?? process.cwd()), values.adapter);
+  const adapter = help ? undefined : detectAdapter(canonical(values.project ?? findProjectRoot(process.cwd(), values.adapter)), values.adapter);
   const root = adapter?.root;
   const lock = root ? acquireProjectLock(root) : undefined;
   const release = lock ? lock.release : () => {};
@@ -40,7 +40,11 @@ async function supervise(): Promise<number> {
         try {
           if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
           else process.kill(-pid, hard ? "SIGKILL" : "SIGTERM");
-        } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH") console.error(`unitgen: could not stop PID ${pid}: ${e}`); }
+        } catch (e) {
+          // EPERM: the group exists only as a zombie leader (macOS); its members are handled by killTracked.
+          const code = (e as NodeJS.ErrnoException).code;
+          if (code !== "ESRCH" && code !== "EPERM") console.error(`unitgen: could not stop PID ${pid}: ${e}`);
+        }
       };
       const killTracked = (hard: boolean) => {
         snapshot();

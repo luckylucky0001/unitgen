@@ -6,11 +6,12 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { acquireProjectLock } from "../src/lock.ts";
-import { runAsync, RunCancelled } from "../src/util.ts";
-import { mutate, mutationGate, type MutationReport } from "../src/mutate.ts";
+import { processesMatching, runAsync, RunCancelled, signalAll } from "../src/util.ts";
+import { mutantsFor, mutate, mutationGate, type MutationReport } from "../src/mutate.ts";
 import { State } from "../src/state.ts";
 import type { Adapter } from "../src/adapters/types.ts";
 import { generate, recoverGeneration } from "../src/generate.ts";
+import { verify } from "../src/verify.ts";
 import { GradleAdapter } from "../src/adapters/gradle.ts";
 
 function temp(t: { after: (fn: () => void) => void }): string {
@@ -183,6 +184,24 @@ test("mutation quality gate rejects survivors below threshold and infrastructure
   assert.equal(mutationGate({ ...report, score: 1, results: [{ line: 1, op: "", original: "", mutated: "", outcome: "error" }] }).status, "FAILED");
   assert.equal(mutationGate({ ...report, candidates: 0 }).status, "NOT_APPLICABLE");
   assert.equal(mutationGate({ ...report, killed: 0, survived: 0, score: 0, results: [{ line: 1, op: "", original: "", mutated: "", outcome: "equivalent" }] }).status, "NOT_APPLICABLE");
+  // Every candidate failed to compile (the rest equivalent): nothing to score, not a failure.
+  const none = { ...report, candidates: 1, killed: 0, survived: 0, score: 0, triedTotal: 1, results: [{ line: 1, op: "", original: "", mutated: "", outcome: "stillborn" }] } as MutationReport;
+  assert.equal(mutationGate(none).status, "NOT_APPLICABLE");
+  assert.equal(mutationGate({ ...none, candidates: 3 }).status, "FAILED");
+  // A pass on a sample says so.
+  assert.match(mutationGate({ ...report, killed: 4, survived: 1, score: 0.8, triedTotal: 5, candidates: 9 }).reason ?? "", /on 5 of 9 candidates/);
+});
+
+test("coverage stored in .unitgen survives moving the project directory", (t) => {
+  const parent = temp(t), a = path.join(parent, "a"), b = path.join(parent, "b");
+  fs.mkdirSync(a);
+  const st = new State(a);
+  st.baselineCoverage = { [path.join(a, "Sources", "X.swift")]: { 3: 1 } };
+  st.setTestCoverage("Tests/XUnitGenTests.swift", { [path.join(a, "Sources", "X.swift")]: { 4: 1 } });
+  fs.renameSync(a, b);
+  const moved = new State(b);
+  assert.deepEqual(Object.keys(moved.baselineCoverage), [path.join(b, "Sources", "X.swift")]);
+  assert.deepEqual(moved.knownCoverage()[path.join(b, "Sources", "X.swift")], { 3: 1, 4: 1 });
 });
 
 test("mutation restores source and journal when the clean run throws", async (t) => {
@@ -280,6 +299,195 @@ test("TRAE installer preserves references, is repeatable and refuses existing us
   assert.equal(fs.readFileSync(path.join(bin, "unitgen"), "utf8"), "user executable");
 });
 
+test("a changed source line does not inherit the mutation outcome of the old code", async (t) => {
+  const dir = temp(t), target = path.join(dir, "A.kt"), testFile = path.join(dir, "tests", "AUnitGenTest.kt");
+  fs.mkdirSync(path.dirname(testFile));
+  fs.writeFileSync(testFile, "assertEquals(1, a())\n");
+  fs.writeFileSync(target, "fun a(): Int {\n    save()\n    return 1\n}\n");
+  const state = new State(dir);
+  const relTest = path.relative(dir, testFile);
+  state.setTestCoverage(relTest, { [target]: { 2: 1 } });
+  state.data.accepted.push({ testFile: relTest, target: "A.kt", tests: 1, gainedLines: 1, gained: {}, attempts: 1, at: state.stamp() });
+  state.save();
+  const module = { name: ":app", dir, sourceRoots: [dir], testRoot: path.dirname(testFile), kind: "android" };
+  let mutantRuns = 0;
+  const adapter: Adapter = {
+    id: "fixture", platform: "android", root: dir, testFileSuffix: "UnitGenTest.kt",
+    doctor: () => ({ ok: true, lines: [] }), modules: () => [module], moduleFor: () => module,
+    sourceFiles: () => [target], classify: () => "logic", conventions: () => "", placement: () => ({ path: testFile, suiteName: "AUnitGenTest" }),
+    exampleTests: () => [], prepareTestFile: () => {}, countAssertions: () => 1,
+    async runTests(req) {
+      const deleted = fs.readFileSync(target, "utf8").includes("statement deleted");
+      if (!req.label.endsWith("-0-clean")) mutantRuns++;
+      return { ok: !deleted, compiled: true, tests: [{ name: "AUnitGenTest.a", status: deleted ? "failed" : "passed", message: deleted ? "AssertionError: expected" : undefined }],
+        logFile: "fixture", excerpt: "", seconds: 0.01 };
+    },
+  };
+  const first = await mutate(adapter, state, testFile, target, 5);
+  assert.equal(first.killed, 1);
+  assert.equal(mutantRuns, 1);
+  // Same line, same operator, different statement: must be evaluated again.
+  fs.writeFileSync(target, "fun a(): Int {\n    other()\n    return 1\n}\n");
+  mutantRuns = 0;
+  await mutate(adapter, state, testFile, target, 5);
+  assert.equal(mutantRuns, 1);
+  // Unchanged code and test: nothing new to run.
+  mutantRuns = 0;
+  const third = await mutate(adapter, state, testFile, target, 5);
+  assert.equal(mutantRuns, 0);
+  assert.equal(third.killed, 1);
+});
+
+test("a hanging mutant counts as a crash-only kill; outcomes measured with another runner are not reused", async (t) => {
+  const dir = temp(t), target = path.join(dir, "A.kt"), testFile = path.join(dir, "tests", "AUnitGenTest.kt");
+  fs.mkdirSync(path.dirname(testFile));
+  fs.writeFileSync(testFile, "assertEquals(1, a())\n");
+  fs.writeFileSync(target, "fun a(): Int {\n    save()\n    return 1\n}\n");
+  const state = new State(dir);
+  const relTest = path.relative(dir, testFile);
+  state.setTestCoverage(relTest, { [target]: { 2: 1 } });
+  state.data.accepted.push({ testFile: relTest, target: "A.kt", tests: 1, gainedLines: 1, gained: {}, attempts: 1, at: state.stamp() });
+  state.save();
+  const module = { name: ":app", dir, sourceRoots: [dir], testRoot: path.dirname(testFile), kind: "android" };
+  let mutantRuns = 0;
+  const adapter: Adapter = {
+    id: "fixture", platform: "android", root: dir, testFileSuffix: "UnitGenTest.kt", runnerName: "shim",
+    doctor: () => ({ ok: true, lines: [] }), modules: () => [module], moduleFor: () => module,
+    sourceFiles: () => [target], classify: () => "logic", conventions: () => "", placement: () => ({ path: testFile, suiteName: "AUnitGenTest" }),
+    exampleTests: () => [], prepareTestFile: () => {}, countAssertions: () => 1,
+    async runTests(req) {
+      if (req.label.endsWith("-0-clean")) return { ok: true, compiled: true, tests: [{ name: "AUnitGenTest.a", status: "passed" }], logFile: "fixture", excerpt: "", seconds: 0.01 };
+      mutantRuns++;
+      return { ok: false, compiled: true, tests: [], logFile: "fixture", excerpt: "", seconds: 20, infraError: "timeout" };
+    },
+  };
+  const first = await mutate(adapter, state, testFile, target, 5);
+  assert.equal(first.killed, 1);
+  assert.equal(first.crashes, 1);
+  // (survivors are covered by "a survivor of an unchanged test file is not run again")
+  assert.equal(mutantRuns, 1);
+  mutantRuns = 0;
+  await mutate(adapter, state, testFile, target, 5);
+  assert.equal(mutantRuns, 0);
+  (adapter as { runnerName?: string }).runnerName = "hvigor";
+  await mutate(adapter, state, testFile, target, 5);
+  assert.equal(mutantRuns, 1);
+});
+
+test("a survivor of an unchanged test file is not run again; after the test changes it goes first", async (t) => {
+  const dir = temp(t), target = path.join(dir, "A.kt"), testFile = path.join(dir, "tests", "AUnitGenTest.kt");
+  fs.mkdirSync(path.dirname(testFile));
+  fs.writeFileSync(testFile, "assertEquals(1, a())\n");
+  fs.writeFileSync(target, "fun a(): Int {\n    save()\n    return 1\n}\n");
+  const state = new State(dir);
+  const relTest = path.relative(dir, testFile);
+  state.setTestCoverage(relTest, { [target]: { 2: 1 } });
+  state.data.accepted.push({ testFile: relTest, target: "A.kt", tests: 1, gainedLines: 1, gained: {}, attempts: 1, at: state.stamp() });
+  state.save();
+  const module = { name: ":app", dir, sourceRoots: [dir], testRoot: path.dirname(testFile), kind: "android" };
+  let mutantRuns = 0;
+  const adapter: Adapter = {
+    id: "fixture", platform: "android", root: dir, testFileSuffix: "UnitGenTest.kt",
+    doctor: () => ({ ok: true, lines: [] }), modules: () => [module], moduleFor: () => module,
+    sourceFiles: () => [target], classify: () => "logic", conventions: () => "", placement: () => ({ path: testFile, suiteName: "AUnitGenTest" }),
+    exampleTests: () => [], prepareTestFile: () => {}, countAssertions: () => 1,
+    async runTests(req) {
+      if (!req.label.endsWith("-0-clean")) mutantRuns++;
+      return { ok: true, compiled: true, tests: [{ name: "AUnitGenTest.a", status: "passed" }], logFile: "fixture", excerpt: "", seconds: 0.01 };
+    },
+  };
+  assert.equal((await mutate(adapter, state, testFile, target, 5)).survived, 1);
+  assert.equal(mutantRuns, 1);
+  mutantRuns = 0;
+  assert.equal((await mutate(adapter, state, testFile, target, 5)).survived, 1);
+  assert.equal(mutantRuns, 0);
+  fs.writeFileSync(testFile, "assertEquals(1, a())\nverify(save)\n");
+  await mutate(adapter, state, testFile, target, 5);
+  assert.equal(mutantRuns, 1);
+});
+
+test("an environment error leaves an accepted file alone; a failing re-verify keeps its history for later", async (t) => {
+  const dir = temp(t), target = path.join(dir, "A.kt"), testFile = path.join(dir, "tests", "AUnitGenTest.kt");
+  fs.mkdirSync(path.dirname(testFile));
+  fs.writeFileSync(target, "fun a(): Int {\n    return 1\n}\n");
+  fs.writeFileSync(testFile, "assertEquals(1, a())\n");
+  const state = new State(dir);
+  state.baselineCoverage = { [target]: { 2: 0 } };
+  const module = { name: ":app", dir, sourceRoots: [dir], testRoot: path.dirname(testFile), kind: "android" };
+  let mode: "pass" | "fail" | "infra" = "pass";
+  const adapter: Adapter = {
+    id: "fixture", platform: "android", root: dir, testFileSuffix: "UnitGenTest.kt",
+    doctor: () => ({ ok: true, lines: [] }), modules: () => [module], moduleFor: () => module,
+    sourceFiles: () => [target], classify: () => "logic", conventions: () => "", placement: () => ({ path: testFile, suiteName: "AUnitGenTest" }),
+    exampleTests: () => [], prepareTestFile: () => {}, countAssertions: () => 1,
+    async runTests(req) {
+      if (mode === "infra") return { ok: false, compiled: false, tests: [], logFile: "fixture", excerpt: "", seconds: 0, infraError: "SDK missing" };
+      const failed = mode === "fail";
+      return { ok: !failed, compiled: true, tests: [{ name: "AUnitGenTest.a", status: failed ? "failed" : "passed", message: failed ? "AssertionError: expected 2" : undefined }],
+        coverage: req.coverage ? { [target]: { 2: 1 } } : undefined, logFile: "fixture", excerpt: "", seconds: 0.01 };
+    },
+  };
+  assert.equal((await verify(adapter, state, testFile, { target, reruns: 1 })).verdict, "accepted");
+  state.data.accepted[0].mutation = { killed: 1, survived: 1, stillborn: 0, score: 0.5, first: 0.5 };
+  state.save();
+  mode = "infra";
+  assert.equal((await verify(adapter, state, testFile, { target, reruns: 1 })).verdict, "infra_error");
+  assert.equal(state.data.accepted.length, 1);
+  assert.ok(state.perTestCoverage[path.relative(dir, testFile)]);
+  mode = "fail";
+  const failed = await verify(adapter, state, testFile, { target, reruns: 1 });
+  assert.equal(failed.verdict, "test_failures");
+  assert.equal(failed.lapsed, true);
+  assert.equal(state.data.accepted.length, 0);
+  mode = "pass";
+  assert.equal((await verify(adapter, state, testFile, { target, reruns: 1 })).verdict, "accepted");
+  assert.equal(state.data.accepted[0].mutation?.first, 0.5);
+  assert.equal(state.data.accepted[0].attempts, 1);
+  assert.deepEqual(state.data.lapsed, {});
+});
+
+test("equivalence marks recorded with the older key format still exclude their mutant", async (t) => {
+  const dir = temp(t), target = path.join(dir, "A.kt"), testFile = path.join(dir, "tests", "AUnitGenTest.kt");
+  fs.mkdirSync(path.dirname(testFile));
+  fs.writeFileSync(testFile, "assertEquals(1, a())\n");
+  fs.writeFileSync(target, "fun a(): Int {\n    save()\n    return 1\n}\n");
+  const state = new State(dir);
+  const relTest = path.relative(dir, testFile);
+  state.setTestCoverage(relTest, { [target]: { 2: 1 } });
+  state.data.accepted.push({ testFile: relTest, target: "A.kt", tests: 1, gainedLines: 1, gained: {}, attempts: 1, at: state.stamp() });
+  const [mu] = mutantsFor(fs.readFileSync(target, "utf8"), [2]);
+  state.data.equivalent = { [relTest]: [`key:${mu.line}|${mu.op}|${mu.mutated}`] };
+  state.save();
+  const module = { name: ":app", dir, sourceRoots: [dir], testRoot: path.dirname(testFile), kind: "android" };
+  let mutantRuns = 0;
+  const adapter: Adapter = {
+    id: "fixture", platform: "android", root: dir, testFileSuffix: "UnitGenTest.kt",
+    doctor: () => ({ ok: true, lines: [] }), modules: () => [module], moduleFor: () => module,
+    sourceFiles: () => [target], classify: () => "logic", conventions: () => "", placement: () => ({ path: testFile, suiteName: "AUnitGenTest" }),
+    exampleTests: () => [], prepareTestFile: () => {}, countAssertions: () => 1,
+    async runTests(req) {
+      if (!req.label.endsWith("-0-clean")) mutantRuns++;
+      return { ok: true, compiled: true, tests: [{ name: "AUnitGenTest.a", status: "passed" }], logFile: "fixture", excerpt: "", seconds: 0.01 };
+    },
+  };
+  const r = await mutate(adapter, state, testFile, target, 5);
+  assert.equal(mutantRuns, 0);
+  assert.equal(r.excluded, 1);
+  assert.deepEqual(new State(dir).data.equivalent?.[relTest], [`key:${mu.line}|${mu.op}|${mu.original}|${mu.mutated}`]);
+});
+
+test("processesMatching finds a process by command line with a start time signalAll accepts", { skip: process.platform === "win32" }, async (t) => {
+  const marker = path.join(temp(t), "marker-Previewer");
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", marker], { stdio: "ignore" });
+  t.after(() => { try { child.kill("SIGKILL"); } catch { /* gone */ } });
+  const found = processesMatching((cmd) => cmd.includes(marker));
+  assert.deepEqual(found.map((p) => p.pid), [child.pid]);
+  const exited = new Promise((res) => child.on("exit", res));
+  signalAll(found, true);
+  await exited;
+  assert.deepEqual(processesMatching((cmd) => cmd.includes(marker)), []);
+});
+
 test("generate feeds mutation failures back to the model and accepts strengthened assertions", async (t) => {
   const dir = temp(t), target = path.join(dir, "Answer.kt"), testFile = path.join(dir, "tests", "AnswerUnitGenTest.kt");
   fs.mkdirSync(path.dirname(testFile));
@@ -320,7 +528,9 @@ test("generate feeds mutation failures back to the model and accepts strengthene
     if (req.label.endsWith("-0-clean")) throw new RunCancelled();
     return await runTests(req);
   };
-  await assert.rejects(generate(adapter, state, weak, { files: [target], limit: 1, attempts: 1, reruns: 1, mutationMax: 1 }), RunCancelled);
+  // A different test file (the weak one's survivor is already decided and would not run again).
+  const retry = { name: "retry", async complete() { return "assertEquals(1, answer()) // retry"; } };
+  await assert.rejects(generate(adapter, state, retry, { files: [target], limit: 1, attempts: 1, reruns: 1, mutationMax: 1 }), RunCancelled);
   assert.equal(state.data.accepted.length, 0);
   assert.equal(Object.keys(state.perTestCoverage).length, 0);
 });

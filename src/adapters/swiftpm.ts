@@ -90,6 +90,8 @@ export class SwiftPMAdapter implements Adapter {
     lines.push(`swift: ${v.out.split("\n").find((l) => l.includes("Swift version"))?.trim()}`);
     const t = this.tc();
     lines.push(t.clt ? "toolchain: Command Line Tools (no Xcode) -> Swift Testing only, XCTest targets skipped during runs" : "toolchain: Xcode");
+    const xcodeproj = fs.readdirSync(this.root).find((f) => f.endsWith(".xcodeproj") || f.endsWith(".xcworkspace"));
+    if (xcodeproj) lines.push(`note: ${xcodeproj} exists too; this run uses SwiftPM (macOS). Pass --adapter xcode on every command to run in the iOS Simulator instead (needed for UIKit code).`);
     try {
       const d = this.loadDump();
       const ts: DumpTarget[] = d.targets;
@@ -181,18 +183,29 @@ export class SwiftPMAdapter implements Adapter {
     };
   }
 
+  /** Major version from `// swift-tools-version:X.Y` (0 when unknown). */
+  private toolsMajor(): number {
+    const m = /^\/\/\s*swift-tools-version:\s*(\d+)/.exec(readFile(this.manifestPath()));
+    return m ? Number(m[1]) : 0;
+  }
+
   conventions(m: Module): string {
     const t = this.tc();
-    const fw = t.xctest
+    // Before tools-version 6.0 a plain `swift test` (what the project's CI runs) skips Swift Testing:
+    // generated tests must be XCTest there to keep running after unitgen is gone.
+    const legacy = t.xctest && this.toolsMajor() > 0 && this.toolsMajor() < 6;
+    const fw = legacy
+      ? `Use XCTest (\`import XCTest\`, \`final class <the suite name above>: XCTestCase\`, \`func testX()\`, \`XCTAssertEqual\`, \`XCTUnwrap\`, \`XCTAssertThrowsError\`). This package declares swift-tools-version ${this.toolsMajor()}.x: a plain \`swift test\` (and its CI) runs Swift Testing only from 6.0 on, so Swift Testing tests would silently never run there.`
+      : t.xctest
       ? "Use Swift Testing (`import Testing`, `@Suite struct ...`, `@Test func ...`, `#expect(...)`, `#require(...)`). XCTest is also available but prefer Swift Testing."
       : "Use Swift Testing ONLY (`import Testing`, `@Suite struct ...`, `@Test func ...`, `#expect(...)`, `try #require(...)`, `#expect(throws: SomeError.self) { ... }`). XCTest is NOT available in this environment: never `import XCTest`.";
     return [
       `Platform: iOS/Swift package, target \`${m.name}\`. Tests compile into the dedicated test target \`${m.meta?.testTarget}\` (directory ${relPath(m.testRoot, this.root)}).`,
       fw,
-      `Start the file with \`import Testing\`, \`import Foundation\` if needed, and \`@testable import ${m.name}\` (internal symbols are visible, private/fileprivate are not).`,
-      "Tests run on macOS via `swift test`: do not use UIKit/AppKit, the network, the real file system outside a temporary directory, or timers.",
-      "Use parameterized tests (`@Test(arguments: [...])`) for tables of inputs.",
-      "Floating point: compare with a tolerance, e.g. `#expect(abs(x - 0.3) < 1e-9)`.",
+      `Start the file with \`import ${legacy ? "XCTest" : "Testing"}\`, \`import Foundation\` if needed, and \`@testable import ${m.name}\` (internal symbols are visible, private/fileprivate are not).`,
+      "Tests run on macOS via `swift test`: no UIKit, network, real file system outside a temporary directory, or timers. AppKit types are fine where the code under test returns them (NSColor, NSFont).",
+      legacy ? "For tables of inputs loop over an array of cases inside one test method; pass the case to XCTAssert's message." : "Use parameterized tests (`@Test(arguments: [...])`) for tables of inputs.",
+      legacy ? "Floating point: `XCTAssertEqual(x, 0.3, accuracy: 1e-9)`." : "Floating point: compare with a tolerance, e.g. `#expect(abs(x - 0.3) < 1e-9)`.",
       "Name clashes: Foundation (macOS 15+) defines types such as `Expression`, `Predicate`, `Measurement`. Only `import Foundation` when needed; if a type annotation is ambiguous, avoid the annotation or qualify it.",
       t.xctest ? "" : "The package's own XCTest suites cannot run here, but they are the best oracle: grep Tests/ for the API you test and reuse their inputs and expected values (port them to Swift Testing).",
       "Give closures in dictionary/array literals explicit types (`let f: SymbolEvaluator = { args in ... }`) — the type checker cannot infer multi-statement closures there.",
@@ -258,12 +271,11 @@ export class SwiftPMAdapter implements Adapter {
     for (const d of dirs) {
       for (const f of walkFiles(d, [".swift"])) {
         if (keepSet.has(f) || !f.endsWith(`${SUFFIX}.swift`)) continue;
-        const to = path.join(this.stateDir, "swift-parked", relPath(f, this.root));
-        fs.mkdirSync(path.dirname(to), { recursive: true });
-        moved.push({ from: f, to });
+        moved.push({ from: f, to: path.join(this.stateDir, "swift-parked", relPath(f, this.root)) });
       }
     }
     if (!moved.length) return;
+    for (const m of moved) fs.mkdirSync(path.dirname(m.to), { recursive: true });
     writeFile(this.parkJournal(), JSON.stringify(moved));
     for (const m of moved) fs.renameSync(m.from, m.to);
   }
@@ -273,6 +285,9 @@ export class SwiftPMAdapter implements Adapter {
     const moved = JSON.parse(readFile(this.parkJournal())) as { from: string; to: string }[];
     for (const m of moved) if (exists(m.to)) fs.renameSync(m.to, m.from);
     fs.unlinkSync(this.parkJournal());
+    // Only empty directories are left; never delete a file that could not be moved back.
+    const parked = path.join(this.stateDir, "swift-parked");
+    if (exists(parked) && !walkFiles(parked, [""], new Set()).length) fs.rmSync(parked, { recursive: true, force: true });
   }
 
   /** Temporarily rewrite Package.swift so the run works on this toolchain. Returns a restore fn. */
@@ -311,6 +326,26 @@ export class SwiftPMAdapter implements Adapter {
     };
   }
 
+  /** llvm-cov export of the raw profiles next to SwiftPM's codecov JSON path (same format as that JSON). */
+  private async coverageFromProfraw(codecovJson: string): Promise<any | undefined> {
+    const dir = path.dirname(codecovJson);
+    const raws = walkFiles(dir, [".profraw"]);
+    if (!raws.length) return undefined;
+    const xcrun = process.platform === "darwin" ? ["xcrun"] : [];
+    const profdata = path.join(this.stateDir, "merged.profdata");
+    const merged = await runAsync([...xcrun, "llvm-profdata", "merge", "-sparse", ...raws, "-o", profdata], { cwd: this.root });
+    if (!merged.ok) return undefined;
+    const bundle = fs.readdirSync(path.dirname(dir)).find((f) => f.endsWith("PackageTests.xctest"));
+    if (!bundle) return undefined;
+    const b = path.join(path.dirname(dir), bundle);
+    const bin = process.platform === "darwin" ? path.join(b, "Contents", "MacOS", bundle.replace(/\.xctest$/, "")) : b;
+    if (!exists(bin)) return undefined;
+    const exp = await runAsync([...xcrun, "llvm-cov", "export", "-format=text", "-instr-profile", profdata, bin], { cwd: this.root, stream: false });
+    fs.rmSync(profdata, { force: true });
+    if (!exp.ok) return undefined;
+    try { return JSON.parse(exp.out.slice(exp.out.indexOf("{"))); } catch { return undefined; }
+  }
+
   async runTests(req: RunRequest): Promise<TestRun> {
     const t = this.tc();
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
@@ -330,17 +365,25 @@ export class SwiftPMAdapter implements Adapter {
       // No --filter: with the CLT toolchain Swift Testing ignores SwiftPM's filter ("No matching test
       // cases"). Isolated runs already drop every non-generated test target via the runtime manifest,
       // and coverage gains are computed against baseline + accepted, so co-running accepted files is harmless.
+      // Raw profiles of an earlier run must not leak into this one (see coverageFromProfraw).
+      const codecovJson = req.coverage ? (await runAsync(["swift", "test", "--show-codecov-path"], { cwd: this.root })).out.trim().split("\n").pop()! : "";
+      if (codecovJson) for (const f of walkFiles(path.dirname(codecovJson), [".profraw"])) fs.rmSync(f, { force: true });
       const r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
       const out = stripAnsi(r.out);
       const tests = parseSwiftTestOutput(out);
       const compiled = !/error: (emit-module|compile|link)|error: fatalError|: error: /.test(out) || tests.length > 0;
       let coverage;
       if (req.coverage && compiled) {
-        const p = (await runAsync(["swift", "test", "--show-codecov-path"], { cwd: this.root })).out.trim().split("\n").pop()!;
+        const p = codecovJson;
+        const dirs = mods.map((m) => m.dir + path.sep);
         if (exists(p)) {
-          const dirs = mods.map((m) => m.dir + path.sep);
           coverage = parseLlvmCovJson(JSON.parse(readFile(p)), (f) => dirs.some((d) => f.startsWith(d)));
           if (process.env.UNITGEN_KEEP_COV !== "1") fs.unlinkSync(p);
+        } else {
+          // SwiftPM writes the JSON only when every test passes; with failing tests (a baseline with
+          // --allow-failing) the raw profiles are still there.
+          const json = await this.coverageFromProfraw(p);
+          if (json) coverage = parseLlvmCovJson(json, (f) => dirs.some((d) => f.startsWith(d)));
         }
       }
       const infraError = r.timedOut ? "timeout" : undefined;

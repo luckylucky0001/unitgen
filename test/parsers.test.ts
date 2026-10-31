@@ -33,6 +33,15 @@ test("llvm-cov segments -> line hits (wrapped regions, gaps, skipped)", () => {
   assert.deepEqual(cov["/p/A.swift"], { 1: 3, 2: 3, 3: 0, 4: 3 });
 });
 
+test("llvm-cov lines inside a region that hold no code (blank, comment, #if) are not executable", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "unitgen-llvm-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "F.swift");
+  fs.writeFileSync(file, ["func f() -> Int {", "  let x = 1", "", "  // note", "  #if os(iOS)", "  return x", "}"].join("\n"));
+  const json = { data: [{ files: [{ filename: file, segments: [[1, 18, 0, true, true, false], [7, 2, 0, false, false, false]] }] }] };
+  assert.deepEqual(Object.keys(parseLlvmCovJson(json)[fs.realpathSync(file)]).map(Number), [1, 2, 6, 7]);
+});
+
 test("jacoco xml resolves package paths", () => {
   const xml = `<report><package name="com/x"><class name="com/x/A"/><sourcefile name="A.kt"><line nr="3" mi="0" ci="2" mb="0" cb="0"/><line nr="4" mi="1" ci="0" mb="0" cb="0"/></sourcefile></package></report>`;
   const cov = parseJacocoXml(xml, (p) => (p === "com/x/A.kt" ? "/abs/com/x/A.kt" : undefined));

@@ -15,6 +15,8 @@ export interface PbxTarget {
   productType: string;
   sourcesPhase?: string;
   syncedDirs: string[];
+  /** Ids of the targets this one depends on (PBXTargetDependency), e.g. a test bundle's host. */
+  dependsOn: string[];
   /** Absolute paths of the source files in its Sources build phase. */
   files: string[];
 }
@@ -99,6 +101,7 @@ export class Pbxproj {
         name: (this.attr(o.body, "name") ?? "").replace(/^"|"$/g, ""),
         productType: (this.attr(o.body, "productType") ?? "").replace(/^"|"$/g, ""),
         sourcesPhase, syncedDirs, files,
+        dependsOn: this.list(o.body, "dependencies").map((d) => this.attr(this.objects.get(d)?.body ?? "", "target")?.split(" ")[0]).filter((x): x is string => !!x),
       });
     }
     return out;

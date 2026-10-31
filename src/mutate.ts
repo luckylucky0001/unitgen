@@ -24,6 +24,8 @@ export interface MutantResult extends Mutant {
   outcome: "killed" | "killed-crash" | "survived" | "equivalent" | "stillborn" | "error";
   /** Content hash of the test file the outcome was measured with. */
   testHash?: string;
+  /** Runner that measured it (Adapter.runnerName): the HarmonyOS shim and hvigor can disagree. */
+  runner?: string;
 }
 
 export interface MutationReport {
@@ -55,8 +57,15 @@ export function mutationGate(r: MutationReport, minimum = 80): { status: "PASSED
   if (errors.length) {
     return { status: "FAILED", minimum, reason: `${errors.length} mutant run(s) produced no test results (${errors.map((e) => `line ${e.line}`).join(", ")}): the test run crashed or exited early; see the mutant logs. Fix the cause (e.g. a test awaiting a promise that never settles) and re-run` };
   }
-  if (r.killed + r.survived === 0) return { status: "FAILED", minimum, reason: "no mutant was evaluated (all were discarded or excluded)" };
+  if (r.killed + r.survived === 0) {
+    // Every candidate failed to compile or is marked equivalent: there is nothing to score.
+    if ((r.triedTotal ?? r.results.length) >= r.candidates) return { status: "NOT_APPLICABLE", minimum, reason: "no candidate mutant compiles (the rest are marked equivalent): nothing to score" };
+    return { status: "FAILED", minimum, reason: "no mutant was evaluated yet: re-run mutate" };
+  }
   if (r.score * 100 < minimum) return { status: "FAILED", minimum, reason: `score ${(r.score * 100).toFixed(0)}% is below ${minimum}%` };
+  // A pass on a sample is a pass, but say so: the rest may still hold survivors.
+  const tried = r.triedTotal ?? r.results.length;
+  if (tried < r.candidates) return { status: "PASSED", minimum, reason: `on ${tried} of ${r.candidates} candidates; ${r.candidates - tried} not evaluated yet, which may still survive (re-run mutate to evaluate them)` };
   return { status: "PASSED", minimum };
 }
 
@@ -71,8 +80,9 @@ const OPERATORS: [string, RegExp, string][] = [
   [">= -> >", / >= /, " > "],
   ["< -> <=", / < /, " <= "],
   ["> -> >=", / > /, " >= "],
-  ["&& -> ||", / && /, " || "],
-  ["|| -> &&", / \|\| /, " && "],
+  // Also at the end of a line: multi-line conditions (`a ||` / `b`).
+  ["&& -> ||", / &&(?=\s|$)/, " ||"],
+  ["|| -> &&", / \|\|(?=\s|$)/, " &&"],
   ["+ -> -", / \+ /, " - "],
   ["- -> +", / - /, " + "],
   ["* -> /", / \* /, " / "],
@@ -88,7 +98,109 @@ function maskStrings(line: string): string {
   return line.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, (s) => "\u0000".repeat(s.length));
 }
 
-const KEYWORD_START = /^(return|val|var|let|const|if|else|for|while|do|throw|try|catch|finally|case|default|guard|defer|import|package|func|fun|class|struct|enum|interface|object|switch|when|break|continue|super|this\s*\(|init|override|private|public|internal|protected|static|export|function|async|await|yield|@)/;
+const KEYWORD_START = /^(return|val|var|let|const|if|else|for|while|do|throw|try|catch|finally|case|default|guard|defer|import|package|func|fun|class|struct|enum|interface|object|switch|when|break|continue|super|this\s*\(|init|deinit|subscript|get|set|willSet|didSet|extension|protocol|typealias|associatedtype|where|operator|precedencegroup|actor|mutating|nonmutating|convenience|required|lazy|weak|unowned|fileprivate|open|final|indirect|override|private|public|internal|protected|static|export|function|async|await|yield|@)\b|^@/;
+
+/** A declaration line (Swift/Kotlin/TS): its operators are part of a signature, not code (`static func + (`). */
+const DECLARATION = /^\s*((public|private|internal|fileprivate|open|static|class|final|override|mutating|nonmutating|convenience|required|prefix|postfix|infix|@\w+(\([^)]*\))?)\s+)*(func|fun|subscript|init|deinit|operator|precedencegroup|constructor)\b/;
+
+/** A TS/ArkTS method header with a return type (`toString(): string {`): never a trailing-closure call. */
+const TS_METHOD = /^\s*(async\s+)?[A-Za-z_$][\w$]*\s*(<[^>]*>)?\s*\([^)]*\)\s*:\s*[^=;]+\{\s*$/;
+
+/** Is line `ln` (1-based) inside a constructor / init body? */
+function inConstructor(src: string[], ln: number): boolean {
+  let depth = 0;
+  for (let j = ln - 2; j >= 0 && j >= ln - 400; j--) {
+    const l = maskStrings(src[j].replace(/\/\/.*$/, ""));
+    for (let i = l.length - 1; i >= 0; i--) {
+      if (l[i] === "}") depth++;
+      else if (l[i] === "{" && depth-- === 0) {
+        depth = 0;
+        if (/\b(constructor\s*\(|init\s*[({?!]|init\s*$)/.test(l)) return true;
+        if (DECLARATION.test(l) || TS_METHOD.test(l) || /^\s*(export\s+)?(class|struct|object|interface|enum|extension)\b/.test(l)) return false;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * A local declared without a value (`let font: Font?` / `let x: number;` then `x = ...`): deleting the
+ * assignment uses it before it is set, which Swift and strict TS reject. A `var` whose type admits
+ * nil/undefined starts with that value, so deleting is fine there.
+ */
+function declaredWithoutValue(text: string, name: string): boolean {
+  const n = name.replace(/\$/g, "\\$");
+  const m = new RegExp(`^\\s*(let|var)\\s+${n}\\s*(?::\\s*([^=\\n;]*?))?\\s*;?\\s*$`, "m").exec(text);
+  if (!m) return false;
+  // TS `let x: T | undefined;` may stay unassigned; a Swift `let x: T?` may not.
+  if (m[1] === "let") return !(m[2] && /\b(undefined|null)\b/.test(m[2]));
+  return !(m[2] && /\?\s*$|\b(undefined|null)\b|^Optional</.test(m[2]));
+}
+
+/** Lines of the function body around line `ln` (1-based) up to that line; top-level code: the lines above it. */
+function enclosingFunction(src: string[], ln: number): string {
+  let depth = 0;
+  for (let j = ln - 2; j >= 0; j--) {
+    const l = maskStrings(src[j].replace(/\/\/.*$/, ""));
+    for (let i = l.length - 1; i >= 0; i--) {
+      if (l[i] === "}") depth++;
+      else if (l[i] === "{" && depth-- === 0) {
+        depth = 0;
+        if (DECLARATION.test(l) || TS_METHOD.test(l) || /\bfunction\b|=>\s*\{\s*$|\b(get|set|willSet|didSet)\s*\{/.test(l)) return src.slice(j + 1, ln - 1).join("\n");
+        if (/^\s*((export|public|private|internal|fileprivate|open|final|abstract|data)\s+)*(class|struct|enum|extension|actor|object|interface)\b/.test(l)) return "";
+      }
+    }
+  }
+  return src.slice(0, ln - 1).join("\n");
+}
+
+/** Text of the class/struct declaration around line `ln` (1-based), or "" when there is none. */
+function enclosingType(src: string[], ln: number): string {
+  const head = /^\s*((export|default|public|private|internal|fileprivate|open|final|abstract|data|sealed)\s+)*(class|struct|actor)\b/;
+  let start = -1;
+  for (let j = ln - 2; j >= 0; j--) if (head.test(src[j])) { start = j; break; }
+  if (start < 0) return "";
+  let depth = 0, opened = false;
+  for (let j = start; j < src.length; j++) {
+    for (const c of maskStrings(src[j].replace(/\/\/.*$/, ""))) {
+      if (c === "{") { depth++; opened = true; }
+      if (c === "}") depth--;
+    }
+    if (opened && depth <= 0) return j + 1 >= ln ? src.slice(start, j + 1).join("\n") : "";
+  }
+  return src.slice(start).join("\n");
+}
+
+/**
+ * `name` is a stored field without a default (`id: number;`, `let id: Int`, `val id: Int`): the
+ * compiler requires every constructor to assign it, so deleting that assignment cannot compile.
+ */
+function fieldWithoutDefault(text: string, name: string): boolean {
+  const n = name.replace(/\$/g, "\\$");
+  return new RegExp(`^\\s*((public|private|protected|internal|fileprivate|readonly|final|override|let|var|val)\\s+)*${n}\\s*:\\s*[^=?{}\\n]+?[^?]\\s*;?\\s*$`, "m").test(text)
+    && !new RegExp(`^\\s*.*\\b(lateinit|optional)\\b.*\\b${n}\\s*:`, "m").test(text);
+}
+
+/**
+ * `x == null || x.y`, `x != null && x.y`, and `!x || x.y` / `x && x.y` for an `x` declared optional or
+ * nullable in this file: with the other operator the compiler sees a dereference of a missing value.
+ * (For a plain `string`, `s && s.length` -> `||` still compiles, so truthiness alone is not enough.)
+ */
+function nullGuard(masked: string, op: "&&" | "||", text: string): boolean {
+  const i = masked.search(new RegExp(` ${op === "&&" ? "&&" : "\\|\\|"}(?=\\s|$)`));
+  if (i < 0) return false;
+  const left = masked.slice(0, i), right = masked.slice(i + op.length + 2);
+  const g = op === "||"
+    ? /(?:!\s*([\w$.]+)|([\w$.]+)\s*===?\s*(?:null|undefined|nil))\s*\)*\s*$/.exec(left)
+    : /(?:(?<![!=<>]\s*)\b([\w$.]+)|([\w$.]+)\s*!==?\s*(?:null|undefined|nil))\s*$/.exec(left);
+  const name = g?.[2] ?? g?.[1];
+  if (!name) return false;
+  if (!g?.[2]) {
+    const n = name.split(".").pop()!.replace(/\$/g, "\\$");
+    if (!new RegExp(`\\b${n}\\s*\\?\\s*:|\\b${n}\\s*:[^=;,)\\n]*\\|\\s*(null|undefined)\\b|\\b${n}\\s*:\\s*(null|undefined)\\s*\\|`).test(text)) return false;
+  }
+  return new RegExp(`^\\(*\\s*${name.replace(/[.$]/g, "\\$&")}(\\?|!)?\\.`).test(right);
+}
 
 /** Parentheses and braces balance (strings masked) and never go negative. */
 function balanced(t: string): boolean {
@@ -117,6 +229,13 @@ function isCallStatement(t: string): boolean {
   return balanced(t) && !/[^=!<>]=[^=]/.test(head);
 }
 
+/** `name = value`, `a.b.c = value`, `n += 1` on one line (not a declaration, not `this.`/`self.`). */
+function isPlainAssignment(t: string): boolean {
+  const m = maskStrings(t);
+  return !KEYWORD_START.test(t) && /^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\s*([+\-*\/%]|\?\?)?=(?![=>])/.test(m)
+    && !/^(this|self)\./.test(m) && balanced(t) && !/[{(\[]\s*$/.test(m);
+}
+
 /** A member assignment statement on one line: `this.total = a + b;`, `self.state = .idle`. */
 function isMemberAssignment(t: string): boolean {
   const m = maskStrings(t);
@@ -126,10 +245,17 @@ function isMemberAssignment(t: string): boolean {
 /** Logging statements: mutating them (or the string concatenation inside) changes nothing a test should check. */
 // Includes project wrappers named like loggers (LogUtils.d, AppLogger.info, this.logger.warn, TLog.e) —
 // a capital "Log" suffix, so Catalog/Dialog are not matched.
-const LOG_CALL = /^(await\s+)?((this|self)\.)?(console|hilog|Log|Logger|logger|log|Timber|print|println|debugPrint|NSLog|os_log|(?:[A-Za-z_$][\w$]*?)?(Log|Logger|LogUtils?|Logging)|[a-z][\w$]*?(Logger|LogUtils?))\b\s*[.(]/;
+const LOG_CALL = new RegExp([
+  String.raw`^(await\s+)?((this|self)\.)?(console|hilog|Log|Logger|logger|log|Timber|print|println|debugPrint|NSLog|os_log)\b\s*[.(]`,
+  // Wrappers must call a logging method: `auditLog.record(x)` / `changeLog.push(x)` are domain code.
+  String.raw`^(await\s+)?((this|self)\.)?(?:[A-Za-z_$][\w$]*?)?(Log|Logger|LogUtils?|Logging)\s*\.\s*(v|d|i|w|e|f|debug|info|warn|warning|error|fatal|trace|verbose|log)\s*\(`,
+].join("|"));
 
-export function mutantsFor(text: string, lines: number[]): Mutant[] {
-  const out = mutantsForLines(text, lines);
+/** `literalNarrowing`: the compiler narrows `x === 64` to the literal type (strict TS/ArkTS under hvigor). */
+export interface MutantOptions { literalNarrowing?: boolean }
+
+export function mutantsFor(text: string, lines: number[], opts: MutantOptions = {}): Mutant[] {
+  const out = mutantsForLines(text, lines, opts);
   const seen = new Map<number, number>();
   for (const m of out) {
     const n = (seen.get(m.line) ?? 0) + 1;
@@ -139,7 +265,71 @@ export function mutantsFor(text: string, lines: number[]): Mutant[] {
   return out;
 }
 
-function mutantsForLines(text: string, lines: number[]): Mutant[] {
+/**
+ * `c === 0x2D || c === 0x2E` (also spread over lines): flipping the first comparison to `!==`, or the
+ * `||` after it to `&&`, makes the type checker narrow `c` to that literal on the right-hand side and
+ * reject the next comparison of `c` ("no overlap"). The last comparison of a chain is fine.
+ * `at`: index of the mutated operator in the line; `op`: its text.
+ */
+function literalChain(src: string[], ln: number, at: number, op: string): boolean {
+  // Literal types: numbers, strings, booleans, null/undefined, and enum members (`DateType.YmdHms`).
+  const lit = String.raw`(?:0x[\da-fA-F]+|\d+(?:\.\d+)?|\u0000+|true|false|null|undefined|[A-Z][\w$]*\.[A-Za-z_$][\w$]*)`;
+  const id = String.raw`[A-Za-z_$][\w$.]*`;
+  const line = maskStrings(src[ln - 1].replace(/\/\/.*$/, ""));
+  // The rest of the condition: following lines while each one ends in `||` / `&&`.
+  let next = "";
+  for (let j = ln, prev = line; j < src.length && j < ln + 20 && /(\|\||&&)\s*$/.test(prev); j++) {
+    prev = maskStrings(src[j].replace(/\/\/.*$/, ""));
+    next += " " + prev;
+  }
+  const before = line.slice(0, at), after = line.slice(at + op.length) + " " + next;
+  let v: string | undefined;
+  let rest = after;
+  if (op.includes("=")) {
+    // `v === lit` or `lit === v`.
+    const left = new RegExp(String.raw`(${id})\s*$`).exec(before)?.[1], afterLit = new RegExp(String.raw`^\s*${lit}(?![\w$])`).exec(after);
+    const leftLit = new RegExp(String.raw`(?:^|[^\w$.])${lit}\s*$`).test(before), right = new RegExp(String.raw`^\s*(${id})`).exec(after);
+    if (left && afterLit && !new RegExp(String.raw`^${lit}$`).test(left)) { v = left; rest = after.slice(afterLit[0].length); }
+    else if (leftLit && right) { v = right[1]; rest = after.slice(right[0].length); }
+    if (!v) return false;
+    // In `if (v != 2) ... else if (v == 3)` the else branches see v narrowed as well.
+    if (/\bif\s*\(/.test(before)) rest += " " + elseIfConditions(src, ln);
+  } else {
+    v = new RegExp(String.raw`(${id})\s*[!=]==?\s*${lit}\s*\)*\s*$`).exec(before)?.[1]
+      ?? new RegExp(String.raw`${lit}\s*[!=]==?\s*(${id})\s*\)*\s*$`).exec(before)?.[1];
+    if (!v) return false;
+    // A new `&&` narrows only its right operand.
+    let depth = 0;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "(") depth++;
+      else if (rest[i] === ")" && --depth < 0) { rest = rest.slice(0, i); break; }
+      else if (depth === 0 && rest.startsWith("||", i)) { rest = rest.slice(0, i); break; }
+    }
+  }
+  const name = v.replace(/[.$]/g, "\\$&");
+  // `typeof v === 'object'` compares the typeof result, not v.
+  return new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${name}\s*[!=]==?\s*${lit}|${lit}\s*[!=]==?\s*${name}(?![\w$.])`).test(rest);
+}
+
+/** Conditions of the `else if (...)` branches that follow the `if` on line `ln` (same chain). */
+function elseIfConditions(src: string[], ln: number): string {
+  let depth = 0;
+  const out: string[] = [];
+  for (let j = ln - 1; j < src.length && j < ln + 200; j++) {
+    let l = maskStrings(src[j].replace(/\/\/.*$/, ""));
+    if (j > ln - 1 && depth === 1 && /^\s*\}\s*else\s+if\b/.test(l)) out.push(l);
+    // The first line may itself be `} else if (...) {`: count from its `if`.
+    if (j === ln - 1) l = l.slice(Math.max(0, l.search(/\bif\s*\(/)));
+    for (const c of l) {
+      if (c === "{") depth++;
+      if (c === "}") depth--;
+    }
+    if (j > ln - 1 && depth <= 0) break;
+  }
+  return out.join(" ");
+}
+
+function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mutant[] {
   const src = text.split("\n");
   const out: Mutant[] = [];
   for (const ln of lines) {
@@ -148,12 +338,35 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
     const t = original.trim();
     if (!t || t.startsWith("//") || t.startsWith("*") || t.startsWith("/*") || t.startsWith("import ") || t.startsWith("@") || /^(case|default)\b.*:$/.test(t)) continue;
     if (LOG_CALL.test(t)) continue;
-    const masked = maskStrings(original.replace(/\/\/.*$/, (c) => " ".repeat(c.length)));
+    let masked = maskStrings(original.replace(/\/\/.*$/, (c) => " ".repeat(c.length)));
+    // On a declaration line only the body is code: `static func + (l, r) -> T {` has none,
+    // `fun answer() = 1` has `1`. Blank the signature so its operators are never mutated.
+    if (DECLARATION.test(original)) {
+      const open = masked.indexOf("(");
+      let depth = 0, close = -1;
+      for (let i = Math.max(0, open); open >= 0 && i < masked.length; i++) {
+        if (masked[i] === "(") depth++;
+        if (masked[i] === ")" && --depth === 0) { close = i; break; }
+      }
+      const rest = close >= 0 ? masked.slice(close + 1) : "";
+      const body = /\{|(?<![=!<>])=(?![=>])/.exec(rest);
+      const cut = body ? close + 1 + body.index + 1 : masked.length;
+      masked = " ".repeat(cut) + masked.slice(cut);
+    }
     for (const [op, re, rep] of OPERATORS) {
       const m = re.exec(masked);
       if (!m) continue;
+      if ((op === "|| -> &&" && nullGuard(masked, "||", text)) || (op === "&& -> ||" && nullGuard(masked, "&&", text))) continue;
+      if (opts.literalNarrowing && /^(=== -> !==|!== -> ===|== -> !=|!= -> ==|\|\| -> &&|&& -> \|\|)$/.test(op) && literalChain(src, ln, m.index, m[0])) continue;
+      // `"0" + s` is a concatenation: `"0" - s` never compiles.
+      if (op === "+ -> -" && (masked[m.index - 1] === "\u0000" || masked[m.index + m[0].length] === "\u0000")) continue;
       const mutated = original.slice(0, m.index) + rep + original.slice(m.index + m[0].length);
       out.push({ line: ln, op, original, mutated });
+    }
+    // `a ?? fallback` -> `fallback`: does any test see the value when it is present?
+    const nc = /(?<![\w$.)\]])([A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*|\([^()]*\)|\[[^\]]*\])*)\s*\?\?(?!=)\s*/.exec(masked);
+    if (nc && !/^(return|await|throw|new|typeof|case)$/.test(nc[1])) {
+      out.push({ line: ln, op: "?? -> fallback", original, mutated: original.slice(0, nc.index) + original.slice(nc.index + nc[0].length) });
     }
     // Negate a simple condition: if (flag) / if (a.b) / if (list.isEmpty()) -> if (!(...)).
     const cond = /\bif\s*\(\s*(!?[A-Za-z_$][\w$.]*(?:\(\))?)\s*\)/.exec(masked);
@@ -162,9 +375,9 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
       out.push({ line: ln, op: "negate condition", original, mutated: original.slice(0, cond.index) + inner + original.slice(cond.index + cond[0].length) });
     } else {
       // Swift/Kotlin-style without parentheses: `if flag {`, `guard isReady else {`, `while hasMore {`.
-      const bare = /\b(if|guard|while)\s+(!?)([A-Za-z_$][\w$.]*(?:\(\))?)\s*(\{|else\b)/.exec(masked);
+      const bare = /\b(if|guard|while)\s+(!?)([A-Za-z_$][\w$.]*(?:\([^()]*\))?)\s*(\{|else\b)/.exec(masked);
       if (bare && !/^(let|var|case)$/.test(bare[3])) {
-        const at = bare.index + bare[0].indexOf(bare[2] + bare[3]);
+        const at = bare.index + bare[0].indexOf(bare[2] + bare[3], bare[1].length);
         const mutated = original.slice(0, at) + (bare[2] ? original.slice(at + 1) : `!${original.slice(at)}`);
         out.push({ line: ln, op: "negate condition", original, mutated });
       }
@@ -179,19 +392,57 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
     if (num) {
       out.push({ line: ln, op: `${num[1]} -> ${Number(num[1]) + 1}`, original, mutated: original.slice(0, num.index) + String(Number(num[1]) + 1) + original.slice(num.index + num[1].length) });
     }
+    // Strings appended to an accumulator (`format += "yyyy"`): is the piece checked?
+    const append = /(\+=\s*)("(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+')\s*;?\s*$/.exec(maskStrings(original).indexOf("//") >= 0 ? original.slice(0, maskStrings(original).indexOf("//")) : original);
+    if (append && !/\\\(|\$\{/.test(append[2])) {
+      const at = append.index + append[1].length;
+      const q = append[2][0];
+      out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + q + q + original.slice(at + append[2].length) });
+    }
     // Returned string literals (messages, keys, formats): does a test look at the text at all?
-    const ret = /\breturn\s+("(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+')/.exec(original);
+    // `masked` has comments blanked already; find the comment in the string-masked original.
+    const comment = maskStrings(original).indexOf("//");
+    const ret = /\breturn\s+("(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+')/.exec(comment >= 0 ? original.slice(0, comment) : original);
     if (ret && !/\\\(|\$\{/.test(ret[1])) {
       const at = ret.index + ret[0].length - ret[1].length;
       const q = ret[1][0];
       out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + q + q + original.slice(at + ret[1].length) });
     }
+    // Thrown messages (`throw new Error('bad input')`): does a test look at which error it was?
+    const thrown = /\bthrow\b.*?("(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+'|`[^`]+`)/.exec(comment >= 0 ? original.slice(0, comment) : original);
+    if (thrown && !/\\\(/.test(thrown[1])) {
+      const at = thrown.index + thrown[0].length - thrown[1].length;
+      const q = thrown[1][0];
+      out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + q + q + original.slice(at + thrown[1].length) });
+    }
+    // Returned template literals (`return \`${a}-${b}\``) are built strings too.
+    const tpl = /\breturn\s+(`[^`]*`)/.exec(comment >= 0 ? original.slice(0, comment) : original);
+    if (tpl && tpl[1].length > 2) {
+      const at = tpl.index + tpl[0].length - tpl[1].length;
+      out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + "``" + original.slice(at + tpl[1].length) });
+    }
+    const before = out.filter((x) => x.line === ln).length;
     // Statement deletion: does any test notice the call (or the stored value) never happens?
-    if (isCallStatement(t)) {
+    // Not when the statement continues on the next line (`x = items` + `.filter(...)`) or this line
+    // continues the previous one: deleting part of an expression only yields a syntax error.
+    const next = src.slice(ln).find((l) => l.trim() && !/^\s*\/\//.test(l))?.trim() ?? "";
+    const prev = [...src.slice(0, ln - 1)].reverse().find((l) => l.trim() && !/^\s*\/\//.test(l))?.replace(/\/\/.*$/, "").trimEnd() ?? "";
+    const partOfLonger = /^(\?\.|\.|[+\-*/%]|&&|\|\||\?\?|\?|:|\)|\]|,)/.test(next) || /([=(\[,.+\-*/%&|:]|=>|\s\?)$/.test(prev);
+    // A delegating initializer must call `self.init`: deleting it never compiles.
+    if (partOfLonger || /^self\.init\b/.test(t)) { /* no deletion mutant */ } else if (isCallStatement(t)) {
       out.push({ line: ln, op: "delete statement", original, mutated: original.replace(t, "/* unitgen: statement deleted */") });
     } else if (isMemberAssignment(t)) {
+      const field = /^(?:this|self)\.([A-Za-z_$][\w$]*)\s*=/.exec(t)?.[1];
+      if (field && inConstructor(src, ln) && fieldWithoutDefault(enclosingType(src, ln), field)) continue;
       out.push({ line: ln, op: "delete assignment", original, mutated: original.replace(t, "/* unitgen: assignment deleted */") });
-    } else if (!KEYWORD_START.test(t.replace(/^(try|await)\s+/, "")) && (/^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\($/.test(t) || (CALL_START.test(t) && /\{\s*(\w+(\s*,\s*\w+)*\s+in)?\s*$/.test(t) && !/[^=!<>]=[^=]/.test(maskStrings(t).split("{")[0])))) {
+    } else if (before === 0 && isPlainAssignment(t)) {
+      // `type = .string`, `obj.secret = undefined`, `count += 1`: otherwise nothing on such a line
+      // is mutated at all. Only when no other operator applies, to keep the budget for conditions.
+      const field = /^([A-Za-z_$][\w$]*)\s*=/.exec(t)?.[1];
+      if (field && inConstructor(src, ln) && fieldWithoutDefault(enclosingType(src, ln), field)) continue;
+      if (field && declaredWithoutValue(enclosingFunction(src, ln), field)) continue;
+      out.push({ line: ln, op: "delete assignment", original, mutated: original.replace(t, "/* unitgen: assignment deleted */") });
+    } else if (!DECLARATION.test(original) && !TS_METHOD.test(original) && !KEYWORD_START.test(t.replace(/^(try|await)\s+/, "")) && (/^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\($/.test(t) || (CALL_START.test(t) && /\{\s*(\w+(\s*,\s*\w+)*\s+in)?\s*$/.test(t) && !/[^=!<>]=[^=]/.test(maskStrings(t).split("{")[0])))) {
       // Multi-line call: `dao.insert(` ... `)`, or a trailing closure `builder.add(x) {` ... `}`:
       // delete the whole statement if it closes cleanly.
       let p = 0, b = 0;
@@ -267,13 +518,19 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   const lines = Object.entries(cov[absTarget] ?? {}).filter(([, h]) => h > 0).map(([l]) => Number(l));
   if (!lines.length) throw new Error(`${relTest} covers no line of ${relPath(absTarget, adapter.root)}`);
   const original = readFile(absTarget);
-  const generated = mutantsFor(original, lines);
-  const key = (mu: Mutant) => `${mu.line}|${mu.op}|${mu.mutated}`;
+  const generated = mutantsFor(original, lines, { literalNarrowing: /^hvigor/.test(adapter.runnerName ?? "") });
+  // The original text is part of the key: deletions share their `mutated` placeholder, and a changed
+  // source line must not inherit an outcome measured on different code.
+  const key = (mu: Mutant) => `${mu.line}|${mu.op}|${mu.original}|${mu.mutated}`;
   // Mutants the user judged equivalent are not run: `12` = every mutant on line 12, `12.2` = one
   // mutant. Ids are resolved to a stable key (line, operator, mutated text) the first time they are
   // used, so a later unitgen version that numbers mutants differently cannot exclude the wrong one.
   const eqAll = (state.data.equivalent ??= {});
+  // Marks recorded before the key included the original text (`key:line|op|mutated`): upgrade in place.
+  const legacy = (mu: Mutant) => `key:${mu.line}|${mu.op}|${mu.mutated}`;
   const specs = (eqAll[relTest] ?? []).map(String).map((x) => {
+    const old = x.startsWith("key:") && !generated.some((g) => `key:${key(g)}` === x) ? generated.find((g) => legacy(g) === x) : undefined;
+    if (old) return `key:${key(old)}`;
     if (!/^\d+\.\d+$/.test(x)) return x;
     const mu = generated.find((g) => g.id === x);
     if (!mu) { log(`warning: --equivalent ${x}: no such mutant on the covered lines (ignored)`); return x; }
@@ -292,11 +549,13 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   const prevFile = state.file("mutation", `${path.basename(absTest)}.json`);
   const prev = readJson<{ results?: MutantResult[] } | null>(prevFile, null)?.results ?? [];
   const prevBy = new Map(prev.map((r) => [key(r), r]));
-  const valid = (r: MutantResult | undefined) => !!r && (r.outcome === "stillborn" || r.testHash === testHash);
+  const runner = adapter.runnerName;
+  const valid = (r: MutantResult | undefined) => !!r && r.runner === runner && (r.outcome === "stillborn" || r.testHash === testHash);
   const rank = (mu: Mutant) => {
     const r = prevBy.get(key(mu));
     if (!r) return 1;
-    if (r.outcome === "survived" || r.outcome === "error") return 0;
+    // A survivor measured with this exact test file is decided; after strengthening it goes first.
+    if (r.outcome === "error" || (r.outcome === "survived" && !valid(r))) return 0;
     return valid(r) ? 3 : 2;
   };
   const fresh = all.filter((mu) => rank(mu) < 3);
@@ -317,6 +576,10 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
     fs.copyFileSync(absTarget, backup);
     writeFile(journal(state), JSON.stringify({ target: absTarget, backup }));
     const base = path.basename(absTest).replace(/\W+/g, "_");
+    // Mutant runs print one result line each; their build/test output goes to the per-mutant logs only
+    // (hundreds of test-output lines per mutant otherwise flood an agent's context).
+    const quiet = process.env.UNITGEN_QUIET;
+    process.env.UNITGEN_QUIET = "1";
     try {
       const clean = await adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: `mutant-${base}-0-clean` });
       if (!clean.ok || clean.tests.some((t) => t.status === "failed")) {
@@ -341,7 +604,8 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
         const timedOut = r.infraError === "timeout" || /TIMEOUT after/.test(r.excerpt);
         if (!timedOut && r.seconds > 0) done.push(r.seconds);
         let outcome: MutantResult["outcome"];
-        if (timedOut) outcome = "killed";
+        // A hang is detected, but not by an assertion.
+        if (timedOut) outcome = "killed-crash";
         else if (r.infraError) outcome = "error";
         else if (!r.compiled) outcome = "stillborn";
         else if (!r.ok || r.tests.some((t) => t.status === "failed")) {
@@ -351,11 +615,13 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
           outcome = asserted ? "killed" : "killed-crash";
         }
         else outcome = r.tests.length ? "survived" : "error";
-        results.push({ ...mu, outcome, testHash });
+        results.push({ ...mu, outcome, testHash, ...(runner ? { runner } : {}) });
         const shown = outcome === "stillborn" ? "did not compile (discarded)" : timedOut ? `killed (no result within ${timeoutSec}s: the mutant hangs)` : outcome;
-        log(`  mutant ${i + 1} (budget ${max}, ${fresh.length} not yet killed of ${all.length}) [${mu.id}] line ${mu.line} (${mu.op}): ${shown}`);
+        const left = fresh.length - results.length;
+        log(`  mutant ${i + 1} (budget ${max}, ${left} still to decide of ${all.length}) [${mu.id}] line ${mu.line} (${mu.op}): ${shown}`);
       }
     } finally {
+      if (quiet === undefined) delete process.env.UNITGEN_QUIET; else process.env.UNITGEN_QUIET = quiet;
       fs.writeFileSync(absTarget, original);
       fs.unlinkSync(backup);
       fs.unlinkSync(journal(state));
@@ -383,7 +649,7 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   const acc = state.data.accepted.find((a) => a.testFile === relTest);
   if (acc) {
     const first = acc.mutation?.first ?? Math.round(score * 100) / 100;
-    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first, crashes, equivalent: excluded.length, testHash: fileHash(absTest) };
+    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first, crashes, equivalent: excluded.length, testHash: fileHash(absTest), evaluated: current.length, candidates: all.length };
     state.save();
   }
   writeFile(prevFile, JSON.stringify({ ...report, results: report.history }, null, 2));

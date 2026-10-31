@@ -31,6 +31,8 @@ export interface RunOpts {
   signal?: AbortSignal;
   /** Stream build output to stderr; stdout remains reserved for CLI results / JSON. */
   stream?: boolean;
+  /** Only stream lines this accepts (the log file still gets everything). */
+  streamLine?: (line: string) => boolean;
 }
 
 const cancellation = new AbortController();
@@ -74,10 +76,30 @@ export function processTree(roots: number[], table: ProcInfo[] = processTable())
   return [...seen.values()];
 }
 
-/** Signal each process, and the process group of each group leader among them. */
-export function signalAll(procs: { pid: number; pgid?: number }[], hard: boolean): void {
+/** Processes whose command line matches `pred`, with their start time (for `signalAll`'s identity check). */
+export function processesMatching(pred: (command: string) => boolean): { pid: number; start: string; command: string }[] {
+  if (process.platform === "win32") return [];
+  const r = spawnSync("ps", ["-A", "-o", "pid=,lstart=,command="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" }, maxBuffer: 64 * 1024 * 1024 });
+  const out: { pid: number; start: string; command: string }[] = [];
+  for (const line of (r.stdout ?? "").split("\n")) {
+    // lstart under LC_ALL=C: "Sat Oct 31 11:25:28 2026"
+    const m = /^\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d\d:\d\d:\d\d\s+\d{4})\s+(.*)$/.exec(line);
+    if (m && Number(m[1]) !== process.pid && pred(m[3])) out.push({ pid: Number(m[1]), start: m[2], command: m[3] });
+  }
+  return out;
+}
+
+/**
+ * Signal each process, and the process group of each group leader among them. Entries with a start
+ * time are signalled only while that exact process (PID *and* start time) still exists: a PID seen
+ * earlier may since have been reused by an unrelated process.
+ */
+export function signalAll(procs: { pid: number; pgid?: number; start?: string }[], hard: boolean): void {
   const sig = hard ? "SIGKILL" : "SIGTERM";
+  const table = procs.some((p) => p.start) ? processTable() : [];
+  const live = new Map(table.map((p) => [p.pid, p]));
   for (const p of procs) {
+    if (p.start && live.get(p.pid)?.start !== p.start) continue;
     for (const target of p.pgid === p.pid ? [-p.pid, p.pid] : [p.pid]) {
       try { process.kill(target, sig); } catch { /* already gone */ }
     }
@@ -126,6 +148,7 @@ export async function runAsync(cmd: string[], opts: RunOpts = {}): Promise<CmdRe
     const heartbeat = setInterval(() => {
       if (stream) log(`still running (${Math.floor((Date.now() - start) / 1000)}s); log: ${opts.logFile ?? "stderr"}`);
     }, 30000);
+    let pending = "";
     const capture = (chunk: string) => {
       size += Buffer.byteLength(chunk);
       if (size > 256 * 1024 * 1024) { overflow = true; stop(); return; }
@@ -134,7 +157,14 @@ export async function runAsync(cmd: string[], opts: RunOpts = {}): Promise<CmdRe
         try { fs.appendFileSync(opts.logFile, chunk); }
         catch (e) { logError = e as Error; stop(); }
       }
-      if (stream) process.stderr.write(chunk);
+      if (stream && !opts.streamLine) process.stderr.write(chunk);
+      else if (stream) {
+        pending += chunk;
+        const lines = pending.split("\n");
+        pending = lines.pop() ?? "";
+        const shown = lines.filter((l) => opts.streamLine!(l));
+        if (shown.length) process.stderr.write(shown.join("\n") + "\n");
+      }
     };
     child.stdout.setEncoding("utf8").on("data", capture);
     child.stderr.setEncoding("utf8").on("data", capture);
@@ -208,6 +238,24 @@ export function which(name: string): string | undefined {
 
 export function exists(p: string): boolean {
   return fs.existsSync(p);
+}
+
+/**
+ * The path with symlinks resolved (`/tmp/x` -> `/private/tmp/x` on macOS), also for a file that does
+ * not exist yet (its nearest existing parent is resolved). Build tools report whichever spelling they
+ * were given, so every path unitgen compares goes through this.
+ */
+export function canonical(p: string): string {
+  const abs = path.resolve(p);
+  const tail: string[] = [];
+  let cur = abs;
+  for (;;) {
+    try { return path.join(fs.realpathSync(cur), ...tail.reverse()); } catch { /* does not exist (yet) */ }
+    const up = path.dirname(cur);
+    if (up === cur) return abs;
+    tail.push(path.basename(cur));
+    cur = up;
+  }
 }
 
 export function readFile(p: string): string {
@@ -329,5 +377,9 @@ export function preferOwnTest(all: string[], source: string | undefined, fallbac
   if (!source) return fallback.slice(0, limit);
   const base = path.basename(source).replace(/\.[^.]+$/, "");
   const own = all.filter((f) => new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(Test|Tests|Spec)?(\.test)?\.[^.]+$`).test(path.basename(f)) && !/UnitGen|\.unitgen\./.test(path.basename(f)));
-  return [...new Set([...own, ...fallback])].slice(0, limit);
+  // Then tests whose names share a word with the source (ISOFormatter -> TestFormatters).
+  const words = (s: string) => (s.match(/[A-Z]{2,}(?=[A-Z][a-z]|$)|[A-Z]?[a-z]+|\d+/g) ?? []).map((w) => w.toLowerCase().replace(/s$/, "")).filter((w) => w.length > 3 && !["test", "spec", "unitgen"].includes(w));
+  const mine = new Set(words(base));
+  const related = all.filter((f) => !/UnitGen|\.unitgen\./.test(path.basename(f)) && words(path.basename(f).replace(/\.[^.]+$/, "")).some((w) => mine.has(w)));
+  return [...new Set([...own, ...related, ...fallback])].slice(0, limit);
 }

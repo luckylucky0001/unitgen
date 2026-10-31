@@ -71,6 +71,11 @@ export function acquireProjectLock(root: string, onStale: (msg: string) => void 
         const how = process.platform === "win32" ? live.map((p) => `taskkill /pid ${p} /T /F`).join(" & ") : `kill -TERM ${live.map((p) => `-${p}`).join(" ")}`;
         throw new Error(`a previous unitgen command (PID ${owner.pid}) was killed, but its build processes are still running (${live.join(", ")}). Stop them (${how}) and run the command again; unitgen then restores any interrupted mutation by itself.`);
       }
+      // Another command may have taken the stale lock over meanwhile: only remove the exact lock we judged.
+      const again = readLock(file);
+      if (!again || again.pid !== owner.pid || again.at !== owner.at) {
+        throw new Error(`project locked: another unitgen command (PID ${again?.pid ?? "unknown"}) just took over the stale lock. Wait for it to finish.`);
+      }
       fs.rmSync(file, { force: true });
       onStale(`removed a stale lock: the unitgen command that held it (PID ${owner.pid}, ${owner.at}) is no longer running`);
     }

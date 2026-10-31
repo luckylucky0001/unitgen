@@ -5,13 +5,14 @@
 // platform calls); anything touching @kit.* / @ohos.* APIs is stubbed and should be verified with
 // hvigor on a real toolchain. Because the shim does not run the ArkTS compiler, generated tests are
 // also linted against the ArkTS language restrictions (arkts-no-any-unknown, ...).
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Coverage, parseLcov } from "../coverage.ts";
 import { estimateExecutable } from "../targets.ts";
-import { errorExcerpt, exists, json5Parse, log, preferOwnTest, readFile, readJson, relPath, runAsync, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
+import { errorExcerpt, exists, json5Parse, log, preferOwnTest, processesMatching, readFile, readJson, relPath, runAsync, RunCancelled, signalAll, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -158,9 +159,19 @@ export function parseHvigorCoverage(json: string, sourceRoots: string[], source:
     const counts = f.summary?.lines?.executedLineCount ?? [];
     let text: string[] = [];
     try { text = source(file).split("\n"); } catch { /* keep raw counts */ }
+    const regionText = (r: HvigorRegion) => {
+      const ls = text.slice(r.startLoc.line - 1, r.endLoc.line);
+      if (!ls.length) return "";
+      ls[ls.length - 1] = ls[ls.length - 1].slice(0, Math.max(0, r.endLoc.col - 1));
+      ls[0] = ls[0].slice(Math.max(0, r.startLoc.col - 1));
+      return ls.join("\n");
+    };
+    // In a type position (after `:`), without a body, and returning a type: `(a: T) => U | V[]`.
+    // An object-literal arrow (`add: (a, b) => { ... }` or `=> a + b`) is real code.
     const phantom = (r: HvigorRegion) => {
       const before = (text[r.startLoc.line - 1] ?? "").slice(0, Math.max(0, r.startLoc.col - 1)).replace(/<[^<>]*>\s*$/, "").trimEnd();
-      return before.endsWith(":");
+      const body = regionText(r);
+      return before.endsWith(":") && !body.includes("{") && /=>\s*[A-Za-z_$][\w$.]*(\s*<[^>]*>)?(\[\])*(\s*\|\s*[A-Za-z_$][\w$.]*(\s*<[^>]*>)?(\[\])*)*\s*$/.test(body);
     };
     const realZero = new Set<number>();
     const phantomZero = new Set<number>();
@@ -191,10 +202,15 @@ export function parseArkTsErrors(text: string): { file: string; line: number; co
 }
 
 /** Local names imported from @kit.* / @ohos.* / @system.* that the code (outside import lines) actually uses. */
+/** ArkUI globals that need no import: dialogs shown by the UI framework (only mocks in tests). */
+const ARKUI_DIALOGS = ["AlertDialog", "ActionSheet", "DatePickerDialog", "TimePickerDialog", "TextPickerDialog", "CalendarPickerDialog"];
+const ARKUI_GLOBALS = ["Color", "Alignment", "ButtonStyleMode", "AppStorage", "getContext", ...ARKUI_DIALOGS];
+
 export function usedPlatformImports(text: string): string[] {
   const body = text.replace(/^\s*import\s[^;\n]*(;|$)/gm, "");
   const out: string[] = [];
-  for (const m of text.matchAll(/import\s+(?:type\s+)?([\s\S]*?)\s+from\s+['"]@(?:kit|ohos|system|arkts|hms)\.[^'"]+['"]/g)) {
+  // The clause may span lines (`import {\n a,\n b\n} from '@kit.X'`) but never another import's `from`.
+  for (const m of text.matchAll(/import\s+(?:type\s+)?((?:(?!\bfrom\b|\bimport\b|;)[\s\S])*?)\s+from\s+['"]@(?:kit|ohos|system|arkts|hms)\.[^'"]+['"]/g)) {
     if (/^type\b/.test(m[0].replace(/^import\s+/, ""))) continue;
     const names = m[1].replace(/[{}]/g, " ").split(/[,\s]+/).filter(Boolean);
     // `a as b` -> b; `* as ns` -> ns
@@ -225,6 +241,12 @@ export class HarmonyAdapter implements Adapter {
     return !!profilePath(root) && (exists(path.join(root, "oh-package.json5")) || exists(path.join(root, "hvigorfile.ts")));
   }
 
+  /** ohpm as a command to type: DevEco's bundled one is usually not on PATH. */
+  private ohpm(): string {
+    const bin = which("ohpm") ? undefined : this.toolchain()?.env.PATH?.split(path.delimiter).map((d) => path.join(d, "ohpm")).find(exists);
+    return bin ? (/\s/.test(bin) ? `"${bin}"` : bin) : "ohpm";
+  }
+
   private mode(): "hvigor" | "shim" {
     if (process.env.UNITGEN_HARMONY_MODE === "shim") return "shim";
     if (process.env.UNITGEN_HARMONY_MODE === "hvigor") return "hvigor";
@@ -237,7 +259,7 @@ export class HarmonyAdapter implements Adapter {
     if (!this.toolchain()) return "no DevEco Studio / Command Line Tools for HarmonyOS found (set DEVECO_STUDIO_HOME)";
     if (!profileIsReal(this.root)) return "build-profile.json5 is missing (only a template is committed)";
     if (!this.hypiumDeclared()) return "no oh-package.json5 declares @ohos/hypium (devDependencies), which local unit tests need";
-    if (!exists(path.join(this.root, "oh_modules"))) return "oh_modules/ is missing: run `ohpm install` in the project";
+    if (!exists(path.join(this.root, "oh_modules"))) return `oh_modules/ is missing: run \`${this.ohpm()} install\` in the project`;
     // hvigor refuses an explicit compileSdkVersion other than the installed SDK's API level.
     const tc = this.toolchain()!;
     const want = this.compileApi();
@@ -375,7 +397,7 @@ export class HarmonyAdapter implements Adapter {
     const declared = [path.join(this.root, "oh-package.json5"), ...ms.map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists)
       .some((p) => /"dependencies"\s*:\s*\{\s*"/.test(readFile(p).replace(/\/\/.*$/gm, "")));
     if (declared && !exists(path.join(this.root, "oh_modules")) && Object.keys(this.remoteDeps()).length) {
-      lines.push("warning: oh-package.json5 declares dependencies but oh_modules/ is missing: run `ohpm install`. Until then files importing those packages are ranked as `platform` and cannot be verified.");
+      lines.push(`warning: oh-package.json5 declares dependencies but oh_modules/ is missing: run \`${this.ohpm()} install\`. Until then files importing those packages are ranked as \`platform\` and cannot be verified.`);
     }
     const pkgs = [path.join(this.root, "oh-package.json5"), ...ms.map((m) => path.join(m.dir, "oh-package.json5"))].filter(exists);
     if (!this.hypiumDeclared() && pkgs.length) {
@@ -423,7 +445,8 @@ export class HarmonyAdapter implements Adapter {
     if (UI_RE.test(full)) {
       // Components often sit next to exported helpers / view models in the same file: those are logic.
       text = arkui.stripArkUI(full).text;
-      const exported = /^\s*export\s+(default\s+)?(abstract\s+)?(class|function|const|let)\s+\w+/m.test(text.replace(/^\s*export\s+(default\s+)?class\s+\w+\s*\{\}\s*$/gm, ""));
+      // Stubs stripArkUI leaves for structs and @Builder functions are not exports of logic.
+      const exported = /^\s*export\s+(default\s+)?(abstract\s+)?(class|function|const|let)\s+\w+/m.test(text.replace(/^\s*export\s+(default\s+)?(class|function)\s+\w+\s*(\(\s*\))?\s*\{\}\s*$/gm, ""));
       if (!exported || estimateExecutable(text).length < 5) return "ui";
     }
     if (/extends\s+(UIAbility|AbilityStage|FormExtensionAbility|\w*ExtensionAbility)\b/.test(text)) return "entry";
@@ -435,8 +458,8 @@ export class HarmonyAdapter implements Adapter {
     // $r()/$rawfile() resource references load fine; enum/global *usage* in logic does not.
     // A few functions calling system APIs in an otherwise pure-logic file (url helpers with one
     // url.URL call) still make it a logic target: rank by how much of the code touches them.
-    if (platformImports > 0 || /\b(Color|Alignment|ButtonStyleMode|AppStorage|getContext)\./.test(text)) {
-      const names = [...usedPlatformImports(text), "Color", "Alignment", "ButtonStyleMode", "AppStorage", "getContext"];
+    if (platformImports > 0 || new RegExp(`\\b(${ARKUI_GLOBALS.join("|")})\\.`).test(text)) {
+      const names = [...usedPlatformImports(text), ...ARKUI_GLOBALS];
       const body = text.split("\n").filter((l) => !/^\s*import\s/.test(l));
       const touching = body.filter((l) => names.some((n) => new RegExp(`\\b${n.replace(/\$/g, "\\$")}\\b`).test(l))).length;
       // Several kits, or many lines touching them (system objects kept in fields are not counted, so
@@ -531,15 +554,40 @@ export class HarmonyAdapter implements Adapter {
   }
 
   async runTests(req: RunRequest): Promise<TestRun> {
+    for (const m of req.modules ?? this.modules()) this.pruneDeletedTests(m);
     return this.mode() === "hvigor" ? this.runHvigor(req) : this.runShim(req);
   }
 
+  /** A generated test deleted by hand (not via `unitgen reject`) leaves an import that breaks every DevEco test build. */
+  private pruneDeletedTests(m: Module): void {
+    const list = path.join(m.testRoot, "List.test.ets");
+    if (!exists(list)) return;
+    const re = new RegExp(`^import\\s+\\w+\\s+from\\s+'\\./([^']+${SUFFIX.replace(/\.ets$/, "").replace(/\./g, "\\.")})';$`, "gm");
+    for (const [, mod] of readFile(list).matchAll(re)) {
+      const f = path.join(m.testRoot, `${mod}.ets`);
+      if (exists(f)) continue;
+      this.forgetTestFile(f, m);
+      log(`removed ${relPath(f, this.root)} from ${relPath(list, this.root)}: the file no longer exists`);
+    }
+  }
+
   platformLines(text: string): Set<number> {
-    const names = [...usedPlatformImports(text), "AppStorage", "AppStorageV2", "PersistentStorage", "getContext"];
+    const names = [...usedPlatformImports(text), "AppStorage", "AppStorageV2", "PersistentStorage", "getContext", ...ARKUI_DIALOGS];
+    const calls = (n: string) => new RegExp(`(?<![\\w$.])${n.replace(/\$/g, "\\$")}\\s*[.(]`);
+    // Objects a system API returned are mocks too: `const mac = cryptoFramework.createMac(...)`,
+    // then `mac.update(...)`, `const r = await mac.doFinal()`, `return r.data`.
+    const derived = new Set<string>();
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const m of text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=\s*(.+)/g)) {
+        if (derived.has(m[1]) || !m[2]) continue;
+        if (names.some((n) => calls(n).test(m[2])) || [...derived].some((d) => new RegExp(`(?<![\\w$.])${d.replace(/\$/g, "\\$")}\\b`).test(m[2]))) { derived.add(m[1]); grew = true; }
+      }
+    }
     const out = new Set<number>();
     text.split("\n").forEach((l, i) => {
       if (/^\s*import\s/.test(l) || /^\s*\/\//.test(l)) return;
-      if (names.some((n) => new RegExp(`(?<![\\w$.])${n.replace(/\$/g, "\\$")}\\s*[.(]`).test(l))) out.add(i + 1);
+      if (names.some((n) => calls(n).test(l)) || [...derived].some((d) => new RegExp(`(?<![\\w$.])${d.replace(/\$/g, "\\$")}\\b`).test(l))) out.add(i + 1);
     });
     return out;
   }
@@ -603,8 +651,10 @@ export class HarmonyAdapter implements Adapter {
     // A syntax error inside production code (not the test file) is a shim limitation, not the test's fault.
     const prodSyntax = loadFail.map((t) => /SyntaxError: (\S+\.(?:ets|ts)):\d+/.exec(t.message ?? "")?.[1]).filter((f): f is string => !!f && !files.includes(f));
     if (prodSyntax.length) {
+      const what = `the Node shim cannot parse ${[...new Set(prodSyntax)].map((f) => relPath(f, this.root)).join(", ")} (ArkTS syntax TypeScript does not support). Verify with hvigor/DevEco or pick another target.`;
+      // For a mutant this simply means "does not compile"; verify reports it as an environment problem.
       return { ok: false, compiled: false, tests: [], logFile, seconds: (Date.now() - start) / 1000, excerpt: loadFail.map((t) => t.message).join("\n"),
-        infraError: `the Node shim cannot parse ${[...new Set(prodSyntax)].map((f) => relPath(f, this.root)).join(", ")} (ArkTS syntax TypeScript does not support). Verify with hvigor/DevEco or pick another target.` };
+        ...(req.testFiles ? { compileErrorOutsideTests: what } : { infraError: what }) };
     }
     const compiled = loadFail.length === 0 && lint.length === 0;
     let coverage;
@@ -640,7 +690,7 @@ export class HarmonyAdapter implements Adapter {
     const missing = [...new Set(tests.map((t) => /UNITGEN_MISSING_PACKAGE (\S+)/.exec(t.message ?? "")?.[1]).filter(Boolean))];
     if (missing.length) {
       return { ok: false, compiled: false, tests: [], logFile, seconds: (Date.now() - start) / 1000, excerpt: "",
-        infraError: `ohpm packages not installed: ${missing.join(", ")}. Run \`ohpm install\` in ${this.root} (needs the DevEco/ohpm toolchain), then verify again.` };
+        infraError: `ohpm packages not installed: ${missing.join(", ")}. Run \`${this.ohpm()} install\` in ${this.root}, then verify again.` };
     }
     // A ReferenceError for a global the project never declares is an ArkUI/system global the shim lacks.
     const projectText = mods.flatMap((m) => this.sourceFiles(m)).map((f) => readFile(f)).join("\n");
@@ -672,6 +722,31 @@ export class HarmonyAdapter implements Adapter {
 
   recover(): void {
     this.restoreIfCrashed();
+    // The interrupted command may have left the daemon running a hanging test.
+    const tc = this.mode() === "hvigor" ? this.toolchain() : undefined;
+    if (tc && this.ownPreviewers().length) this.resetHvigor(tc, "after an interrupted run");
+  }
+
+  /**
+   * Previewer processes running this project's local tests. The hvigor daemon starts them; they
+   * live in the daemon's process group, outside the tree of the command unitgen ran.
+   */
+  private ownPreviewers(): { pid: number; start: string }[] {
+    const roots = new Set([this.root, ...(() => { try { return [fs.realpathSync(this.root)]; } catch { return []; } })()]);
+    return processesMatching((cmd) => /[/\\]previewer[/\\].*Previewer\b/i.test(cmd)
+      && [...roots].some((r) => cmd.includes(`${r}${path.sep}`) && cmd.includes(`${path.sep}.test${path.sep}`)));
+  }
+
+  /**
+   * A test that never returns wedges the hvigor daemon: the killed client leaves the daemon and its
+   * Previewer behind, and every later run waits for that Previewer. Stop this project's daemon and
+   * its Previewers so the next run starts a fresh one.
+   */
+  private resetHvigor(tc: Toolchain, why: string): void {
+    spawnSync(tc.hvigor, ["--stop-daemon"], { cwd: this.root, env: { ...process.env, ...tc.env }, stdio: "ignore", timeout: 60_000 });
+    const left = this.ownPreviewers();
+    signalAll(left, true);
+    log(`stopped the hvigor daemon${left.length ? ` and ${left.length} Previewer process(es)` : ""} ${why}`);
   }
 
   /** A run that was killed while List.test.ets was swapped for an isolated one: put the original back. */
@@ -756,12 +831,13 @@ export class HarmonyAdapter implements Adapter {
       // A full run executes List.test.ets; existing tests that do not compile are dropped (and reported)
       // so one stale test file does not hide every other test's result.
       const dropped: string[] = [];
+      let settled = false;
       for (let attempt = 0; attempt < 4; attempt++) {
         const r = await this.hvigorModuleRun(m, tc, files, req, `${req.label}-${m.name.replace(/\W+/g, "_")}${attempt ? `-retry${attempt}` : ""}`);
         combinedLog += r.log;
         if (r.infraError) {
           infraError = `${r.infraError}${r.infraError === "timeout" ? "" : " (hvigor environment problem; fix it, or set UNITGEN_HARMONY_MODE=shim to run pure-logic tests on Node)"}`;
-          excerpts.push(r.excerpt); ok = false; break;
+          excerpts.push(r.excerpt); ok = false; settled = true; break;
         }
         if (!r.compiled) {
           const own = new Set((req.testFiles ?? []).map((f) => path.resolve(f)));
@@ -784,6 +860,7 @@ export class HarmonyAdapter implements Adapter {
             notes.push(`module ${m.name} skipped: ${reason}; its files cannot be verified with hvigor (UNITGEN_HARMONY_MODE=shim can test their pure logic)`);
             unbuildable[m.name] = reason;
             skipped++;
+            settled = true;
             break;
           }
           compiled = false; ok = false;
@@ -800,13 +877,24 @@ export class HarmonyAdapter implements Adapter {
         if (r.coverageProblem) coverageProblem = r.coverageProblem;
         if (r.tests.some((t) => t.status === "failed")) ok = false;
         if (!r.tests.length && r.excerpt) excerpts.push(r.excerpt);
+        settled = true;
         break;
+      }
+      // Every attempt still found existing tests that do not compile: that is a failed run, not an empty one.
+      if (!settled && !infraError && compiled) {
+        compiled = false; ok = false;
+        excerpts.push(`existing tests in module ${m.name} still do not compile after excluding ${dropped.length}: ${dropped.map((f) => relPath(f, this.root)).join(", ")}`);
       }
       if (dropped.length) notes.push(`excluded existing tests that do not compile with the ArkTS compiler: ${dropped.map((f) => relPath(f, this.root)).join(", ")}`);
     }
     writeFile(logFile, combinedLog);
     if (skipped && skipped === mods.filter((m) => req.testFiles || exists(path.join(m.testRoot, "List.test.ets"))).length) { compiled = false; ok = false; }
     const failedMsgs = tests.filter((t) => t.status === "failed").map((t) => `FAILED ${t.name}\n${t.message ?? ""}`);
+    // The Previewer runs most system APIs as mocks: name the ones the code under test uses.
+    if (failedMsgs.length && req.testFiles) {
+      const mocked = this.systemApisUnderTest(req.testFiles);
+      if (mocked.length) failedMsgs.push(`Note: the Previewer runtime mocks most system APIs (results are not real, e.g. crypto output, files, network, preferences); the code under test uses: ${mocked.join(", ")}`);
+    }
     return {
       ok: ok && !infraError, compiled, tests, coverage: req.coverage ? coverage : undefined, logFile,
       excerpt: [...excerpts, ...failedMsgs.slice(0, 10)].filter(Boolean).join("\n"), seconds: (Date.now() - start) / 1000,
@@ -821,6 +909,20 @@ export class HarmonyAdapter implements Adapter {
     const out = path.join(m.dir, buildRoot, "default");
     const resultFile = path.join(out, "intermediates", "test", "coverage_data", "test_result.txt");
     const reportFile = path.join(out, "outputs", "test", "reports", "coverageReport.json");
+    // hvigor's coverage plugin unwraps init_coverage.json, appends one entry per instrumented file and
+    // wraps it again; a build that stops in between (a mutant that does not compile, a timeout) leaves
+    // a file every later build appends to: "getInitCoverageData failed, SyntaxError" and 0 lines,
+    // forever. Only a full re-instrumentation repairs it.
+    const initCov = path.join(out, "intermediates", "test", "init_coverage.json");
+    if (req.coverage && exists(initCov)) {
+      const t = readFile(initCov).trim();
+      let broken = false;
+      try { if (t.startsWith("{")) JSON.parse(t); else broken = true; } catch { broken = true; }
+      if (broken) {
+        fs.rmSync(path.join(m.dir, buildRoot), { recursive: true, force: true });
+        log(`removed ${relPath(path.join(m.dir, buildRoot), this.root)}: hvigor's init_coverage.json was corrupted by an interrupted build; this run rebuilds it`);
+      }
+    }
     // Stale results survive a failed compile: never read a previous run's files.
     fs.rmSync(path.dirname(resultFile), { recursive: true, force: true });
     fs.rmSync(path.dirname(reportFile), { recursive: true, force: true });
@@ -831,25 +933,48 @@ export class HarmonyAdapter implements Adapter {
         // small module); it picks up source changes like a cold build. UNITGEN_HVIGOR_DAEMON=0 disables it.
         process.env.UNITGEN_HVIGOR_DAEMON === "0" ? "--no-daemon" : "--daemon"];
     const args = [tc.hvigor, "--mode", "module", "-p", `module=${m.name}@default`, "-p", `product=${product}`, ...extra];
+    const daemon = extra.includes("--daemon");
+    const runStart = Date.now();
+    // A Previewer of this project still running means a wedged daemon (e.g. a run killed by the user).
+    if (daemon && this.ownPreviewers().length) this.resetHvigor(tc, "left running by an earlier run");
     const restore = files ? this.swapList(m, files) : undefined;
     let r;
     try {
-      r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 1800, logFile: path.join(this.stateDir, "logs", `${label}.log`), env: tc.env });
+      // A single test file (verify, mutants) never needs the 30 minutes a whole project's build may take.
+      r = await runAsync(args, {
+        cwd: this.root, timeoutSec: req.timeoutSec ?? (files ? 900 : 1800), logFile: path.join(this.stateDir, "logs", `${label}.log`), env: tc.env,
+        // Large modules print thousands of ArkTS warning lines: show hvigor's progress and errors only.
+        streamLine: (l) => /^> hvigor|ERROR|Error Message|\btasks? in total/.test(stripAnsi(l)) && !/ArkTS:WARN/.test(l),
+      });
+    } catch (e) {
+      if (daemon && e instanceof RunCancelled) this.resetHvigor(tc, "after the cancelled run");
+      throw e;
     } finally {
       restore?.();
     }
-    const text = stripAnsi(r.out);
-    const log = `$ ${args.join(" ")}\n${text}\n`;
-    if (r.timedOut) return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: "", log, infraError: "timeout" };
+    if (daemon && r.timedOut) this.resetHvigor(tc, "after the timed-out run");
+    let text = stripAnsi(r.out);
+    // hvigor exits before its stdout pipe drains: past ~64 KB (a module with many ArkTS warnings)
+    // the rest, compile errors included, is lost. Its own build log has everything.
+    if (!/\d+ tasks? in total/.test(text)) {
+      const buildLog = path.join(this.root, ".hvigor", "outputs", "build-logs", "build.log");
+      try {
+        if (fs.statSync(buildLog).mtimeMs >= runStart - 1000) {
+          text = stripAnsi(readFile(buildLog)).replace(/^\[[^\]]*\] \[\w+\] [\w-]+ - /gm, "");
+        }
+      } catch { /* no build log */ }
+    }
+    const runLog = `$ ${args.join(" ")}\n${text}\n`;
+    if (r.timedOut) return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: "", log: runLog, infraError: "timeout" };
     const infra = /SDK (?:component|path)[^\n]*(?:missing|not found|invalid)[^\n]*|Unable to find the SDK[^\n]*|ohpm ERROR[^\n]*|Cannot find module '@ohos\/hypium'[^\n]*|Invalid value of 'DEVECO_SDK_HOME'[^\n]*|00303\d{3}[^\n]*/i.exec(text)?.[0];
     const errors = parseArkTsErrors(text);
     const compileFailed = /COMPILE RESULT:FAIL|ArkTS Compiler Error|Failed :[\w:]+@(?:UnitTest|Legacy)\w*ArkTS/.test(text);
     if (compileFailed) {
       const excerpt = errors.length ? errors.slice(0, 20).map((e) => `${relPath(e.file, this.root)}:${e.line}:${e.col}: ${e.message}`).join("\n") : errorExcerpt(text);
-      return { compiled: false, tests: [], coverage: {}, errorFiles: errors.map((e) => e.file), excerpt, log, infraError: errors.length ? undefined : infra };
+      return { compiled: false, tests: [], coverage: {}, errorFiles: errors.map((e) => e.file), excerpt, log: runLog, infraError: errors.length ? undefined : infra };
     }
     if (!exists(resultFile)) {
-      return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: errorExcerpt(text), log,
+      return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: errorExcerpt(text), log: runLog,
         infraError: infra ?? (r.ok ? undefined : "hvigor failed before running the tests; see the log") };
     }
     const single = files?.length === 1 ? files[0] : undefined;
@@ -870,9 +995,26 @@ export class HarmonyAdapter implements Adapter {
       const v = this.hypium()?.version;
       coverageProblem = `hvigor recorded 0 executed lines although ${passed} test(s) passed${exists(reportFile) ? "" : " (no coverageReport.json)"}: the coverage data never reached hvigor. `
         + `${v && versionLess(v, "1.0.19") ? `@ohos/hypium ${v} sends it through printSync, which the Previewer drops: upgrade @ohos/hypium (devDependencies) to 1.0.19 or newer and run \`ohpm install\`. ` : ""}`
-        + "Or use UNITGEN_HARMONY_MODE=shim for pure-logic files.";
+        + (/getInitCoverageData failed/.test(text)
+          ? `hvigor could not read its own coverage data (getInitCoverageData failed); unitgen removed ${relPath(path.join(m.dir, buildRoot), this.root)} so the next run re-instruments: verify again. `
+          : "")
+        + "If it persists, UNITGEN_HARMONY_MODE=shim measures pure-logic files without hvigor (re-run the baseline with it).";
+      if (/getInitCoverageData failed/.test(text)) fs.rmSync(path.join(m.dir, buildRoot), { recursive: true, force: true });
     }
-    return { compiled: true, tests, coverage, errorFiles: [], excerpt: "", log, coverageProblem };
+    return { compiled: true, tests, coverage, errorFiles: [], excerpt: "", log: runLog, coverageProblem };
+  }
+
+  /** System API names (`cryptoFramework`, `preferences`, ...) used by the project sources these tests import. */
+  private systemApisUnderTest(testFiles: string[]): string[] {
+    const out = new Set<string>();
+    for (const t of testFiles) {
+      for (const m of readFile(t).matchAll(/from\s+['"](\.{1,2}\/[^'"]+)['"]/g)) {
+        const base = path.resolve(path.dirname(t), m[1]);
+        const src = [base, `${base}.ets`, `${base}.ts`].find((f) => exists(f) && fs.statSync(f).isFile());
+        if (src) for (const n of usedPlatformImports(readFile(src))) out.add(n);
+      }
+    }
+    return [...out].slice(0, 8);
   }
 
   /**
@@ -1053,7 +1195,7 @@ function importedSources(testFile: string, text: string): { spec: string; file: 
 export function exportedNames(text: string): Set<string> | undefined {
   if (/^\s*export\s+\*\s+from/m.test(text)) return undefined;
   const out = new Set<string>();
-  for (const m of text.matchAll(/^\s*export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:class|interface|function\*?|const|let|var|enum|type|struct|namespace)\s+([A-Za-z_$][\w$]*)/gm)) out.add(m[1]);
+  for (const m of text.matchAll(/^\s*export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:const\s+enum|class|interface|function\*?|const|let|var|enum|type|struct|namespace)\s+([A-Za-z_$][\w$]*)/gm)) out.add(m[1]);
   for (const m of text.matchAll(/^\s*export\s*(?:type\s*)?\{([^}]*)\}/gm)) {
     for (const part of m[1].split(",")) {
       const name = part.trim().split(/\s+as\s+/).pop()?.trim();

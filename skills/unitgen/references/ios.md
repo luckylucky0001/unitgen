@@ -29,9 +29,36 @@
 - Generated files go into the existing test target that tests the module (the brief names the
   file); classic targets get the file registered in `project.pbxproj`, synchronized folders need
   nothing. Commit that pbxproj change together with the test file.
-- xcodebuild runs are slow (tens of seconds): keep `mutate --max` small (10).
+- xcodebuild runs are slow (tens of seconds): keep `mutate --max` small (10). The build goes to
+  `.unitgen/DerivedData` (the first run builds from scratch; an open Xcode is not disturbed).
+- The brief's `@testable import` uses the target's PRODUCT_MODULE_NAME (target `Foo iOS` usually
+  builds module `Foo`), and says XCTest only when the test target's deployment target is older
+  than Swift Testing supports (iOS 13 / macOS 10.15).
 
 ## Writing the test
+
+The brief decides the framework: **XCTest** for packages with `swift-tools-version` < 6.0 (a plain
+`swift test` in their CI never runs Swift Testing) and for Xcode test targets older than iOS 13 /
+macOS 10.15; Swift Testing otherwise. When the brief says XCTest, it wins over the examples below:
+
+```swift
+import XCTest
+@testable import MyModule
+
+final class ParserUnitGenTests: XCTestCase {
+    func testEvaluatesTableOfInputs() throws {
+        for (input, expected) in [("1+2", 3.0), ("2*3", 6.0)] {
+            XCTAssertEqual(try Parser(input).evaluate(), expected, accuracy: 1e-9, input)
+        }
+    }
+
+    func testEmptyInputThrows() {
+        XCTAssertThrowsError(try Parser("").evaluate()) { XCTAssertEqual($0 as? ParserError, .empty) }
+    }
+}
+```
+
+Swift Testing:
 
 ```swift
 import Testing

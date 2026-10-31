@@ -1,7 +1,7 @@
 // unitgen: coverage-guided unit test backfilling for iOS, Android and HarmonyOS projects.
 import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { ADAPTER_IDS, detectAdapter } from "./adapters/index.ts";
+import { ADAPTER_IDS, detectAdapter, findProjectRoot } from "./adapters/index.ts";
 import { buildBrief } from "./context.ts";
 import { summarize } from "./coverage.ts";
 import { generate, recoverGeneration } from "./generate.ts";
@@ -9,7 +9,7 @@ import { pickBackend } from "./llm.ts";
 import { buildReport } from "./report.ts";
 import { State } from "./state.ts";
 import { formatTargets, rankTargets } from "./targets.ts";
-import { exists, log, relPath, walkFiles, writeFile } from "./util.ts";
+import { canonical, exists, log, relPath, walkFiles, writeFile } from "./util.ts";
 import { formatVerify, quarantine, verify } from "./verify.ts";
 import { formatMutation, mutate, mutationGate, recover } from "./mutate.ts";
 import * as fs from "node:fs";
@@ -33,7 +33,7 @@ Commands
   status                     Show baseline / accepted / rejected counts
 
 Common options
-  -C, --project <dir>        Project root (default: cwd)
+  -C, --project <dir>        Project root (default: found upwards from the current directory)
       --adapter <id>         Force adapter: ${ADAPTER_IDS.join(", ")}
       --module <name>        Restrict to one module/target
       --json                 Machine-readable output
@@ -48,6 +48,7 @@ generate:  --llm anthropic|claude|cmd:<sh> --model <id> --limit <n> (5) --attemp
            --max <n> (15 mutants/attempt) --min-score <percent> (80)
 
 Environment: UNITGEN_HARMONY_MODE=hvigor|shim (HarmonyOS runner), DEVECO_STUDIO_HOME / DEVECO_SDK_HOME,
+             UNITGEN_HVIGOR_DAEMON=0 (cold hvigor builds instead of the daemon),
              UNITGEN_QUIET=1 (no build progress), UNITGEN_VERBOSE=1 (print commands), UNITGEN_ENV=<env.sh>.
 
 Exit codes: 0 passed (or mutation not applicable), 1 command/environment error,
@@ -97,10 +98,10 @@ export async function main(argv: string[]): Promise<number> {
     process.stdout.write(`${own.length ? own.join("\n") : `unknown command: ${cmd}`}\n\nCommon: -C <dir>  --adapter <id>  --module <name>  --json\n`);
     return 0;
   }
-  const root = path.resolve(o.project ?? process.cwd());
+  const root = canonical(o.project ?? findProjectRoot(process.cwd(), o.adapter));
   const adapter = detectAdapter(root, o.adapter);
   // File arguments may be given relative to the project root (as `targets` prints them) when -C is used.
-  const fileArg = (p: string | undefined) => p && !path.isAbsolute(p) && !exists(p) && exists(path.resolve(adapter.root, p)) ? path.resolve(adapter.root, p) : p;
+  const fileArg = (p: string | undefined) => p && canonical(!path.isAbsolute(p) && !exists(p) && exists(path.resolve(adapter.root, p)) ? path.resolve(adapter.root, p) : p);
   if (["brief", "verify", "mutate", "reject"].includes(cmd) && rest[0]) rest[0] = fileArg(rest[0])!;
   if (o.target) o.target = fileArg(o.target);
   const positive = (name: string, fallback: number) => {
@@ -137,7 +138,7 @@ export async function main(argv: string[]): Promise<number> {
     }
     case "modules": {
       const ms = adapter.modules();
-      print(ms.map((m) => `${m.name.padEnd(32)} ${m.kind.padEnd(14)} src: ${m.sourceRoots.map((r) => relPath(r, root)).join(", ")}  ->  tests: ${relPath(m.testRoot, root)}`).join("\n"),
+      print(ms.map((m) => `${m.name.padEnd(32)} ${m.kind.padEnd(14)} src: ${m.sourceRoots.map((r) => relPath(r, root)).join(", ")}  ->  tests: ${relPath(m.testRoot, root)}${exists(m.testRoot) ? "" : " (does not exist yet)"}${adapter.id === "xcode" && !m.meta?.testTarget ? " (no unit-test target)" : ""}`).join("\n"),
         ms.map(({ meta, ...m }) => ({ ...m, meta: { ...meta, buildText: undefined } })));
       return 0;
     }
@@ -166,7 +167,7 @@ export async function main(argv: string[]): Promise<number> {
       // A project without (useful) tests is a valid 0% baseline only where unitgen measures coverage
       // itself (HarmonyOS Node shim). Elsewhere "nothing ran / nothing covered" usually means the
       // test task or coverage agent is misconfigured, so it stays an error.
-      const empty = runOk && failed === 0 && !hasCoverage && !!r.emptyCoverageOk;
+      const empty = runOk && failed === 0 && !hasCoverage && !!r.emptyCoverageOk && !r.coverageProblem;
       const measured = runOk && (failed === 0 || tolerated) && (hasCoverage || empty);
       const failingNames = r.tests.filter((t) => t.status === "failed").map((t) => t.name);
       const note = [r.infraError, r.note, !r.compiled ? "existing tests did not compile in this environment"
@@ -188,10 +189,11 @@ export async function main(argv: string[]): Promise<number> {
       }
       const s = summarize(cov);
       const unloaded = rankTargets(adapter, cov, { modules: mods, minUncovered: 1 }).filter((t) => !t.measured);
-      const why = !r.compiled ? "existing tests do not compile here"
+      const why = !r.compiled ? `the build failed — the project or its existing tests do not compile with this toolchain: ${r.excerpt.split("\n").find((l) => l.trim()) ?? "see the log"}`
         : r.infraError ? "environment problem"
-        : failed ? `${failed} existing tests fail; fix them, or re-run with --allow-failing to measure the passing ones`
+        : failed && !tolerated ? `${failed} existing tests fail; fix them, or re-run with --allow-failing to measure the passing ones`
         : r.coverageProblem ? r.coverageProblem
+        : failed ? `${failed} existing tests fail and no coverage was recorded for the passing ones`
         : !hasCoverage ? "the existing tests ran but covered no project code (the coverage tool may not be attached)"
         : "build, tests and coverage must succeed";
       print([`tests: ${r.tests.length} (${failed} failed)  build: ${r.compiled ? "ok" : "FAILED"}  ${r.seconds.toFixed(0)}s`,
@@ -237,7 +239,8 @@ export async function main(argv: string[]): Promise<number> {
         target: o.target ?? inferTarget(adapter, rest[0]), reruns, allowNoGain: o["allow-no-gain"], onFail: o.quarantine ? "quarantine" : "keep",
       });
       print(formatVerify(r, root), r);
-      return r.verdict === "accepted" ? 0 : 2;
+      // An environment problem is not a verdict on the test (exit codes: 1 = environment, 2 = gate).
+      return r.verdict === "accepted" ? 0 : r.verdict === "infra_error" ? 1 : 2;
     }
     case "mutate": {
       if (!rest[0]) throw new Error("usage: unitgen mutate <test-file> [--target <source>] [--max 10]");
@@ -252,6 +255,8 @@ export async function main(argv: string[]): Promise<number> {
         throw new Error(`${relTest} was accepted with ${acc.runner}; run \`unitgen verify ${relTest}\` with ${adapter.runnerName} before mutating`);
       }
       const tgt = o.target ?? acc?.target;
+      const lapsed = state.data.lapsed?.[relTest];
+      if (!acc && lapsed) throw new Error(`${relTest} was accepted before, but its latest verify returned ${lapsed.verdict.toUpperCase()}: make it pass (\`unitgen verify ${relTest}\`) before mutating`);
       if (!tgt) throw new Error("pass --target <source> (no accepted target recorded for this test file)");
       if (ids.length) {
         const eq = (state.data.equivalent ??= {});
@@ -299,7 +304,9 @@ export async function main(argv: string[]): Promise<number> {
       const suspects = d.notes.filter((n) => n.kind === "suspect").length;
       print([`adapter: ${adapter.id}`,
         `baseline: ${d.baseline ? `${d.baseline.at}${d.baseline.ok ? "" : " (INVALID: run `unitgen baseline`)"}${d.baseline.runner ? `, runner ${d.baseline.runner}` : ""}` : "none"}`,
-        `accepted: ${d.accepted.length}`, `rejected: ${d.rejected.length}`, `suspected bugs: ${suspects}`, `notes: ${d.notes.length - suspects}`].join("\n"), d);
+        `accepted: ${d.accepted.length}`,
+        ...Object.entries(d.lapsed ?? {}).map(([f, a]) => `  not counting until it passes again: ${f} (latest verify: ${a.verdict.toUpperCase()})`),
+        `rejected: ${d.rejected.length}`, `suspected bugs: ${suspects}`, `notes: ${d.notes.length - suspects}`].join("\n"), d);
       return 0;
     }
     default:

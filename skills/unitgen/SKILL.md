@@ -25,7 +25,9 @@ SDK, or DevEco Studio's hvigor (found automatically; otherwise a Node shim for A
 and doctor says why). Fix whatever it reports before continuing; do not work around a missing
 toolchain by skipping verification.
 
-All commands accept `-C <root>`; run them from the project root otherwise.
+All commands accept `-C <root>`; without it, unitgen finds the project root upwards from the
+current directory (a HarmonyOS module directory leads to the app root). Every command prints the
+path of its full log; `mutate` prints one line per mutant and keeps build output in the logs.
 
 ### TRAE / TRAE CN
 
@@ -46,7 +48,9 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
 0. **Start clean:** `git status`. If an earlier session was interrupted, run any unitgen command
    first (`"$UNITGEN" status`): it takes over a stale lock and restores interrupted mutations and
    temporary edits (it says so). Production code must show no changes before you continue.
-1. **Doctor:** read the `runner:` line. On HarmonyOS it says whether the real toolchain (hvigor:
+1. **Doctor:** read every line. iOS: Xcode or Command Line Tools, and a `note:` when an
+   `.xcodeproj` exists next to `Package.swift` (pass `--adapter xcode` on every command to use the
+   iOS Simulator, e.g. for UIKit code). HarmonyOS: the `runner:` line says whether the real toolchain (hvigor:
    ArkTS compiler + Previewer runtime) or the Node shim is used, and why — for example
    `ohpm install` not run, `@ohos/hypium` not declared, an old hypium, `compileSdkVersion` not
    matching the installed SDK. Tell the user what would enable the real toolchain; do not edit
@@ -90,12 +94,13 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
       | verdict | what to do |
       |---|---|
       | `ACCEPTED` | done; move on |
+      | any other verdict on a file that was `ACCEPTED` before | it stops counting (coverage, report, mutate) until it passes again; its history is kept. Fix it or put the previous version back |
       | `COMPILE_ERROR` | fix the test using the compiler output |
       | `TEST_FAILURES` | re-read the production code; fix the *expectation*. If the code is really wrong, assert current behaviour and add `// UNITGEN-SUSPECT: <why>` (collected into the report automatically). If the feedback lists stubbed APIs, check whether the failing value comes from one before calling it a bug |
       | `FLAKY` | remove the source of nondeterminism (time, ordering, shared state, real dispatchers) |
       | `NO_GAIN` | the tests only hit already-covered lines; aim at the `!` lines in a fresh brief. `--allow-no-gain` only when a file is intentionally redundant, and say why in a note |
       | `NO_ASSERTIONS` / `NO_TESTS` | add real assertions / check suite & class naming |
-      | `INFRA_ERROR` | environment problem (missing SDK, uninstalled ohpm packages, production code that does not compile, coverage that never arrives, ...): follow the fix the message names or report it and pick another target; don't edit tests to dodge it. It does not count as an attempt |
+      | `INFRA_ERROR` | environment problem (missing SDK, uninstalled ohpm packages, production code that does not compile, coverage that never arrives, ...): follow the fix the message names or report it and pick another target; don't edit tests to dodge it. It does not count as an attempt, and an already accepted file stays accepted (exit 1, not 2) |
 
    5. **Check assertion strength:** `"$UNITGEN" mutate <test-file>` changes the lines your test
       covers (operators, conditions, constants, returned strings, deleted calls and assignments)
@@ -111,8 +116,9 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
         equivalent: leave it, note it, and report the score as it is.
       - The gate (default `--min-score 80`) counts every mutant evaluated with the current test
         file; exit 2 means it failed (the test stays accepted). `--max` caps one run: about
-        1–2 s per mutant with hvigor, 3–10 s with SwiftPM/Gradle, 10–25 s with Xcode, so use
-        `--max 10` on Xcode. Re-run to evaluate more candidates.
+        1–3 s per mutant with hvigor, 3–10 s with SwiftPM/Gradle, 10–25 s with Xcode, so use
+        `--max 10` on Xcode. `--max` counts mutants that compiled; ones that do not compile are
+        replaced by the next candidates. Re-run to evaluate more candidates.
       - Kills by a crash (exception, index out of range, hang) rather than an assertion are
         reported separately; mutants that do not compile are discarded. The source is always
         restored, also after a crash or forced kill (by the next command).
@@ -126,7 +132,8 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
    Use `"$UNITGEN" note "<text>"` only for findings that are not already a `UNITGEN-SUSPECT` comment.
 5. **Finish:** `"$UNITGEN" report` writes `.unitgen/REPORT.md`. Summarise it for the user with
    the numbers, not adjectives: coverage before → after per target (lines), tests added, the
-   runner, mutation score with evaluated/candidate counts, crash-only kills, discarded and
+   runner, mutation score with evaluated/candidate counts (a gate PASSED "on 19 of 71 candidates"
+   is a sample: say so, or run mutate again until all are evaluated), crash-only kills, discarded and
    equivalent mutants (and why), suspected bugs with their evidence, and what could not be
    covered and why (system APIs, a device, a module that does not build, ...).
 
