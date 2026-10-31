@@ -6,6 +6,7 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { processTable, signalAll } from "./util.ts";
 
 export interface LockData {
   pid: number;
@@ -13,6 +14,8 @@ export interface LockData {
   worker?: number;
   /** Process groups (POSIX) / process trees (Windows) of running builds. */
   builds?: number[];
+  /** Descendants seen while running, with their start time (identifies them even after re-parenting). */
+  procs?: { pid: number; start: string }[];
 }
 
 /** Is `pid` a running process? With `since`, a process started after that time is a reused PID, not the owner. */
@@ -51,8 +54,19 @@ export function acquireProjectLock(root: string, onStale: (msg: string) => void 
       if (alive(owner.pid, false, owner.at)) {
         throw new Error(`project locked by a running unitgen command (PID ${owner.pid}, since ${owner.at}). Wait for it to finish, or stop it with Ctrl-C / kill ${owner.pid}.`);
       }
+      // Leftovers of the killed command, identified by PID *and* start time (never a reused PID):
+      // test helpers stuck in an endless loop would otherwise keep running and growing. Stop them.
+      if (owner.procs?.length) {
+        const table = processTable();
+        const ours = table.filter((p) => owner.procs!.some((q) => q.pid === p.pid && q.start === p.start));
+        if (ours.length) {
+          signalAll(ours, true);
+          onStale(`stopped ${ours.length} process(es) the killed unitgen command left running (${ours.map((p) => p.pid).join(", ")})`);
+        }
+      }
       // The worker is a single process; builds are process groups (they were spawned detached).
-      const live = [...new Set([...(alive(owner.worker) ? [owner.worker!] : []), ...(owner.builds ?? []).filter((p) => alive(p, true))])];
+      const live = [...new Set([...(alive(owner.worker) ? [owner.worker!] : []), ...(owner.builds ?? []).filter((p) => alive(p, true))])]
+        .filter((p) => !owner.procs?.some((q) => q.pid === p));
       if (live.length) {
         const how = process.platform === "win32" ? live.map((p) => `taskkill /pid ${p} /T /F`).join(" & ") : `kill -TERM ${live.map((p) => `-${p}`).join(" ")}`;
         throw new Error(`a previous unitgen command (PID ${owner.pid}) was killed, but its build processes are still running (${live.join(", ")}). Stop them (${how}) and run the command again; unitgen then restores any interrupted mutation by itself.`);

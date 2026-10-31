@@ -249,6 +249,12 @@ export class XcodeAdapter implements Adapter {
       for (const f of req.testFiles) args.push(`-only-testing:${m.meta.testTarget}/${path.basename(f, ".swift")}`);
     } else if (m.meta?.testTarget) {
       for (const x of mods) if (x.meta?.testTarget) args.push(`-only-testing:${x.meta.testTarget}`);
+      if (req.excludeGenerated) {
+        for (const x of mods) {
+          if (!x.meta?.testTarget) continue;
+          for (const f of walkFiles(x.testRoot, [this.testFileSuffix])) args.push(`-skip-testing:${x.meta.testTarget}/${path.basename(f, ".swift")}`);
+        }
+      }
     }
     const r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
     const out = stripAnsi(r.out);

@@ -19,6 +19,11 @@ gradle.beforeProject { p ->
     p.tasks.withType(Test).configureEach { t ->
       // unitgen reads pass/fail from the JUnit XML; a failing test must not skip the coverage report.
       t.ignoreFailures = true
+      // Baseline: the project's own tests only; unitgen tracks its generated tests separately.
+      def skip = p.findProperty('unitgen.excludeGenerated')
+      if (skip) {
+        t.filter { excludeTestsMatching(skip.toString()); failOnNoMatchingTests = false }
+      }
       t.extensions.findByName('jacoco')?.with {
         includeNoLocationClasses = true
         excludes = ['jdk.internal.*']

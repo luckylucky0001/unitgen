@@ -276,7 +276,7 @@ export class SwiftPMAdapter implements Adapter {
   }
 
   /** Temporarily rewrite Package.swift so the run works on this toolchain. Returns a restore fn. */
-  private applyRuntimeManifest(onlyOurs: boolean): () => void {
+  private applyRuntimeManifest(onlyOurs: boolean, withoutOurs = false): () => void {
     const t = this.tc();
     const d = this.loadDump();
     const original = readFile(this.manifestPath());
@@ -285,6 +285,7 @@ export class SwiftPMAdapter implements Adapter {
     if (!t.xctest || onlyOurs) {
       patches.push(`package.targets.removeAll { $0.type == .test && !$0.name.hasSuffix("${SUFFIX}") }`);
     }
+    if (withoutOurs) patches.push(`package.targets.removeAll { $0.type == .test && $0.name.hasSuffix("${SUFFIX}") }`);
     const hasOurTargets = original.includes(BEGIN);
     // Swift Testing needs macOS 10.15+ and tools-version >= 5.9 semantics.
     const mac = (d.platforms ?? []).find((p: any) => p.platformName === "macos");
@@ -315,7 +316,7 @@ export class SwiftPMAdapter implements Adapter {
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
     const mods = req.modules ?? this.modules();
     const ours = req.testFiles !== undefined;
-    const restore = this.applyRuntimeManifest(ours);
+    const restore = this.applyRuntimeManifest(ours, !ours && !!req.excludeGenerated);
     if (ours) this.park(req.testFiles!);
     const start = Date.now();
     try {

@@ -467,7 +467,8 @@ export class HarmonyAdapter implements Adapter {
     const start = Date.now();
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
     const mods = req.modules ?? this.modules();
-    const files = req.testFiles ?? mods.flatMap((m) => walkFiles(m.testRoot, [".test.ets", ".test.ts"]).filter((f) => !/List\.test\.ets$/.test(f)));
+    const files = req.testFiles ?? mods.flatMap((m) => walkFiles(m.testRoot, [".test.ets", ".test.ts"])
+      .filter((f) => !/List\.test\.ets$/.test(f) && !(req.excludeGenerated && f.endsWith(SUFFIX))));
     const tsDir = this.tsDir();
     if (!tsDir) {
       return { ok: false, compiled: false, tests: [], logFile, excerpt: "", seconds: 0, infraError: "typescript missing: run `npm install` in the unitgen directory" };
@@ -652,7 +653,8 @@ export class HarmonyAdapter implements Adapter {
     for (const m of mods) {
       // hvigor's generated test entry imports src/test/List.test.ets: a module without one has no local tests.
       if (!req.testFiles && !exists(path.join(m.testRoot, "List.test.ets"))) continue;
-      let files = req.testFiles?.filter((f) => this.moduleFor(f)?.name === m.name);
+      let files = req.testFiles?.filter((f) => this.moduleFor(f)?.name === m.name)
+        ?? (req.excludeGenerated ? this.listedTests(m).filter((f) => !f.endsWith(SUFFIX)) : undefined);
       // A full run executes List.test.ets; existing tests that do not compile are dropped (and reported)
       // so one stale test file does not hide every other test's result.
       const dropped: string[] = [];

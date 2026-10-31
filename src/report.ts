@@ -38,20 +38,25 @@ export function buildReport(adapter: Adapter, state: State): string {
     `# unitgen report`,
     "",
     `- Project: \`${adapter.root}\` (${adapter.platform}, adapter \`${adapter.id}\`)`,
-    `- Baseline: ${d.baseline ? `${d.baseline.tests} tests, ${d.baseline.failed} failing, ${d.baseline.seconds.toFixed(0)}s${d.baseline.note ? ` — ${d.baseline.note}` : ""}` : "not run"}`,
+    `- Baseline: ${d.baseline ? `${d.baseline.tests} tests, ${d.baseline.failed} failing, ${d.baseline.seconds.toFixed(0)}s${d.baseline.runner ? `, runner: ${d.baseline.runner}` : ""}${d.baseline.note ? ` — ${d.baseline.note}` : ""}` : "not run"} (the project's own tests; generated files are excluded)`,
     `- Line coverage, files the coverage tool saw: **${b.total.pct.toFixed(1)}% → ${a.total.pct.toFixed(1)}%** (${b.total.covered} → ${a.total.covered} of ${a.total.executable} lines)`,
     `- Whole codebase incl. never-loaded files (estimated lines): ${pct(wholeBefore)}% → ${pct(wholeAfter)}% (${wholeBefore} → ${wholeAfter} of ~${wholeExec} lines)`,
     `- Generated test files: ${d.accepted.length} accepted (${d.accepted.reduce((s, x) => s + x.tests, 0)} tests), ${rejected.length} rejected`,
     "",
   ];
   if (d.accepted.length) {
-    lines.push("## Accepted", "", "| test file | target | tests | new lines | attempts | mutation score |", "|---|---|---:|---:|---:|---:|");
+    const mixed = new Set(d.accepted.map((x) => x.runner).filter(Boolean)).size > 1;
+    lines.push("## Accepted", "", `| test file | target | tests | new lines | attempts | mutation score | killed / survived (crash-only, did not compile, equivalent) |${mixed ? " runner |" : ""}`,
+      `|---|---|---:|---:|---:|---:|---|${mixed ? "---|" : ""}`);
     for (const x of d.accepted) {
-      const ms = x.mutation?.none ? "n/a (nothing mutable)" : x.mutation
-        ? `${x.mutation.first !== undefined && x.mutation.first !== x.mutation.score ? `${Math.round(x.mutation.first * 100)}% → ` : ""}${Math.round(x.mutation.score * 100)}% (${x.mutation.killed}/${x.mutation.killed + x.mutation.survived})`
+      const m = x.mutation;
+      const ms = m?.none ? "n/a (nothing mutable)" : m
+        ? `${m.first !== undefined && m.first !== m.score ? `${Math.round(m.first * 100)}% → ` : ""}${Math.round(m.score * 100)}%${m.stale ? " (stale: test changed since)" : ""}`
         : "—";
-      lines.push(`| ${x.testFile} | ${x.target ?? ""} | ${x.tests} | ${x.gainedLines} | ${x.attempts} | ${ms} |`);
+      const detail = m && !m.none ? `${m.killed} / ${m.survived} (${m.crashes ?? 0}, ${m.stillborn}, ${m.equivalent ?? 0})` : "";
+      lines.push(`| ${x.testFile} | ${x.target ?? ""} | ${x.tests} | ${x.gainedLines} | ${x.attempts} | ${ms} | ${detail} |${mixed ? ` ${x.runner ?? ""} |` : ""}`);
     }
+    if (mixed) lines.push("", "⚠️ Accepted files were measured with different runners; their coverage numbers are not comparable. Re-run `unitgen verify` on the files measured with another runner than the baseline.");
     if (d.accepted.some((x) => !x.mutation)) lines.push("", "Mutation score: `unitgen mutate <test-file>` (— = not run). Surviving mutants can be equivalent (no observable change); review them before adding assertions.");
     lines.push("");
   }

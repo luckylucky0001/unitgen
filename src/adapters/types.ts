@@ -49,6 +49,8 @@ export interface RunRequest {
   testFiles?: string[];
   /** Restrict to these modules. */
   modules?: Module[];
+  /** Baseline: run only the project's own tests, not files unitgen generated (their gains are tracked separately). */
+  excludeGenerated?: boolean;
   coverage: boolean;
   label: string;
   /** Hard limit for the whole run (default: adapter-specific, long). */
@@ -101,4 +103,6 @@ export interface Adapter {
   /** Language-level hints: does the test file contain at least one real assertion? */
   countAssertions(text: string): number;
   readonly testFileSuffix: string;
+  /** Which runner measures coverage (when an adapter has several, e.g. hvigor vs the Node shim). */
+  readonly runnerName?: string;
 }

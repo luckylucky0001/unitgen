@@ -298,6 +298,7 @@ export class GradleAdapter implements Adapter {
       if (req.coverage) args.push(`${prefix}unitgenJacocoReport`);
     }
     if (req.coverage) args.push(`-Punitgen.tasks=${mods.map((m) => `${m.name}=${tasks[m.name]}`).join(",")}`);
+    if (req.excludeGenerated && !req.testFiles) args.push(`-Punitgen.excludeGenerated=*${SUFFIX}`);
     // Clear stale results so we only parse this run.
     for (const m of mods) {
       fs.rmSync(path.join(m.dir, "build", "test-results", tasks[m.name]!), { recursive: true, force: true });

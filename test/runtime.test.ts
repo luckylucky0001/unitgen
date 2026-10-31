@@ -80,6 +80,42 @@ test("a second invocation cannot recover or mutate a locked project", (t) => {
   acquireProjectLock(dir).release();
 });
 
+test("a timeout also kills helpers the build started in their own process group (swiftpm-testing-helper)", { skip: process.platform === "win32" }, async (t) => {
+  const dir = temp(t), pidFile = path.join(dir, "helper.pid");
+  // The "build" starts a detached helper (new process group, like swift test does) and both hang.
+  const helperJs = path.join(dir, "helper.js"), buildJs = path.join(dir, "build.js");
+  fs.writeFileSync(helperJs, `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`);
+  fs.writeFileSync(buildJs, `const h = require("node:child_process").spawn(process.execPath, [${JSON.stringify(helperJs)}], { detached: true, stdio: "ignore" }); h.unref(); setInterval(() => {}, 1000);`);
+  const run = runAsync([process.execPath, buildJs], { timeoutSec: 2, stream: false });
+  for (let i = 0; i < 1000 && !fs.existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 10));
+  const helper = Number(fs.readFileSync(pidFile, "utf8"));
+  t.after(() => { try { process.kill(helper, "SIGKILL"); } catch { /* gone */ } });
+  const r = await run;
+  assert.equal(r.timedOut, true);
+  for (let i = 0; i < 200; i++) {
+    try { process.kill(helper, 0); } catch { return; }
+    await new Promise((res) => setTimeout(res, 10));
+  }
+  assert.fail(`helper ${helper} survived the timeout`);
+});
+
+test("a stale lock's recorded leftovers (same PID and start time) are stopped before taking over", { skip: process.platform === "win32" }, async (t) => {
+  const dir = temp(t);
+  fs.mkdirSync(path.join(dir, ".unitgen"), { recursive: true });
+  const orphan = (await import("node:child_process")).spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  t.after(() => { try { process.kill(orphan.pid!, "SIGKILL"); } catch { /* gone */ } });
+  await new Promise((r) => setTimeout(r, 100));
+  const { processTable } = await import("../src/util.ts");
+  const me = processTable().find((p) => p.pid === orphan.pid)!;
+  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+  fs.writeFileSync(path.join(dir, ".unitgen", "run.lock"), JSON.stringify({ pid: Number(dead), at: "earlier", builds: [orphan.pid], procs: [{ pid: orphan.pid, start: me.start }] }));
+  const msgs: string[] = [];
+  acquireProjectLock(dir, (m) => msgs.push(m)).release();
+  assert.match(msgs.join("\n"), new RegExp(`stopped 1 process.*${orphan.pid}`));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.throws(() => process.kill(orphan.pid!, 0), /ESRCH/);
+});
+
 test("a lock left by a killed command is taken over and the interrupted mutation restored", { skip: process.platform === "win32" }, (t) => {
   const dir = temp(t);
   fs.writeFileSync(path.join(dir, "settings.gradle"), "include ':app'\n");
@@ -197,7 +233,7 @@ test("CLI cancellation also stops synchronous doctor discovery and releases its 
   const child = spawn(process.execPath, [cli, "doctor", "-C", dir], { stdio: "ignore", env: { ...process.env, JAVA_HOME: path.join(dir, "jdk") } });
   t.after(() => child.kill("SIGKILL"));
   const closed = new Promise<number | null>((resolve) => child.on("close", resolve));
-  for (let i = 0; i < 300 && !fs.existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 1000 && !fs.existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 10));
   assert.equal(fs.existsSync(pidFile), true);
   child.kill("SIGTERM");
   assert.equal(await closed, 130);

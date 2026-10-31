@@ -41,6 +41,49 @@ export class RunCancelled extends Error {
 }
 
 /** Long-running builds stay observable and cancellable without changing synchronous discovery. */
+export interface ProcInfo { pid: number; ppid: number; pgid: number; start: string }
+
+/** All processes (POSIX `ps`); empty on Windows or when ps is unavailable. */
+export function processTable(): ProcInfo[] {
+  if (process.platform === "win32") return [];
+  const r = spawnSync("ps", ["-A", "-o", "pid=,ppid=,pgid=,lstart="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } });
+  const out: ProcInfo[] = [];
+  for (const line of (r.stdout ?? "").split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+    if (m) out.push({ pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), start: m[4] });
+  }
+  return out;
+}
+
+/**
+ * Every process below `roots` (children of children...) and every member of their process groups.
+ * Test runners start helpers in process groups of their own (SwiftPM's swiftpm-testing-helper,
+ * xctest, simulators): signalling the build's group alone misses them.
+ */
+export function processTree(roots: number[], table: ProcInfo[] = processTable()): ProcInfo[] {
+  const byParent = new Map<number, ProcInfo[]>();
+  for (const p of table) (byParent.get(p.ppid) ?? byParent.set(p.ppid, []).get(p.ppid)!).push(p);
+  const seen = new Map<number, ProcInfo>();
+  const queue = table.filter((p) => roots.includes(p.pid) || roots.includes(p.pgid));
+  while (queue.length) {
+    const p = queue.shift()!;
+    if (seen.has(p.pid) || p.pid === process.pid || p.pid <= 1) continue;
+    seen.set(p.pid, p);
+    queue.push(...(byParent.get(p.pid) ?? []), ...table.filter((q) => q.pgid === p.pid && !seen.has(q.pid)));
+  }
+  return [...seen.values()];
+}
+
+/** Signal each process, and the process group of each group leader among them. */
+export function signalAll(procs: { pid: number; pgid?: number }[], hard: boolean): void {
+  const sig = hard ? "SIGKILL" : "SIGTERM";
+  for (const p of procs) {
+    for (const target of p.pgid === p.pid ? [-p.pid, p.pid] : [p.pid]) {
+      try { process.kill(target, sig); } catch { /* already gone */ }
+    }
+  }
+}
+
 export async function runAsync(cmd: string[], opts: RunOpts = {}): Promise<CmdResult> {
   const signal = opts.signal ?? cancellation.signal;
   if (signal.aborted || cancellation.signal.aborted) throw new RunCancelled();
@@ -58,12 +101,19 @@ export async function runAsync(cmd: string[], opts: RunOpts = {}): Promise<CmdRe
     let spawnError: Error | undefined;
     let logError: Error | undefined;
     let force: ReturnType<typeof setTimeout> | undefined;
+    // Descendants seen so far: once the build's own process exits they are re-parented and can no
+    // longer be found through it, so the first (graceful) stop remembers them for the hard kill.
+    const tracked = new Map<number, ProcInfo>();
     const kill = (hard: boolean) => {
       if (!child.pid) return;
-      try {
-        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-        else process.kill(-child.pid, hard ? "SIGKILL" : "SIGTERM");
-      } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH") child.kill(hard ? "SIGKILL" : "SIGTERM"); }
+      if (process.platform === "win32") {
+        spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+        return;
+      }
+      for (const p of processTree([child.pid])) tracked.set(p.pid, p);
+      try { process.kill(-child.pid, hard ? "SIGKILL" : "SIGTERM"); }
+      catch (e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH") child.kill(hard ? "SIGKILL" : "SIGTERM"); }
+      signalAll([...tracked.values()], hard);
     };
     const stop = () => {
       kill(false);

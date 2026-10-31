@@ -68,7 +68,7 @@ export const CLI_OPTIONS = {
   attempts: { type: "string" },
   max: { type: "string" },
   "min-score": { type: "string" },
-  equivalent: { type: "string" },
+  equivalent: { type: "string", multiple: true },
   help: { type: "boolean", short: "h" },
 } as const;
 
@@ -111,6 +111,14 @@ export async function main(argv: string[]): Promise<number> {
   recoverGeneration(state);
   const mods = o.module ? adapter.modules().filter((m) => m.name === o.module) : undefined;
   if (o.module && !mods?.length) throw new Error(`unknown module ${o.module}; see \`unitgen modules\``);
+  // Coverage from different runners (hvigor vs the Node shim) is not comparable: gate on the same one.
+  const requireBaseline = () => {
+    const b = state.data.baseline;
+    if (!b?.ok) throw new Error("a successful baseline is required; run `unitgen baseline` first");
+    if (b.runner && adapter.runnerName && b.runner !== adapter.runnerName) {
+      throw new Error(`the baseline was measured with ${b.runner}, but this run would use ${adapter.runnerName}; run \`unitgen baseline\` again with the same settings (e.g. UNITGEN_HARMONY_MODE) you will verify with`);
+    }
+  };
   const print = (human: string, data: unknown) => process.stdout.write((o.json ? JSON.stringify(data, null, 2) : human) + "\n");
 
   switch (cmd) {
@@ -133,7 +141,7 @@ export async function main(argv: string[]): Promise<number> {
       if (adapter.platform === "harmony") for (const m of mods ?? adapter.modules()) {
         for (const f of walkFiles(m.testRoot, [adapter.testFileSuffix])) adapter.prepareTestFile(f, m);
       }
-      const r = await adapter.runTests({ coverage: true, label: "baseline", modules: mods });
+      const r = await adapter.runTests({ coverage: true, label: "baseline", modules: mods, excludeGenerated: true });
       const failed = r.tests.filter((t) => t.status === "failed").length;
       const cov = r.coverage ?? {};
       if (mods) {
@@ -157,7 +165,8 @@ export async function main(argv: string[]): Promise<number> {
         : tolerated ? `${failed} existing tests fail here and are excluded from the gate (${r.failuresExplained ?? "--allow-failing"}): ${failingNames.slice(0, 8).join("; ")}${failingNames.length > 8 ? "; ..." : ""}`
         : failed ? `${failed} existing tests fail: ${failingNames.slice(0, 8).join("; ")}${failingNames.length > 8 ? "; ..." : ""}`
         : empty ? "no existing test covers project code: every file starts at 0%" : undefined].filter(Boolean).join("; ") || undefined;
-      const baseline = { at: state.stamp(), ok: measured, tests: r.tests.length, failed, note, seconds: r.seconds };
+      const baseline = { at: state.stamp(), ok: measured, tests: r.tests.length, failed, note, seconds: r.seconds, runner: adapter.runnerName };
+      const otherRunner = state.data.accepted.filter((a) => a.runner && adapter.runnerName && a.runner !== adapter.runnerName);
       if (measured) {
         state.baselineCoverage = cov;
         state.data.adapter = adapter.id;
@@ -178,7 +187,9 @@ export async function main(argv: string[]): Promise<number> {
       print([`tests: ${r.tests.length} (${failed} failed)  build: ${r.compiled ? "ok" : "FAILED"}  ${r.seconds.toFixed(0)}s`,
         `coverage: ${s.total.covered}/${s.total.executable} lines (${s.total.pct.toFixed(1)}%) in ${s.files.length} files loaded by tests`,
         unloaded.length ? `not loaded by any test: ${unloaded.length} logic/model files (~${unloaded.reduce((n, t) => n + t.executable, 0)} lines, 0%)` : "",
-        note ? `note: ${note}` : "", !measured ? `baseline not saved: ${why}\n${r.excerpt}\nlog: ${r.logFile}` : ""].filter(Boolean).join("\n"),
+        note ? `note: ${note}` : "",
+        measured && otherRunner.length ? `warning: ${otherRunner.length} accepted test file(s) were measured with ${otherRunner[0].runner}, not ${adapter.runnerName}: run \`unitgen verify\` on them again (${otherRunner.slice(0, 5).map((a) => a.testFile).join(", ")})` : "",
+        !measured ? `baseline not saved: ${why}\n${r.excerpt}\nlog: ${r.logFile}` : ""].filter(Boolean).join("\n"),
         { ...baseline, coverage: s.total, unloadedFiles: unloaded.length, logFile: r.logFile });
       return measured ? 0 : r.infraError ? 1 : 2;
     }
@@ -203,7 +214,7 @@ export async function main(argv: string[]): Promise<number> {
     }
     case "verify": {
       if (!rest[0]) throw new Error("usage: unitgen verify <test-file> [--target <source>]");
-      if (!state.data.baseline?.ok) throw new Error("a successful baseline is required; run `unitgen baseline` first");
+      requireBaseline();
       const r = await verify(adapter, state, rest[0], {
         target: o.target ?? inferTarget(adapter, rest[0]), reruns, allowNoGain: o["allow-no-gain"], onFail: o.quarantine ? "quarantine" : "keep",
       });
@@ -213,12 +224,20 @@ export async function main(argv: string[]): Promise<number> {
     case "mutate": {
       if (!rest[0]) throw new Error("usage: unitgen mutate <test-file> [--target <source>] [--max 10]");
       const relTest = relPath(path.resolve(rest[0]), root);
-      const tgt = o.target ?? state.data.accepted.find((a) => a.testFile === relTest)?.target;
+      requireBaseline();
+      const acc = state.data.accepted.find((a) => a.testFile === relTest);
+      if (acc?.runner && adapter.runnerName && acc.runner !== adapter.runnerName) {
+        throw new Error(`${relTest} was accepted with ${acc.runner}; run \`unitgen verify ${relTest}\` with ${adapter.runnerName} before mutating`);
+      }
+      const tgt = o.target ?? acc?.target;
       if (!tgt) throw new Error("pass --target <source> (no accepted target recorded for this test file)");
       if (o.equivalent) {
         const eq = (state.data.equivalent ??= {});
-        const ids = o.equivalent.split(",").map((x) => x.trim()).filter((x) => /^\d+(\.\d+)?$/.test(x));
-        if (!ids.length) throw new Error("--equivalent takes line numbers (12) or mutant ids (12.2), comma-separated");
+        // Repeatable and comma-separated: --equivalent 12.2 --equivalent 14.1,15
+        const raw = o.equivalent.flatMap((x) => x.split(",")).map((x) => x.trim()).filter(Boolean);
+        const bad = raw.filter((x) => !/^\d+(\.\d+)?$/.test(x));
+        if (bad.length || !raw.length) throw new Error(`--equivalent takes line numbers (12) or mutant ids (12.2); got: ${bad.join(", ") || "nothing"}`);
+        const ids = raw;
         eq[relTest] = [...new Set([...(eq[relTest] ?? []).map(String), ...ids])];
         state.save();
       }
@@ -234,7 +253,7 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "generate": {
-      if (!state.data.baseline?.ok) throw new Error("a successful baseline is required; run `unitgen baseline` first");
+      requireBaseline();
       const llm = pickBackend(o.llm, o.model);
       const res = await generate(adapter, state, llm, {
         limit, attempts, files: rest, module: o.module, reruns, mutationMax: max, minMutationScore: minScore,

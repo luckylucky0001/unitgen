@@ -1,5 +1,6 @@
 // The acceptance gate. A generated test file is kept only if it compiles, every test in it passes,
 // it passes again on re-runs (flakiness), it contains real assertions, and it covers new lines.
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Adapter, TestCase, TestRun } from "./adapters/types.ts";
@@ -156,19 +157,29 @@ export async function verify(adapter: Adapter, state: State, testFile: string, o
   return r;
 }
 
+/** Content hash of a test file, to tell whether a recorded mutation run still applies to it. */
+export function fileHash(file: string): string | undefined {
+  try { return createHash("sha1").update(fs.readFileSync(file)).digest("hex").slice(0, 16); } catch { return undefined; }
+}
+
 function finish(adapter: Adapter, state: State, r: VerifyResult, opts: VerifyOpts): void {
   if (opts.record === false) return;
   const relTest = relPath(r.testFile, adapter.root);
   // Attempts = verify runs until first acceptance; strengthening an accepted file doesn't count.
-  const alreadyAccepted = state.data.accepted.some((a) => a.testFile === relTest);
-  const attempts = opts.attempts ?? (alreadyAccepted ? state.data.attempts?.[relTest] ?? 1 : state.bumpAttempts(relTest));
+  const previous = state.data.accepted.find((a) => a.testFile === relTest);
+  // Environment problems are not attempts at writing the test.
+  const attempts = opts.attempts ?? (previous || r.verdict === "infra_error" ? state.data.attempts?.[relTest] ?? 1 : state.bumpAttempts(relTest));
   state.data.accepted = state.data.accepted.filter((a) => a.testFile !== relTest);
   if (r.verdict === "accepted") {
+    // Re-verifying keeps the mutation history (first score included); it is stale if the test changed.
+    const mutation = previous?.mutation
+      ? { ...previous.mutation, stale: previous.mutation.testHash !== undefined && previous.mutation.testHash !== fileHash(r.testFile) }
+      : undefined;
     state.data.accepted.push({
       testFile: relTest, target: r.target ? relPath(r.target, adapter.root) : undefined, tests: r.tests.length,
       gainedLines: r.gainedLines,
       gained: Object.fromEntries(Object.entries(r.gained).map(([f, ls]) => [relPath(f, adapter.root), ls])),
-      attempts, at: state.stamp(),
+      attempts, at: state.stamp(), runner: adapter.runnerName, ...(mutation ? { mutation } : {}),
     });
     state.data.rejected = state.data.rejected.filter((x) => x.testFile !== relTest);
     state.data.notes = state.data.notes.filter((n) => !(n.kind === "suspect" && n.text.startsWith(`${relTest}: `)));

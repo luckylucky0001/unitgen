@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { acquireProjectLock } from "./lock.ts";
+import { type ProcInfo, processTree, signalAll } from "./util.ts";
 import { detectAdapter } from "./adapters/index.ts";
 import { State } from "./state.ts";
 import { recover } from "./mutate.ts";
@@ -27,19 +28,34 @@ async function supervise(): Promise<number> {
       lock?.update({ worker: worker.pid });
       let cancelled = false;
       let force: ReturnType<typeof setTimeout> | undefined;
+      // Every process below the worker and its builds, remembered across snapshots: after a build exits,
+      // helpers in their own process groups (swiftpm-testing-helper, xctest) are re-parented away.
+      const tracked = new Map<number, ProcInfo>();
+      const snapshot = () => {
+        if (process.platform === "win32") return;
+        for (const p of processTree([...(worker.pid ? [worker.pid] : []), ...builds])) tracked.set(p.pid, p);
+        lock?.update({ procs: [...tracked.values()].map((p) => ({ pid: p.pid, start: p.start })) });
+      };
       const kill = (pid: number, hard: boolean) => {
         try {
           if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
           else process.kill(-pid, hard ? "SIGKILL" : "SIGTERM");
         } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH") console.error(`unitgen: could not stop PID ${pid}: ${e}`); }
       };
+      const killTracked = (hard: boolean) => {
+        snapshot();
+        signalAll([...tracked.values()], hard);
+      };
+      const watch = setInterval(snapshot, 3000);
       const stop = () => {
         cancelled = true;
+        snapshot();
         for (const pid of builds) kill(pid, false);
         if (worker.pid) kill(worker.pid, false);
         if (!force) force = setTimeout(() => {
           for (const pid of builds) kill(pid, true);
           if (worker.pid) kill(worker.pid, true);
+          killTracked(true);
         }, 2000);
       };
       process.on("SIGINT", stop); process.on("SIGTERM", stop);
@@ -63,9 +79,14 @@ async function supervise(): Promise<number> {
       worker.on("error", reject);
       worker.on("close", (code) => {
         if (force) clearTimeout(force);
+        clearInterval(watch);
         process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
         process.stdout.removeListener("error", stop); process.stderr.removeListener("error", stop);
+        // A cancelled run, or a worker that died while builds were still registered: nothing it started may
+        // outlive it (helpers in their own process groups included). Normal exits keep build daemons.
+        const abnormal = cancelled || builds.size > 0;
         for (const pid of builds) kill(pid, true);
+        if (abnormal) killTracked(true);
         try {
           if (root) {
             const state = new State(root);

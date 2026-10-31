@@ -7,6 +7,7 @@ import * as path from "node:path";
 import type { Adapter } from "./adapters/types.ts";
 import type { State } from "./state.ts";
 import { exists, log, readFile, readJson, relPath, writeFile } from "./util.ts";
+import { fileHash } from "./verify.ts";
 
 export interface Mutant {
   line: number;
@@ -73,8 +74,9 @@ const OPERATORS: [string, RegExp, string][] = [
   ["* -> /", / \* /, " / "],
   ["true -> false", /\btrue\b/, "false"],
   ["false -> true", /\bfalse\b/, "true"],
-  ["0 -> 1", /(?<![\w.])0(?![\w.x])/, "1"],
-  ["1 -> 0", /(?<![\w.])1(?![\w.])/, "0"],
+  // Not `$0` (Swift closure argument) and not a literal in a type union (`flag: 0 | 1`).
+  ["0 -> 1", /(?<![\w.$])(?<!\|\s*)0(?![\w.x])(?!\s*\|)/, "1"],
+  ["1 -> 0", /(?<![\w.$])(?<!\|\s*)1(?![\w.])(?!\s*\|)/, "0"],
 ];
 
 /** Replace string/char literals with same-length placeholders so operators inside them are ignored. */
@@ -84,17 +86,37 @@ function maskStrings(line: string): string {
 
 const KEYWORD_START = /^(return|val|var|let|const|if|else|for|while|do|throw|try|catch|finally|case|default|guard|defer|import|package|func|fun|class|struct|enum|interface|object|switch|when|break|continue|super|this\s*\(|init|override|private|public|internal|protected|static|export|function|async|await|yield|@)/;
 
-/** A standalone call statement, balanced on one line: `foo.bar(x)`, `save()`, `list.add(y);`. */
-function isCallStatement(t: string): boolean {
-  if (KEYWORD_START.test(t) || /[=:{}]$/.test(t) || !/\)\s*;?$/.test(t) || /^[)\]]/.test(t)) return false;
-  if (!/^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*(<[^>]*>)?\(/.test(t)) return false;
-  let depth = 0;
+/** Parentheses and braces balance (strings masked) and never go negative. */
+function balanced(t: string): boolean {
+  let p = 0, b = 0;
   for (const c of maskStrings(t)) {
-    if (c === "(") depth++;
-    if (c === ")") depth--;
-    if (depth < 0) return false;
+    if (c === "(") p++;
+    if (c === ")") p--;
+    if (c === "{") b++;
+    if (c === "}") b--;
+    if (p < 0 || b < 0) return false;
   }
-  return depth === 0 && !/[^=!<>]=[^=]/.test(maskStrings(t));
+  return p === 0 && b === 0;
+}
+
+const CALL_START = /^(try\s+|await\s+|try\s+await\s+)?[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*(<[^>]*>)?\s*[({]/;
+
+/**
+ * A standalone call statement, balanced on one line: `foo.bar(x)`, `save()`, `list.add(y);`, and
+ * trailing-closure calls `items.forEach { $0.reset() }` / `builder.add(x) { ... }`.
+ */
+function isCallStatement(t: string): boolean {
+  if (KEYWORD_START.test(t.replace(/^(try|await)\s+/, "")) || /^[)\]}]/.test(t) || !CALL_START.test(t)) return false;
+  if (!/(\)|\})\s*;?$/.test(t)) return false;
+  // Before any closure body: no assignment (`a = f()`, `let x = ...`).
+  const head = maskStrings(t).split("{")[0];
+  return balanced(t) && !/[^=!<>]=[^=]/.test(head);
+}
+
+/** A member assignment statement on one line: `this.total = a + b;`, `self.state = .idle`. */
+function isMemberAssignment(t: string): boolean {
+  const m = maskStrings(t);
+  return /^(this|self)\.[A-Za-z_$][\w$.]*\s*=[^=]/.test(m) && balanced(t) && !/[{]\s*$/.test(m);
 }
 
 /** Logging statements: mutating them (or the string concatenation inside) changes nothing a test should check. */
@@ -132,25 +154,43 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
     if (cond) {
       const inner = original.slice(cond.index, cond.index + cond[0].length).replace(/\(\s*(!?[A-Za-z_$][\w$.]*(?:\(\))?)\s*\)/, (_, x: string) => (x.startsWith("!") ? `(${x.slice(1)})` : `(!${x})`));
       out.push({ line: ln, op: "negate condition", original, mutated: original.slice(0, cond.index) + inner + original.slice(cond.index + cond[0].length) });
+    } else {
+      // Swift/Kotlin-style without parentheses: `if flag {`, `guard isReady else {`, `while hasMore {`.
+      const bare = /\b(if|guard|while)\s+(!?)([A-Za-z_$][\w$.]*(?:\(\))?)\s*(\{|else\b)/.exec(masked);
+      if (bare && !/^(let|var|case)$/.test(bare[3])) {
+        const at = bare.index + bare[0].indexOf(bare[2] + bare[3]);
+        const mutated = original.slice(0, at) + (bare[2] ? original.slice(at + 1) : `!${original.slice(at)}`);
+        out.push({ line: ln, op: "negate condition", original, mutated });
+      }
     }
-    // Statement deletion: does any test notice the call never happens?
+    // Integer constants other than 0/1 (limits, factors, sizes): n -> n + 1.
+    const num = /(?<![\w.$#])(?<!\|\s*)([2-9]|[1-9]\d{1,5})(?![\w.])(?!\s*\|)/.exec(masked);
+    if (num && !/^\s*(case\b|import\b|#)/.test(original)) {
+      out.push({ line: ln, op: `${num[1]} -> ${Number(num[1]) + 1}`, original, mutated: original.slice(0, num.index) + String(Number(num[1]) + 1) + original.slice(num.index + num[1].length) });
+    }
+    // Statement deletion: does any test notice the call (or the stored value) never happens?
     if (isCallStatement(t)) {
       out.push({ line: ln, op: "delete statement", original, mutated: original.replace(t, "/* unitgen: statement deleted */") });
-    } else if (/^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\($/.test(t) && !KEYWORD_START.test(t)) {
-      // Multi-line call: `dao.insert(` ... `)` — delete the whole statement if it closes cleanly.
-      let depth = 0;
+    } else if (isMemberAssignment(t)) {
+      out.push({ line: ln, op: "delete assignment", original, mutated: original.replace(t, "/* unitgen: assignment deleted */") });
+    } else if (!KEYWORD_START.test(t.replace(/^(try|await)\s+/, "")) && (/^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\($/.test(t) || (CALL_START.test(t) && /\{\s*(\w+(\s*,\s*\w+)*\s+in)?\s*$/.test(t) && !/[^=!<>]=[^=]/.test(maskStrings(t).split("{")[0])))) {
+      // Multi-line call: `dao.insert(` ... `)`, or a trailing closure `builder.add(x) {` ... `}`:
+      // delete the whole statement if it closes cleanly.
+      let p = 0, b = 0;
       let end = -1;
-      for (let j = ln - 1; j < src.length && j < ln + 40; j++) {
-        for (const c of maskStrings(src[j])) {
-          if (c === "(") depth++;
-          if (c === ")") depth--;
+      for (let j = ln - 1; j < src.length && j < ln + 60; j++) {
+        for (const c of maskStrings(src[j].replace(/\/\/.*$/, ""))) {
+          if (c === "(") p++;
+          if (c === ")") p--;
+          if (c === "{") b++;
+          if (c === "}") b--;
         }
-        if (depth === 0) {
+        if (p === 0 && b === 0) {
           end = j + 1;
           break;
         }
       }
-      if (end > ln && /\)\s*;?\s*$/.test(src[end - 1])) {
+      if (end > ln && /(\)|\})\s*;?\s*$/.test(src[end - 1])) {
         const indent = original.slice(0, original.length - original.trimStart().length);
         out.push({ line: ln, endLine: end, op: "delete statement", original: src.slice(ln - 1, end).join("\n"), mutated: `${indent}/* unitgen: statement deleted */` });
       }
@@ -160,7 +200,7 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
 }
 
 const PRIORITY = (op: string): number =>
-  op === "delete statement" ? 0 : op === "negate condition" ? 1 : /[<>=!]=?|&&|\|\|/.test(op.split(" ")[0]) ? 2 : /^[+\-*]/.test(op) ? 3 : 4;
+  op === "delete statement" || op === "delete assignment" ? 0 : op === "negate condition" ? 1 : /[<>=!]=?|&&|\|\|/.test(op.split(" ")[0]) ? 2 : /^[+\-*]/.test(op) ? 3 : /^\d+ -> \d+$/.test(op) && !/^[01] ->/.test(op) ? 5 : 4;
 
 /** Spread picks over distinct lines first (evenly spaced), then second operators per line, deterministically. */
 export function pickMutants(all: Mutant[], max: number): Mutant[] {
@@ -258,9 +298,10 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
       else if (r.infraError) outcome = "error";
       else if (!r.compiled) outcome = "stillborn";
       else if (!r.ok || r.tests.some((t) => t.status === "failed")) {
-        // Killed by a crash (ReferenceError/TypeError) rather than an assertion: still a detected change, but flag it.
-        const msgs = r.tests.filter((t) => t.status === "failed").map((t) => t.message ?? "").join("\n");
-        outcome = msgs && !/assert|expect|Expectation|AssertionError|expected/i.test(msgs) ? "killed-crash" : "killed";
+        // Killed by a crash (ReferenceError/TypeError, index out of range, a process that died) rather than
+        // by an assertion: still a detected change, but flag it.
+        const asserted = r.tests.some((t) => t.status === "failed" && /assert|expect|Expectation|AssertionError|expected|XCTAssert|#require/i.test(t.message ?? ""));
+        outcome = asserted ? "killed" : "killed-crash";
       }
       else outcome = r.tests.length ? "survived" : "error";
       results.push({ ...mu, outcome });
@@ -284,14 +325,15 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
       `\nIf a survivor cannot change observable behaviour (equivalent mutant), exclude just that mutant by its id, e.g. unitgen mutate ${relTest} --equivalent ${surv[0].id} (a bare line number excludes every mutant on the line), and say why with unitgen note`
     : "";
   // Across runs: which candidates were ever evaluated (re-runs walk through the rest).
-  const tried = new Set([...prev.filter((r) => r.outcome !== "stillborn").map(key), ...results.filter((r) => r.outcome !== "stillborn").map(key)]);
+  // Mutants that did not compile count as tried too: re-running them would only fail to compile again.
+  const tried = new Set([...prev.map(key), ...results.map(key)]);
   const triedTotal = all.filter((mu) => tried.has(key(mu))).length;
   const report: MutationReport = { testFile: relTest, target: relPath(absTarget, adapter.root), killed, crashes, survived, stillborn, score, results, feedback, candidates: all.length,
     excluded: excluded.length, triedTotal, history: [...prev.filter((r) => !results.some((x) => key(x) === key(r))), ...results] };
   const acc = state.data.accepted.find((a) => a.testFile === relTest);
   if (acc) {
     const first = acc.mutation?.first ?? Math.round(score * 100) / 100;
-    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first, crashes, equivalent: excluded.length };
+    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first, crashes, equivalent: excluded.length, testHash: fileHash(absTest) };
     state.save();
   }
   writeFile(state.file("mutation", `${path.basename(absTest)}.json`), JSON.stringify({ ...report, results: report.history }, null, 2));
@@ -300,12 +342,12 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
 
 export function formatMutation(r: MutationReport): string {
   if (!r.candidates) return `mutation: NOT_APPLICABLE — ${r.feedback}`;
-  const sampled = r.results.filter((x) => x.outcome !== "stillborn").length;
-  const tried = r.triedTotal ?? sampled;
-  const note = (r.candidates > sampled
-    ? tried >= r.candidates ? `\nran ${sampled} of ${r.candidates} mutants this time; all ${r.candidates} have been evaluated across runs`
-      : `\nran ${sampled} of ${r.candidates} possible mutants (${tried} evaluated across runs); re-run to try the next ones, or use --max ${r.candidates} for all`
-    : "") + (r.excluded ? `\n${r.excluded} mutant(s) excluded as equivalent (not run)` : "");
+  const ran = r.results.length;
+  const tried = r.triedTotal ?? ran;
+  const note = (tried >= r.candidates
+    ? ran < r.candidates ? `\nall ${r.candidates} candidate mutants have been evaluated (${ran} this run)` : ""
+    : `\nevaluated ${tried} of ${r.candidates} candidate mutants so far (${ran} this run); re-run to try the next ones, or use --max ${r.candidates} for all`)
+    + (r.excluded ? `\n${r.excluded} mutant(s) excluded as equivalent (not run)` : "");
   const head0 = `mutation score: ${(r.score * 100).toFixed(0)}%  (killed ${r.killed}${r.crashes ? `, of which ${r.crashes} only by a crash, not an assertion` : ""}, survived ${r.survived}, did not compile ${r.stillborn})  ${r.testFile} -> ${r.target}`;
   const head = head0 + note;
   return r.feedback ? `${head}\n\n${r.feedback}` : head;
