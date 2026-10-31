@@ -23,6 +23,8 @@ export interface VerifyResult {
   targetCoverage?: { covered: number; executable: number; pct: number };
   /** Lines this version adds over the previously accepted version of the same file. */
   deltaLines?: number;
+  /** The file was accepted before this (failed) verify: it stops counting until it passes again. */
+  lapsed?: boolean;
   suspects: string[];
   feedback: string;
   logFile?: string;
@@ -168,11 +170,20 @@ export function fileHash(file: string): string | undefined {
 function finish(adapter: Adapter, state: State, r: VerifyResult, opts: VerifyOpts): void {
   if (opts.record === false) return;
   const relTest = relPath(r.testFile, adapter.root);
+  // An environment problem says nothing about the test: an accepted file stays accepted.
+  if (r.verdict === "infra_error" && opts.onFail !== "quarantine") return;
   // Attempts = verify runs until first acceptance; strengthening an accepted file doesn't count.
-  const previous = state.data.accepted.find((a) => a.testFile === relTest);
+  const lapsed = state.data.lapsed?.[relTest];
+  const previous = state.data.accepted.find((a) => a.testFile === relTest) ?? lapsed;
   // Environment problems are not attempts at writing the test.
-  const attempts = opts.attempts ?? (previous || r.verdict === "infra_error" ? state.data.attempts?.[relTest] ?? 1 : state.bumpAttempts(relTest));
+  const attempts = opts.attempts ?? (previous || r.verdict === "infra_error" ? previous?.attempts ?? state.data.attempts?.[relTest] ?? 1 : state.bumpAttempts(relTest));
+  const wasAccepted = state.data.accepted.find((a) => a.testFile === relTest);
   state.data.accepted = state.data.accepted.filter((a) => a.testFile !== relTest);
+  if (r.verdict === "accepted") { if (lapsed) delete state.data.lapsed![relTest]; }
+  else if (wasAccepted) {
+    (state.data.lapsed ??= {})[relTest] = { ...wasAccepted, verdict: r.verdict };
+    r.lapsed = true;
+  }
   if (r.verdict === "accepted") {
     // Re-verifying keeps the mutation history (first score included); it is stale if the test changed.
     const mutation = previous?.mutation
@@ -227,6 +238,7 @@ export function formatVerify(r: VerifyResult, root: string): string {
     for (const [f, ls] of Object.entries(r.gained)) lines.push(`  ${relPath(f, root)}: ${ranges(ls)}`);
   }
   if (r.suspects.length && r.verdict === "accepted") lines.push(`suspected bugs flagged: ${r.suspects.length}`, ...r.suspects.map((s) => `  ${s}`));
+  if (r.lapsed) lines.push(`note: this file was ACCEPTED before. Until it passes verify again it does not count (coverage, report, mutate); its history is kept.`);
   if (r.feedback) lines.push("", r.feedback);
   if (r.logFile) lines.push("", `log: ${r.logFile}`);
   // Repeat the verdict last: long compiler output pushes the first line out of view.

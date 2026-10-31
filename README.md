@@ -276,6 +276,12 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 | 进程管理 | 被强杀后要手动确认 PID 再删锁，变异过的源码要等下一条命令才能还原 | 下一条命令自动接管过期锁，停掉能确认身份的残留进程，还原源码、`List.test.ets` 和 `Package.swift` |
 | 变异测试 | 升级后，用旧版本标过的 `--equivalent` 失效，得分莫名下降（CoolMallArkTS 的 ValidationUtil 从 100% 掉到 97%） | 识别旧格式的键，第一次命中时改写成新格式 |
 | 变异测试 | 每个 ArkTS/Swift 数据类都会产生注定编译不过的变异：删掉构造函数里对无默认值字段的赋值、把整个构造函数当成语句删掉、`x == null \|\| x.y` 改成 `&&`。hvigor 下每个要白跑 2–3 秒（CoolMallArkTS 的 CategoryTree 28 个候选里有 9 个） | 不再生成这几类变异（只看同一个类里的字段声明）。用 10 个项目已有的变异结果对照：去掉的 12 个之前全都编译不过，真正的杀死和幸存一个没少。CategoryTree 降到 21 个候选、2 个编译不过 |
+| 鸿蒙 hvigor | 一次中断的构建（编译不过的变异体、超时）会写坏 hvigor 自己的 `init_coverage.json`，之后每次 verify 都报 INFRA_ERROR「覆盖率拿不到」，还误导人改用 shim（Aigis 开箱实测） | 每次带覆盖率的运行前检查这个文件，坏了就删掉模块的 `.test/` 让 hvigor 重新插桩；复现后验证一次 verify 4 秒内自动恢复 |
+| 鸿蒙 brief | 系统 API 返回的对象（`const mac = cryptoFramework.createMac()` 之后的 `mac.update()`、`mac.doFinal()`）没有标 `!~`，子代理照着 RFC 向量写断言，结果 Previewer 里 HMAC 是模拟的 | 由系统 API 返回值派生出的变量所在行一并标 `!~` |
+| 鸿蒙 targets | 只导出一个 `@Builder` 的页面被排成 logic | ArkUI 剥离后留下的空壳不再算导出 |
+| iOS Xcode | 工程在 `/tmp` 这类符号链接路径下时，xccov 报的路径对不上，基线 0/0；brief 里 `@testable import SwiftyJSON_iOS` 用了 target 名（模块其实叫 `SwiftyJSON`）；部署目标 iOS 9 也建议用 Swift Testing；构建产物写进 `~/Library/.../DerivedData`（SwiftyJSON 开箱实测） | 所有路径统一解析符号链接；模块名读 `PRODUCT_MODULE_NAME`；部署目标低于 iOS 13 / macOS 10.15 时只建议 XCTest；构建放在 `.unitgen/DerivedData` |
+| verify | 环境错误（INFRA_ERROR）或一次失败的重新验证，会把已接受的测试连同覆盖率和变异历史一起丢掉，`mutate` 随后报一个看不懂的「pass --target」；INFRA_ERROR 退出码是 2 | 环境错误不改动状态，退出码改为 1；真正失败时该文件暂停计数，历史保留，再次通过后恢复；`status` 和 `mutate` 会说明原因 |
+| 变异测试 | 测试文件没变时，已知的幸存者每次都重跑（Aigis 一轮 21 次里 15 次是重复）；`x = .string`、`obj.secret = undefined` 这类赋值、抛出的错误消息、返回的模板字符串都没有变异体；`"0" + s` 被改成 `"0" - s`，`self.init(...)` 被删，都注定编译不过；每个变异体的完整测试输出刷屏 | 幸存者只在测试文件改动后重跑；补上这几类变异（赋值删除只在该行没有其他变异时生成）；跳过注定编译不过的两类；变异体的构建输出只写日志 |
 | 基线 | 重跑基线时，已经接受的生成测试被算进「改造前」（报告写成 6% → 34%，实际起点是 0） | 基线只跑项目原有的测试（四种运行器都处理了） |
 | 基线 | 因为平台桩而失败的旧测试让基线作废；shim 和 hvigor 的数据混在一起 | shim 下自动容忍这类失败（会列出来），其他情况用 `--allow-failing`；记录运行器，不一致时拒绝 verify |
 | 变异测试 | Swift 的 `if cond {`、尾随闭包、成员赋值、`case .x: return 2001`、返回的字符串都没有变异体：Rainbow 的 ConditionalStyleBuilder 只有 2 个候选，Kingfisher 的「100%」是虚高 | 补上这些算子；不再生成 `$0 → $1`、类型联合 `0 \| 1` 这类注定编译不过的变异 |

@@ -33,6 +33,8 @@ export interface StateData {
   accepted: AcceptedTest[];
   rejected: RejectedTest[];
   notes: { at: string; text: string; kind: string }[];
+  /** Accepted files whose latest verify failed: kept so their history returns once they pass again. */
+  lapsed?: Record<string, AcceptedTest & { verdict: string }>;
   /** verify runs per test file (relative path), so the report shows real attempt counts. */
   attempts?: Record<string, number>;
   /** Modules the last baseline could not build (name -> reason). */

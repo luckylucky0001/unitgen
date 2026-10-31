@@ -11,6 +11,7 @@ import { mutantsFor, mutate, mutationGate, type MutationReport } from "../src/mu
 import { State } from "../src/state.ts";
 import type { Adapter } from "../src/adapters/types.ts";
 import { generate, recoverGeneration } from "../src/generate.ts";
+import { verify } from "../src/verify.ts";
 import { GradleAdapter } from "../src/adapters/gradle.ts";
 
 function temp(t: { after: (fn: () => void) => void }): string {
@@ -345,6 +346,7 @@ test("a hanging mutant counts as a crash-only kill; outcomes measured with anoth
   const first = await mutate(adapter, state, testFile, target, 5);
   assert.equal(first.killed, 1);
   assert.equal(first.crashes, 1);
+  // (survivors are covered by "a survivor of an unchanged test file is not run again")
   assert.equal(mutantRuns, 1);
   mutantRuns = 0;
   await mutate(adapter, state, testFile, target, 5);
@@ -352,6 +354,78 @@ test("a hanging mutant counts as a crash-only kill; outcomes measured with anoth
   (adapter as { runnerName?: string }).runnerName = "hvigor";
   await mutate(adapter, state, testFile, target, 5);
   assert.equal(mutantRuns, 1);
+});
+
+test("a survivor of an unchanged test file is not run again; after the test changes it goes first", async (t) => {
+  const dir = temp(t), target = path.join(dir, "A.kt"), testFile = path.join(dir, "tests", "AUnitGenTest.kt");
+  fs.mkdirSync(path.dirname(testFile));
+  fs.writeFileSync(testFile, "assertEquals(1, a())\n");
+  fs.writeFileSync(target, "fun a(): Int {\n    save()\n    return 1\n}\n");
+  const state = new State(dir);
+  const relTest = path.relative(dir, testFile);
+  state.setTestCoverage(relTest, { [target]: { 2: 1 } });
+  state.data.accepted.push({ testFile: relTest, target: "A.kt", tests: 1, gainedLines: 1, gained: {}, attempts: 1, at: state.stamp() });
+  state.save();
+  const module = { name: ":app", dir, sourceRoots: [dir], testRoot: path.dirname(testFile), kind: "android" };
+  let mutantRuns = 0;
+  const adapter: Adapter = {
+    id: "fixture", platform: "android", root: dir, testFileSuffix: "UnitGenTest.kt",
+    doctor: () => ({ ok: true, lines: [] }), modules: () => [module], moduleFor: () => module,
+    sourceFiles: () => [target], classify: () => "logic", conventions: () => "", placement: () => ({ path: testFile, suiteName: "AUnitGenTest" }),
+    exampleTests: () => [], prepareTestFile: () => {}, countAssertions: () => 1,
+    async runTests(req) {
+      if (!req.label.endsWith("-0-clean")) mutantRuns++;
+      return { ok: true, compiled: true, tests: [{ name: "AUnitGenTest.a", status: "passed" }], logFile: "fixture", excerpt: "", seconds: 0.01 };
+    },
+  };
+  assert.equal((await mutate(adapter, state, testFile, target, 5)).survived, 1);
+  assert.equal(mutantRuns, 1);
+  mutantRuns = 0;
+  assert.equal((await mutate(adapter, state, testFile, target, 5)).survived, 1);
+  assert.equal(mutantRuns, 0);
+  fs.writeFileSync(testFile, "assertEquals(1, a())\nverify(save)\n");
+  await mutate(adapter, state, testFile, target, 5);
+  assert.equal(mutantRuns, 1);
+});
+
+test("an environment error leaves an accepted file alone; a failing re-verify keeps its history for later", async (t) => {
+  const dir = temp(t), target = path.join(dir, "A.kt"), testFile = path.join(dir, "tests", "AUnitGenTest.kt");
+  fs.mkdirSync(path.dirname(testFile));
+  fs.writeFileSync(target, "fun a(): Int {\n    return 1\n}\n");
+  fs.writeFileSync(testFile, "assertEquals(1, a())\n");
+  const state = new State(dir);
+  state.baselineCoverage = { [target]: { 2: 0 } };
+  const module = { name: ":app", dir, sourceRoots: [dir], testRoot: path.dirname(testFile), kind: "android" };
+  let mode: "pass" | "fail" | "infra" = "pass";
+  const adapter: Adapter = {
+    id: "fixture", platform: "android", root: dir, testFileSuffix: "UnitGenTest.kt",
+    doctor: () => ({ ok: true, lines: [] }), modules: () => [module], moduleFor: () => module,
+    sourceFiles: () => [target], classify: () => "logic", conventions: () => "", placement: () => ({ path: testFile, suiteName: "AUnitGenTest" }),
+    exampleTests: () => [], prepareTestFile: () => {}, countAssertions: () => 1,
+    async runTests(req) {
+      if (mode === "infra") return { ok: false, compiled: false, tests: [], logFile: "fixture", excerpt: "", seconds: 0, infraError: "SDK missing" };
+      const failed = mode === "fail";
+      return { ok: !failed, compiled: true, tests: [{ name: "AUnitGenTest.a", status: failed ? "failed" : "passed", message: failed ? "AssertionError: expected 2" : undefined }],
+        coverage: req.coverage ? { [target]: { 2: 1 } } : undefined, logFile: "fixture", excerpt: "", seconds: 0.01 };
+    },
+  };
+  assert.equal((await verify(adapter, state, testFile, { target, reruns: 1 })).verdict, "accepted");
+  state.data.accepted[0].mutation = { killed: 1, survived: 1, stillborn: 0, score: 0.5, first: 0.5 };
+  state.save();
+  mode = "infra";
+  assert.equal((await verify(adapter, state, testFile, { target, reruns: 1 })).verdict, "infra_error");
+  assert.equal(state.data.accepted.length, 1);
+  assert.ok(state.perTestCoverage[path.relative(dir, testFile)]);
+  mode = "fail";
+  const failed = await verify(adapter, state, testFile, { target, reruns: 1 });
+  assert.equal(failed.verdict, "test_failures");
+  assert.equal(failed.lapsed, true);
+  assert.equal(state.data.accepted.length, 0);
+  mode = "pass";
+  assert.equal((await verify(adapter, state, testFile, { target, reruns: 1 })).verdict, "accepted");
+  assert.equal(state.data.accepted[0].mutation?.first, 0.5);
+  assert.equal(state.data.accepted[0].attempts, 1);
+  assert.deepEqual(state.data.lapsed, {});
 });
 
 test("equivalence marks recorded with the older key format still exclude their mutant", async (t) => {
@@ -436,7 +510,9 @@ test("generate feeds mutation failures back to the model and accepts strengthene
     if (req.label.endsWith("-0-clean")) throw new RunCancelled();
     return await runTests(req);
   };
-  await assert.rejects(generate(adapter, state, weak, { files: [target], limit: 1, attempts: 1, reruns: 1, mutationMax: 1 }), RunCancelled);
+  // A different test file (the weak one's survivor is already decided and would not run again).
+  const retry = { name: "retry", async complete() { return "assertEquals(1, answer()) // retry"; } };
+  await assert.rejects(generate(adapter, state, retry, { files: [target], limit: 1, attempts: 1, reruns: 1, mutationMax: 1 }), RunCancelled);
   assert.equal(state.data.accepted.length, 0);
   assert.equal(Object.keys(state.perTestCoverage).length, 0);
 });

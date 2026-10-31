@@ -9,7 +9,7 @@ import { pickBackend } from "./llm.ts";
 import { buildReport } from "./report.ts";
 import { State } from "./state.ts";
 import { formatTargets, rankTargets } from "./targets.ts";
-import { exists, log, relPath, walkFiles, writeFile } from "./util.ts";
+import { canonical, exists, log, relPath, walkFiles, writeFile } from "./util.ts";
 import { formatVerify, quarantine, verify } from "./verify.ts";
 import { formatMutation, mutate, mutationGate, recover } from "./mutate.ts";
 import * as fs from "node:fs";
@@ -98,10 +98,10 @@ export async function main(argv: string[]): Promise<number> {
     process.stdout.write(`${own.length ? own.join("\n") : `unknown command: ${cmd}`}\n\nCommon: -C <dir>  --adapter <id>  --module <name>  --json\n`);
     return 0;
   }
-  const root = path.resolve(o.project ?? process.cwd());
+  const root = canonical(o.project ?? process.cwd());
   const adapter = detectAdapter(root, o.adapter);
   // File arguments may be given relative to the project root (as `targets` prints them) when -C is used.
-  const fileArg = (p: string | undefined) => p && !path.isAbsolute(p) && !exists(p) && exists(path.resolve(adapter.root, p)) ? path.resolve(adapter.root, p) : p;
+  const fileArg = (p: string | undefined) => p && canonical(!path.isAbsolute(p) && !exists(p) && exists(path.resolve(adapter.root, p)) ? path.resolve(adapter.root, p) : p);
   if (["brief", "verify", "mutate", "reject"].includes(cmd) && rest[0]) rest[0] = fileArg(rest[0])!;
   if (o.target) o.target = fileArg(o.target);
   const positive = (name: string, fallback: number) => {
@@ -239,7 +239,8 @@ export async function main(argv: string[]): Promise<number> {
         target: o.target ?? inferTarget(adapter, rest[0]), reruns, allowNoGain: o["allow-no-gain"], onFail: o.quarantine ? "quarantine" : "keep",
       });
       print(formatVerify(r, root), r);
-      return r.verdict === "accepted" ? 0 : 2;
+      // An environment problem is not a verdict on the test (exit codes: 1 = environment, 2 = gate).
+      return r.verdict === "accepted" ? 0 : r.verdict === "infra_error" ? 1 : 2;
     }
     case "mutate": {
       if (!rest[0]) throw new Error("usage: unitgen mutate <test-file> [--target <source>] [--max 10]");
@@ -254,6 +255,8 @@ export async function main(argv: string[]): Promise<number> {
         throw new Error(`${relTest} was accepted with ${acc.runner}; run \`unitgen verify ${relTest}\` with ${adapter.runnerName} before mutating`);
       }
       const tgt = o.target ?? acc?.target;
+      const lapsed = state.data.lapsed?.[relTest];
+      if (!acc && lapsed) throw new Error(`${relTest} was accepted before, but its latest verify returned ${lapsed.verdict.toUpperCase()}: make it pass (\`unitgen verify ${relTest}\`) before mutating`);
       if (!tgt) throw new Error("pass --target <source> (no accepted target recorded for this test file)");
       if (ids.length) {
         const eq = (state.data.equivalent ??= {});
@@ -301,7 +304,9 @@ export async function main(argv: string[]): Promise<number> {
       const suspects = d.notes.filter((n) => n.kind === "suspect").length;
       print([`adapter: ${adapter.id}`,
         `baseline: ${d.baseline ? `${d.baseline.at}${d.baseline.ok ? "" : " (INVALID: run `unitgen baseline`)"}${d.baseline.runner ? `, runner ${d.baseline.runner}` : ""}` : "none"}`,
-        `accepted: ${d.accepted.length}`, `rejected: ${d.rejected.length}`, `suspected bugs: ${suspects}`, `notes: ${d.notes.length - suspects}`].join("\n"), d);
+        `accepted: ${d.accepted.length}`,
+        ...Object.entries(d.lapsed ?? {}).map(([f, a]) => `  not counting until it passes again: ${f} (latest verify: ${a.verdict.toUpperCase()})`),
+        `rejected: ${d.rejected.length}`, `suspected bugs: ${suspects}`, `notes: ${d.notes.length - suspects}`].join("\n"), d);
       return 0;
     }
     default:

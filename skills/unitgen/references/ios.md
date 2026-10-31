@@ -29,7 +29,11 @@
 - Generated files go into the existing test target that tests the module (the brief names the
   file); classic targets get the file registered in `project.pbxproj`, synchronized folders need
   nothing. Commit that pbxproj change together with the test file.
-- xcodebuild runs are slow (tens of seconds): keep `mutate --max` small (10).
+- xcodebuild runs are slow (tens of seconds): keep `mutate --max` small (10). The build goes to
+  `.unitgen/DerivedData` (the first run builds from scratch; an open Xcode is not disturbed).
+- The brief's `@testable import` uses the target's PRODUCT_MODULE_NAME (target `Foo iOS` usually
+  builds module `Foo`), and says XCTest only when the test target's deployment target is older
+  than Swift Testing supports (iOS 13 / macOS 10.15).
 
 ## Writing the test
 

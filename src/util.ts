@@ -230,6 +230,24 @@ export function exists(p: string): boolean {
   return fs.existsSync(p);
 }
 
+/**
+ * The path with symlinks resolved (`/tmp/x` -> `/private/tmp/x` on macOS), also for a file that does
+ * not exist yet (its nearest existing parent is resolved). Build tools report whichever spelling they
+ * were given, so every path unitgen compares goes through this.
+ */
+export function canonical(p: string): string {
+  const abs = path.resolve(p);
+  const tail: string[] = [];
+  let cur = abs;
+  for (;;) {
+    try { return path.join(fs.realpathSync(cur), ...tail.reverse()); } catch { /* does not exist (yet) */ }
+    const up = path.dirname(cur);
+    if (up === cur) return abs;
+    tail.push(path.basename(cur));
+    cur = up;
+  }
+}
+
 export function readFile(p: string): string {
   return fs.readFileSync(p, "utf8");
 }

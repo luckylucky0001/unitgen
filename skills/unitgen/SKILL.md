@@ -92,12 +92,13 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
       | verdict | what to do |
       |---|---|
       | `ACCEPTED` | done; move on |
+      | any other verdict on a file that was `ACCEPTED` before | it stops counting (coverage, report, mutate) until it passes again; its history is kept. Fix it or put the previous version back |
       | `COMPILE_ERROR` | fix the test using the compiler output |
       | `TEST_FAILURES` | re-read the production code; fix the *expectation*. If the code is really wrong, assert current behaviour and add `// UNITGEN-SUSPECT: <why>` (collected into the report automatically). If the feedback lists stubbed APIs, check whether the failing value comes from one before calling it a bug |
       | `FLAKY` | remove the source of nondeterminism (time, ordering, shared state, real dispatchers) |
       | `NO_GAIN` | the tests only hit already-covered lines; aim at the `!` lines in a fresh brief. `--allow-no-gain` only when a file is intentionally redundant, and say why in a note |
       | `NO_ASSERTIONS` / `NO_TESTS` | add real assertions / check suite & class naming |
-      | `INFRA_ERROR` | environment problem (missing SDK, uninstalled ohpm packages, production code that does not compile, coverage that never arrives, ...): follow the fix the message names or report it and pick another target; don't edit tests to dodge it. It does not count as an attempt |
+      | `INFRA_ERROR` | environment problem (missing SDK, uninstalled ohpm packages, production code that does not compile, coverage that never arrives, ...): follow the fix the message names or report it and pick another target; don't edit tests to dodge it. It does not count as an attempt, and an already accepted file stays accepted (exit 1, not 2) |
 
    5. **Check assertion strength:** `"$UNITGEN" mutate <test-file>` changes the lines your test
       covers (operators, conditions, constants, returned strings, deleted calls and assignments)

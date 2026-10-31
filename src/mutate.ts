@@ -190,6 +190,13 @@ function isCallStatement(t: string): boolean {
   return balanced(t) && !/[^=!<>]=[^=]/.test(head);
 }
 
+/** `name = value`, `a.b.c = value`, `n += 1` on one line (not a declaration, not `this.`/`self.`). */
+function isPlainAssignment(t: string): boolean {
+  const m = maskStrings(t);
+  return !KEYWORD_START.test(t) && /^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\s*([+\-*\/%]|\?\?)?=(?![=>])/.test(m)
+    && !/^(this|self)\./.test(m) && balanced(t) && !/[{(\[]\s*$/.test(m);
+}
+
 /** A member assignment statement on one line: `this.total = a + b;`, `self.state = .idle`. */
 function isMemberAssignment(t: string): boolean {
   const m = maskStrings(t);
@@ -244,6 +251,8 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
       const m = re.exec(masked);
       if (!m) continue;
       if ((op === "|| -> &&" && nullGuard(masked, "||", text)) || (op === "&& -> ||" && nullGuard(masked, "&&", text))) continue;
+      // `"0" + s` is a concatenation: `"0" - s` never compiles.
+      if (op === "+ -> -" && (masked[m.index - 1] === "\u0000" || masked[m.index + m[0].length] === "\u0000")) continue;
       const mutated = original.slice(0, m.index) + rep + original.slice(m.index + m[0].length);
       out.push({ line: ln, op, original, mutated });
     }
@@ -287,16 +296,37 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
       const q = ret[1][0];
       out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + q + q + original.slice(at + ret[1].length) });
     }
+    // Thrown messages (`throw new Error('bad input')`): does a test look at which error it was?
+    const thrown = /\bthrow\b.*?("(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+'|`[^`]+`)/.exec(comment >= 0 ? original.slice(0, comment) : original);
+    if (thrown && !/\\\(/.test(thrown[1])) {
+      const at = thrown.index + thrown[0].length - thrown[1].length;
+      const q = thrown[1][0];
+      out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + q + q + original.slice(at + thrown[1].length) });
+    }
+    // Returned template literals (`return \`${a}-${b}\``) are built strings too.
+    const tpl = /\breturn\s+(`[^`]*`)/.exec(comment >= 0 ? original.slice(0, comment) : original);
+    if (tpl && tpl[1].length > 2) {
+      const at = tpl.index + tpl[0].length - tpl[1].length;
+      out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + "``" + original.slice(at + tpl[1].length) });
+    }
+    const before = out.filter((x) => x.line === ln).length;
     // Statement deletion: does any test notice the call (or the stored value) never happens?
     // Not when the statement continues on the next line (`x = items` + `.filter(...)`) or this line
     // continues the previous one: deleting part of an expression only yields a syntax error.
     const next = src.slice(ln).find((l) => l.trim() && !/^\s*\/\//.test(l))?.trim() ?? "";
     const prev = [...src.slice(0, ln - 1)].reverse().find((l) => l.trim() && !/^\s*\/\//.test(l))?.replace(/\/\/.*$/, "").trimEnd() ?? "";
     const partOfLonger = /^(\?\.|\.|[+\-*/%]|&&|\|\||\?\?|\?|:|\)|\]|,)/.test(next) || /([=(\[,.+\-*/%&|?:]|=>)$/.test(prev);
-    if (partOfLonger) { /* no deletion mutant */ } else if (isCallStatement(t)) {
+    // A delegating initializer must call `self.init`: deleting it never compiles.
+    if (partOfLonger || /^self\.init\b/.test(t)) { /* no deletion mutant */ } else if (isCallStatement(t)) {
       out.push({ line: ln, op: "delete statement", original, mutated: original.replace(t, "/* unitgen: statement deleted */") });
     } else if (isMemberAssignment(t)) {
       const field = /^(?:this|self)\.([A-Za-z_$][\w$]*)\s*=/.exec(t)?.[1];
+      if (field && inConstructor(src, ln) && fieldWithoutDefault(enclosingType(src, ln), field)) continue;
+      out.push({ line: ln, op: "delete assignment", original, mutated: original.replace(t, "/* unitgen: assignment deleted */") });
+    } else if (before === 0 && isPlainAssignment(t)) {
+      // `type = .string`, `obj.secret = undefined`, `count += 1`: otherwise nothing on such a line
+      // is mutated at all. Only when no other operator applies, to keep the budget for conditions.
+      const field = /^([A-Za-z_$][\w$]*)\s*=/.exec(t)?.[1];
       if (field && inConstructor(src, ln) && fieldWithoutDefault(enclosingType(src, ln), field)) continue;
       out.push({ line: ln, op: "delete assignment", original, mutated: original.replace(t, "/* unitgen: assignment deleted */") });
     } else if (!DECLARATION.test(original) && !TS_METHOD.test(original) && !KEYWORD_START.test(t.replace(/^(try|await)\s+/, "")) && (/^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\($/.test(t) || (CALL_START.test(t) && /\{\s*(\w+(\s*,\s*\w+)*\s+in)?\s*$/.test(t) && !/[^=!<>]=[^=]/.test(maskStrings(t).split("{")[0])))) {
@@ -411,7 +441,8 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   const rank = (mu: Mutant) => {
     const r = prevBy.get(key(mu));
     if (!r) return 1;
-    if (r.outcome === "survived" || r.outcome === "error") return 0;
+    // A survivor measured with this exact test file is decided; after strengthening it goes first.
+    if (r.outcome === "error" || (r.outcome === "survived" && !valid(r))) return 0;
     return valid(r) ? 3 : 2;
   };
   const fresh = all.filter((mu) => rank(mu) < 3);
@@ -432,6 +463,10 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
     fs.copyFileSync(absTarget, backup);
     writeFile(journal(state), JSON.stringify({ target: absTarget, backup }));
     const base = path.basename(absTest).replace(/\W+/g, "_");
+    // Mutant runs print one result line each; their build/test output goes to the per-mutant logs only
+    // (hundreds of test-output lines per mutant otherwise flood an agent's context).
+    const quiet = process.env.UNITGEN_QUIET;
+    process.env.UNITGEN_QUIET = "1";
     try {
       const clean = await adapter.runTests({ testFiles: [absTest], modules: [m], coverage: false, label: `mutant-${base}-0-clean` });
       if (!clean.ok || clean.tests.some((t) => t.status === "failed")) {
@@ -473,6 +508,7 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
         log(`  mutant ${i + 1} (budget ${max}, ${left} still to decide of ${all.length}) [${mu.id}] line ${mu.line} (${mu.op}): ${shown}`);
       }
     } finally {
+      if (quiet === undefined) delete process.env.UNITGEN_QUIET; else process.env.UNITGEN_QUIET = quiet;
       fs.writeFileSync(absTarget, original);
       fs.unlinkSync(backup);
       fs.unlinkSync(journal(state));

@@ -440,7 +440,8 @@ export class HarmonyAdapter implements Adapter {
     if (UI_RE.test(full)) {
       // Components often sit next to exported helpers / view models in the same file: those are logic.
       text = arkui.stripArkUI(full).text;
-      const exported = /^\s*export\s+(default\s+)?(abstract\s+)?(class|function|const|let)\s+\w+/m.test(text.replace(/^\s*export\s+(default\s+)?class\s+\w+\s*\{\}\s*$/gm, ""));
+      // Stubs stripArkUI leaves for structs and @Builder functions are not exports of logic.
+      const exported = /^\s*export\s+(default\s+)?(abstract\s+)?(class|function|const|let)\s+\w+/m.test(text.replace(/^\s*export\s+(default\s+)?(class|function)\s+\w+\s*(\(\s*\))?\s*\{\}\s*$/gm, ""));
       if (!exported || estimateExecutable(text).length < 5) return "ui";
     }
     if (/extends\s+(UIAbility|AbilityStage|FormExtensionAbility|\w*ExtensionAbility)\b/.test(text)) return "entry";
@@ -567,10 +568,21 @@ export class HarmonyAdapter implements Adapter {
 
   platformLines(text: string): Set<number> {
     const names = [...usedPlatformImports(text), "AppStorage", "AppStorageV2", "PersistentStorage", "getContext"];
+    const calls = (n: string) => new RegExp(`(?<![\\w$.])${n.replace(/\$/g, "\\$")}\\s*[.(]`);
+    // Objects a system API returned are mocks too: `const mac = cryptoFramework.createMac(...)`,
+    // then `mac.update(...)`, `const r = await mac.doFinal()`, `return r.data`.
+    const derived = new Set<string>();
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const m of text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=\s*(.+)/g)) {
+        if (derived.has(m[1]) || !m[2]) continue;
+        if (names.some((n) => calls(n).test(m[2])) || [...derived].some((d) => new RegExp(`(?<![\\w$.])${d.replace(/\$/g, "\\$")}\\b`).test(m[2]))) { derived.add(m[1]); grew = true; }
+      }
+    }
     const out = new Set<number>();
     text.split("\n").forEach((l, i) => {
       if (/^\s*import\s/.test(l) || /^\s*\/\//.test(l)) return;
-      if (names.some((n) => new RegExp(`(?<![\\w$.])${n.replace(/\$/g, "\\$")}\\s*[.(]`).test(l))) out.add(i + 1);
+      if (names.some((n) => calls(n).test(l)) || [...derived].some((d) => new RegExp(`(?<![\\w$.])${d.replace(/\$/g, "\\$")}\\b`).test(l))) out.add(i + 1);
     });
     return out;
   }
@@ -887,6 +899,20 @@ export class HarmonyAdapter implements Adapter {
     const out = path.join(m.dir, buildRoot, "default");
     const resultFile = path.join(out, "intermediates", "test", "coverage_data", "test_result.txt");
     const reportFile = path.join(out, "outputs", "test", "reports", "coverageReport.json");
+    // hvigor's coverage plugin unwraps init_coverage.json, appends one entry per instrumented file and
+    // wraps it again; a build that stops in between (a mutant that does not compile, a timeout) leaves
+    // a file every later build appends to: "getInitCoverageData failed, SyntaxError" and 0 lines,
+    // forever. Only a full re-instrumentation repairs it.
+    const initCov = path.join(out, "intermediates", "test", "init_coverage.json");
+    if (req.coverage && exists(initCov)) {
+      const t = readFile(initCov).trim();
+      let broken = false;
+      try { if (t.startsWith("{")) JSON.parse(t); else broken = true; } catch { broken = true; }
+      if (broken) {
+        fs.rmSync(path.join(m.dir, buildRoot), { recursive: true, force: true });
+        log(`removed ${relPath(path.join(m.dir, buildRoot), this.root)}: hvigor's init_coverage.json was corrupted by an interrupted build; this run rebuilds it`);
+      }
+    }
     // Stale results survive a failed compile: never read a previous run's files.
     fs.rmSync(path.dirname(resultFile), { recursive: true, force: true });
     fs.rmSync(path.dirname(reportFile), { recursive: true, force: true });
@@ -913,17 +939,17 @@ export class HarmonyAdapter implements Adapter {
     }
     if (daemon && r.timedOut) this.resetHvigor(tc, "after the timed-out run");
     const text = stripAnsi(r.out);
-    const log = `$ ${args.join(" ")}\n${text}\n`;
-    if (r.timedOut) return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: "", log, infraError: "timeout" };
+    const runLog = `$ ${args.join(" ")}\n${text}\n`;
+    if (r.timedOut) return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: "", log: runLog, infraError: "timeout" };
     const infra = /SDK (?:component|path)[^\n]*(?:missing|not found|invalid)[^\n]*|Unable to find the SDK[^\n]*|ohpm ERROR[^\n]*|Cannot find module '@ohos\/hypium'[^\n]*|Invalid value of 'DEVECO_SDK_HOME'[^\n]*|00303\d{3}[^\n]*/i.exec(text)?.[0];
     const errors = parseArkTsErrors(text);
     const compileFailed = /COMPILE RESULT:FAIL|ArkTS Compiler Error|Failed :[\w:]+@(?:UnitTest|Legacy)\w*ArkTS/.test(text);
     if (compileFailed) {
       const excerpt = errors.length ? errors.slice(0, 20).map((e) => `${relPath(e.file, this.root)}:${e.line}:${e.col}: ${e.message}`).join("\n") : errorExcerpt(text);
-      return { compiled: false, tests: [], coverage: {}, errorFiles: errors.map((e) => e.file), excerpt, log, infraError: errors.length ? undefined : infra };
+      return { compiled: false, tests: [], coverage: {}, errorFiles: errors.map((e) => e.file), excerpt, log: runLog, infraError: errors.length ? undefined : infra };
     }
     if (!exists(resultFile)) {
-      return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: errorExcerpt(text), log,
+      return { compiled: true, tests: [], coverage: {}, errorFiles: [], excerpt: errorExcerpt(text), log: runLog,
         infraError: infra ?? (r.ok ? undefined : "hvigor failed before running the tests; see the log") };
     }
     const single = files?.length === 1 ? files[0] : undefined;
@@ -944,9 +970,13 @@ export class HarmonyAdapter implements Adapter {
       const v = this.hypium()?.version;
       coverageProblem = `hvigor recorded 0 executed lines although ${passed} test(s) passed${exists(reportFile) ? "" : " (no coverageReport.json)"}: the coverage data never reached hvigor. `
         + `${v && versionLess(v, "1.0.19") ? `@ohos/hypium ${v} sends it through printSync, which the Previewer drops: upgrade @ohos/hypium (devDependencies) to 1.0.19 or newer and run \`ohpm install\`. ` : ""}`
-        + "Or use UNITGEN_HARMONY_MODE=shim for pure-logic files.";
+        + (/getInitCoverageData failed/.test(text)
+          ? `hvigor could not read its own coverage data (getInitCoverageData failed); unitgen removed ${relPath(path.join(m.dir, buildRoot), this.root)} so the next run re-instruments: verify again. `
+          : "")
+        + "If it persists, UNITGEN_HARMONY_MODE=shim measures pure-logic files without hvigor (re-run the baseline with it).";
+      if (/getInitCoverageData failed/.test(text)) fs.rmSync(path.join(m.dir, buildRoot), { recursive: true, force: true });
     }
-    return { compiled: true, tests, coverage, errorFiles: [], excerpt: "", log, coverageProblem };
+    return { compiled: true, tests, coverage, errorFiles: [], excerpt: "", log: runLog, coverageProblem };
   }
 
   /**

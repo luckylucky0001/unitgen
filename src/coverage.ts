@@ -1,5 +1,6 @@
 // Line-coverage model plus parsers for every report format the adapters produce.
 import * as path from "node:path";
+import { canonical } from "./util.ts";
 
 /** absolute file path -> line number -> hit count (only executable lines present). */
 export type Coverage = Record<string, Record<number, number>>;
@@ -91,7 +92,7 @@ export function parseLlvmCovJson(json: any, keep: (file: string) => boolean = ()
   const out: Coverage = {};
   for (const d of json.data ?? []) {
     for (const f of d.files ?? []) {
-      const file = path.resolve(f.filename);
+      const file = canonical(f.filename);
       if (!keep(file)) continue;
       const segs: Seg[] = f.segments ?? [];
       if (!segs.length) continue;
@@ -156,7 +157,7 @@ export function parseLcov(text: string, baseDir: string, keep: (file: string) =>
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (line.startsWith("SF:")) {
-      const f = path.resolve(baseDir, line.slice(3));
+      const f = canonical(path.resolve(baseDir, line.slice(3)));
       cur = keep(f) ? (out[f] ??= {}) : undefined;
     } else if (line.startsWith("DA:") && cur) {
       const [ln, hits] = line.slice(3).split(",");
@@ -174,7 +175,8 @@ export function parseLcov(text: string, baseDir: string, keep: (file: string) =>
 // ---------------------------------------------------------------------------
 export function parseXccovArchiveJson(json: any, keep: (file: string) => boolean = () => true): Coverage {
   const out: Coverage = {};
-  for (const [file, lines] of Object.entries(json as Record<string, any[]>)) {
+  for (const [reported, lines] of Object.entries(json as Record<string, any[]>)) {
+    const file = canonical(reported);
     if (!keep(file) || !Array.isArray(lines)) continue;
     const dst: Record<number, number> = {};
     for (const l of lines) if (l.isExecutable) dst[l.line] = l.executionCount ?? 0;

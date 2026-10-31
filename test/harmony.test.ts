@@ -161,7 +161,8 @@ test("platformLines marks lines that call imported system APIs, not logging or l
     "  return u.host.toLowerCase();",
     "}",
   ].join("\n");
-  assert.deepEqual([...a.platformLines(text)], [5]);
+  // Line 6 uses what the API returned (u).
+  assert.deepEqual([...a.platformLines(text)], [5, 6]);
 });
 
 test("review regressions: mutant generation edge cases", () => {
@@ -306,4 +307,79 @@ test("no mutants that cannot compile: required-field assignments in constructors
   const sops = mutantsFor(swift, swift.split("\n").map((_, i) => i + 1)).map((m) => `${m.line}:${m.op}`);
   assert.ok(!sops.includes("5:delete assignment") && sops.includes("6:delete assignment"));
   assert.ok(sops.includes("9:delete statement"), "Swift trailing-closure call is still deleted");
+});
+
+test("plain assignments, thrown messages and returned templates get mutants; concatenation and init delegation do not", () => {
+  const ts = [
+    "export function f(o: Opts, s: string): string {",
+    "  o.secret = undefined;",
+    "  count += step;",
+    "  const p = '0' + s;",
+    "  if (s === '') {",
+    "    throw new Error('empty input');",
+    "  }",
+    "  total = total + 1;",
+    "  return `${s}-${p}`;",
+    "}",
+  ].join("\n");
+  const ops = mutantsFor(ts, ts.split("\n").map((_, i) => i + 1)).map((m) => `${m.line}:${m.op}:${m.mutated.trim()}`);
+  assert.ok(ops.includes("2:delete assignment:/* unitgen: assignment deleted */"));
+  assert.ok(ops.includes("3:delete assignment:/* unitgen: assignment deleted */"));
+  assert.ok(!ops.some((o) => o.startsWith("4:+ -> -")), "string concatenation");
+  assert.ok(ops.includes("6:string -> empty:throw new Error('');"));
+  assert.ok(ops.some((o) => o.startsWith("8:+ -> -")) && !ops.some((o) => o.startsWith("8:delete")), "an assignment with other mutants is not also deleted");
+  assert.ok(ops.includes("9:string -> empty:return ``;"));
+  const swift = [
+    "final class Box {",
+    "  var kind: Kind",
+    "  init(raw: Int) {",
+    "    kind = .number",
+    "  }",
+    "  convenience init(text: String) {",
+    "    self.init(raw: 0)",
+    "  }",
+    "  func reset() {",
+    "    kind = .null",
+    "  }",
+    "}",
+  ].join("\n");
+  const sops = mutantsFor(swift, swift.split("\n").map((_, i) => i + 1)).map((m) => `${m.line}:${m.op}`);
+  assert.ok(!sops.includes("4:delete assignment"), "required stored property assigned in init");
+  assert.ok(!sops.some((o) => o.startsWith("7:delete")), "self.init delegation");
+  assert.ok(sops.includes("10:delete assignment"));
+});
+
+test("objects returned by system APIs are marked as mocks; a page exporting only a @Builder is UI", async () => {
+  const { HarmonyAdapter } = await import("../src/adapters/harmony.ts");
+  const a = new HarmonyAdapter("/nonexistent-project", "/nonexistent-project/.unitgen");
+  const text = [
+    "import { cryptoFramework } from '@kit.CryptoArchitectureKit';",
+    "export async function hmac(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {",
+    "  const mac = cryptoFramework.createMac('SHA1');",
+    "  await mac.update({ data: data });",
+    "  const out = await mac.doFinal();",
+    "  const size = key.length * 2;",
+    "  return out.data;",
+    "}",
+  ].join("\n");
+  assert.deepEqual([...a.platformLines(text)], [3, 4, 5, 7]);
+  const page = [
+    "import { promptAction } from '@kit.ArkUI';",
+    "const GAP: number = 8;",
+    "const NAMES: string[] = ['a', 'b'];",
+    "const MORE: string[] = ['c', 'd'];",
+    "const EVEN_MORE: string[] = ['e', 'f'];",
+    "const LAST: number = 3;",
+    "@Builder",
+    "export function EditBuilder() {",
+    "  EditComponent()",
+    "}",
+    "@Component",
+    "struct EditComponent {",
+    "  build() {",
+    "    Column() {}",
+    "  }",
+    "}",
+  ].join("\n");
+  assert.equal(a.classify("/p/entry/src/main/ets/pages/EditPage.ets", page), "ui");
 });

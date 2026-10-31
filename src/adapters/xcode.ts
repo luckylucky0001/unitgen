@@ -139,7 +139,7 @@ export class XcodeAdapter implements Adapter {
 
   placement(source: string, m: Module): TestPlacement {
     const base = path.basename(source, ".swift").replace(/[^A-Za-z0-9_]/g, "_");
-    return { path: path.join(m.testRoot, `${base}${SUFFIX}.swift`), suiteName: `${base}${SUFFIX}`, importHint: `@testable import ${productModule(m.name)}` };
+    return { path: path.join(m.testRoot, `${base}${SUFFIX}.swift`), suiteName: `${base}${SUFFIX}`, importHint: `@testable import ${this.moduleName(m)}` };
   }
 
   conventions(m: Module): string {
@@ -150,10 +150,12 @@ export class XcodeAdapter implements Adapter {
       `Platform: Xcode target \`${m.name}\` (${m.kind}); tests go into the unit-test target \`${m.meta?.testTarget}\` (${relPath(m.testRoot, this.root)}).`,
       usesTesting
         ? "Use Swift Testing like the existing tests (`import Testing`, `@Suite struct`, `@Test`, `#expect`, `#require`)."
+        : !this.swiftTestingAvailable(m)
+        ? `Use XCTest (\`final class FooUnitGenTests: XCTestCase\`, \`func testX()\`, XCTAssert*): the test target's deployment target (${this.deploymentTarget(m) ?? "?"}) is older than Swift Testing supports (iOS/tvOS 13, macOS 10.15, watchOS 6).`
         : usesXCTest
         ? "Use XCTest like the existing tests (`final class FooUnitGenTests: XCTestCase`, `func testX()`, XCTAssert*). Swift Testing also works if you prefer it."
         : "Use Swift Testing (`import Testing`, `@Suite struct`, `@Test`, `#expect`) or XCTest.",
-      `Import the module with \`@testable import ${productModule(m.name)}\`.`,
+      `Import the module with \`@testable import ${this.moduleName(m)}\`.`,
       "Name the XCTestCase subclass / @Suite exactly as the brief says (it is used to run only this file).",
       "No network, no real keychain/file system outside temporary directories, no sleeps; UI code only through view models.",
     ].join("\n");
@@ -227,12 +229,46 @@ export class XcodeAdapter implements Adapter {
     return pick;
   }
 
+  /** `xcodebuild -showBuildSettings` of a target, cached per pbxproj content. */
+  private settings(target: string | undefined): Record<string, string> {
+    if (!target) return {};
+    const cache = path.join(this.stateDir, "xcode-settings.json");
+    const stamp = `${fs.statSync(this.pbxPath()).mtimeMs}`;
+    const c = readJson<Record<string, { stamp: string; settings: Record<string, string> }>>(cache, {});
+    if (c[target]?.stamp === stamp) return c[target].settings;
+    const r = run(["xcodebuild", "-showBuildSettings", "-json", "-project", this.projectFile, "-target", target], { cwd: this.root, timeoutSec: 600 });
+    let settings: Record<string, string> = {};
+    try { settings = JSON.parse(r.out.slice(r.out.indexOf("[")))[0]?.buildSettings ?? {}; } catch { /* unknown */ }
+    if (r.ok) writeJson(cache, { ...c, [target]: { stamp, settings } });
+    return settings;
+  }
+
+  /** The Swift module a target builds (PRODUCT_MODULE_NAME; `SwiftyJSON iOS` with PRODUCT_NAME=$(PROJECT_NAME) -> `SwiftyJSON`). */
+  private moduleName(m: Module): string {
+    const s = this.settings(m.name);
+    return s.PRODUCT_MODULE_NAME || (s.PRODUCT_NAME ? productModule(s.PRODUCT_NAME) : productModule(m.name));
+  }
+
+  private deploymentTarget(m: Module): string | undefined {
+    const s = this.settings(m.meta?.testTarget as string | undefined);
+    const key = ["IPHONEOS_DEPLOYMENT_TARGET", "MACOSX_DEPLOYMENT_TARGET", "TVOS_DEPLOYMENT_TARGET", "WATCHOS_DEPLOYMENT_TARGET"]
+      // SDKROOT is `iphoneos` or a full path to `.../iPhoneOS18.5.sdk`.
+      .find((k) => s[k] && path.basename(s.SDKROOT ?? "").toLowerCase().startsWith({ IPHONEOS_DEPLOYMENT_TARGET: "iphone", MACOSX_DEPLOYMENT_TARGET: "macosx", TVOS_DEPLOYMENT_TARGET: "appletv", WATCHOS_DEPLOYMENT_TARGET: "watch" }[k]!));
+    return key ? `${key.replace("_DEPLOYMENT_TARGET", "").replace("IPHONEOS", "iOS").replace("MACOSX", "macOS").replace("TVOS", "tvOS").replace("WATCHOS", "watchOS")} ${s[key]}` : undefined;
+  }
+
+  /** Swift Testing needs iOS/tvOS 13, macOS 10.15 or watchOS 6 as the test target's deployment target. */
+  private swiftTestingAvailable(m: Module): boolean {
+    const t = this.deploymentTarget(m);
+    if (!t) return true;
+    const [os, v] = t.split(" ");
+    const need = { iOS: 13, tvOS: 13, macOS: 10.15, watchOS: 6 }[os] ?? 0;
+    const [maj, min = "0"] = v.split(".");
+    return Number(maj) + Number(min) / 100 >= need;
+  }
+
   private destination(m: Module): string | undefined {
-    const r = run(["xcodebuild", "-showBuildSettings", "-json", "-project", this.projectFile, "-target", m.name], { cwd: this.root, timeoutSec: 600 });
-    let platforms = "";
-    try {
-      platforms = JSON.parse(r.out.slice(r.out.indexOf("[")))[0]?.buildSettings?.SUPPORTED_PLATFORMS ?? "";
-    } catch { /* default to iOS */ }
+    const platforms = this.settings(m.name).SUPPORTED_PLATFORMS ?? "";
     if (/macosx/.test(platforms)) return "platform=macOS";
     const sim = this.simulator();
     return sim ? `platform=iOS Simulator,id=${sim.udid}` : undefined;
@@ -255,7 +291,10 @@ export class XcodeAdapter implements Adapter {
     const bundle = path.join(this.stateDir, "runs", `${req.label}.xcresult`);
     fs.rmSync(bundle, { recursive: true, force: true });
     fs.mkdirSync(path.dirname(bundle), { recursive: true });
+    // Own build directory: nothing lands in ~/Library/Developer/Xcode/DerivedData, and an open Xcode
+    // building the same project does not contend for its build database.
     const args = ["xcodebuild", "test", ...this.containerArgs(), "-scheme", scheme, "-destination", dest, "-resultBundlePath", bundle,
+      "-derivedDataPath", path.join(this.stateDir, "DerivedData"),
       "CODE_SIGNING_ALLOWED=NO", "CODE_SIGN_IDENTITY=", "COMPILER_INDEX_STORE_ENABLE=NO"];
     if (req.coverage) args.push("-enableCodeCoverage", "YES");
     if (req.testFiles && m.meta?.testTarget) {
