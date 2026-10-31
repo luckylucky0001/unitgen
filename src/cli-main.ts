@@ -297,7 +297,10 @@ export async function main(argv: string[]): Promise<number> {
     }
     case "status": {
       const d = state.data;
-      print([`adapter: ${adapter.id}`, `baseline: ${d.baseline ? d.baseline.at : "none"}`, `accepted: ${d.accepted.length}`, `rejected: ${d.rejected.length}`, `notes: ${d.notes.length}`].join("\n"), d);
+      const suspects = d.notes.filter((n) => n.kind === "suspect").length;
+      print([`adapter: ${adapter.id}`,
+        `baseline: ${d.baseline ? `${d.baseline.at}${d.baseline.ok ? "" : " (INVALID: run `unitgen baseline`)"}${d.baseline.runner ? `, runner ${d.baseline.runner}` : ""}` : "none"}`,
+        `accepted: ${d.accepted.length}`, `rejected: ${d.rejected.length}`, `suspected bugs: ${suspects}`, `notes: ${d.notes.length - suspects}`].join("\n"), d);
       return 0;
     }
     default:
