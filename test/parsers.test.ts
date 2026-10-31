@@ -30,7 +30,7 @@ test("llvm-cov segments -> line hits (wrapped regions, gaps, skipped)", () => {
   const cov = parseLlvmCovJson(json);
   // LLVM semantics: a line counts as executed if the region wrapping into it ran (line 2),
   // a line whose only region starts there with count 0 is not (line 3 via wrapped seg 2).
-  assert.deepEqual(cov["/p/A.swift"], { 1: 3, 2: 3, 3: 0, 4: 3 });
+  assert.deepEqual(cov[path.resolve("/p/A.swift")], { 1: 3, 2: 3, 3: 0, 4: 3 });
 });
 
 test("llvm-cov lines inside a region that hold no code (blank, comment, #if) are not executable", (t) => {
@@ -50,7 +50,7 @@ test("jacoco xml resolves package paths", () => {
 
 test("lcov parsing with keep filter", () => {
   const cov = parseLcov("SF:src/a.ets\nDA:1,1\nDA:2,0\nend_of_record\nSF:other.js\nDA:1,1\nend_of_record\n", "/r", (f) => f.endsWith(".ets"));
-  assert.deepEqual(cov, { "/r/src/a.ets": { 1: 1, 2: 0 } });
+  assert.deepEqual(cov, { [path.resolve("/r/src/a.ets")]: { 1: 1, 2: 0 } });
 });
 
 test("newlyCovered / merge / summarize / ranges", () => {
@@ -189,18 +189,18 @@ test("pbxproj: add and remove a test file round-trips", async () => {
     "\t\tCC0000000000000000000001 /* ATests */ = {", "\t\t\tisa = PBXNativeTarget;", "\t\t\tbuildPhases = (", "\t\t\t\tBB0000000000000000000001 /* Sources */,", "\t\t\t);", "\t\t\tname = ATests;", "\t\t\tproductType = \"com.apple.product-type.bundle.unit-test\";", "\t\t};",
     "\t};", "}",
   ].join("\n");
-  const p = new Pbxproj(txt, "/proj");
+  const p = new Pbxproj(txt, path.resolve("/proj"));
   const t = p.targets()[0];
-  assert.deepEqual(t.files, ["/proj/Tests/ATests.swift"]);
-  const ids = p.addSourceFile(t, "/proj/Tests/BUnitGenTests.swift")!;
-  assert.deepEqual(p.targets()[0].files, ["/proj/Tests/ATests.swift", "/proj/Tests/BUnitGenTests.swift"]);
+  assert.deepEqual(t.files, [path.resolve("/proj/Tests/ATests.swift")]);
+  const ids = p.addSourceFile(t, path.resolve("/proj/Tests/BUnitGenTests.swift"))!;
+  assert.deepEqual(p.targets()[0].files, [path.resolve("/proj/Tests/ATests.swift"), path.resolve("/proj/Tests/BUnitGenTests.swift")]);
   p.removeIds([ids.fileRef, ids.buildFile]);
   assert.equal(p.text, txt);
   // ObjectMapper layout: group `Tests`, file references with a subdirectory (`Sub/ATests.swift`).
-  const sub = new Pbxproj(txt.replace("path = ATests.swift;", "path = Sub/ATests.swift;"), "/proj");
-  assert.deepEqual(sub.targets()[0].files, ["/proj/Tests/Sub/ATests.swift"]);
-  sub.addSourceFile(sub.targets()[0], "/proj/Tests/Sub/BUnitGenTests.swift");
-  assert.deepEqual(sub.targets()[0].files, ["/proj/Tests/Sub/ATests.swift", "/proj/Tests/Sub/BUnitGenTests.swift"]);
+  const sub = new Pbxproj(txt.replace("path = ATests.swift;", "path = Sub/ATests.swift;"), path.resolve("/proj"));
+  assert.deepEqual(sub.targets()[0].files, [path.resolve("/proj/Tests/Sub/ATests.swift")]);
+  sub.addSourceFile(sub.targets()[0], path.resolve("/proj/Tests/Sub/BUnitGenTests.swift"));
+  assert.deepEqual(sub.targets()[0].files, [path.resolve("/proj/Tests/Sub/ATests.swift"), path.resolve("/proj/Tests/Sub/BUnitGenTests.swift")]);
   assert.match(sub.text, /path = Sub\/BUnitGenTests\.swift;/);
 });
 
