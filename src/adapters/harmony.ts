@@ -885,6 +885,11 @@ export class HarmonyAdapter implements Adapter {
     writeFile(logFile, combinedLog);
     if (skipped && skipped === mods.filter((m) => req.testFiles || exists(path.join(m.testRoot, "List.test.ets"))).length) { compiled = false; ok = false; }
     const failedMsgs = tests.filter((t) => t.status === "failed").map((t) => `FAILED ${t.name}\n${t.message ?? ""}`);
+    // The Previewer runs most system APIs as mocks: name the ones the code under test uses.
+    if (failedMsgs.length && req.testFiles) {
+      const mocked = this.systemApisUnderTest(req.testFiles);
+      if (mocked.length) failedMsgs.push(`Note: the Previewer runtime mocks most system APIs (results are not real, e.g. crypto output, files, network, preferences); the code under test uses: ${mocked.join(", ")}`);
+    }
     return {
       ok: ok && !infraError, compiled, tests, coverage: req.coverage ? coverage : undefined, logFile,
       excerpt: [...excerpts, ...failedMsgs.slice(0, 10)].filter(Boolean).join("\n"), seconds: (Date.now() - start) / 1000,
@@ -977,6 +982,19 @@ export class HarmonyAdapter implements Adapter {
       if (/getInitCoverageData failed/.test(text)) fs.rmSync(path.join(m.dir, buildRoot), { recursive: true, force: true });
     }
     return { compiled: true, tests, coverage, errorFiles: [], excerpt: "", log: runLog, coverageProblem };
+  }
+
+  /** System API names (`cryptoFramework`, `preferences`, ...) used by the project sources these tests import. */
+  private systemApisUnderTest(testFiles: string[]): string[] {
+    const out = new Set<string>();
+    for (const t of testFiles) {
+      for (const m of readFile(t).matchAll(/from\s+['"](\.{1,2}\/[^'"]+)['"]/g)) {
+        const base = path.resolve(path.dirname(t), m[1]);
+        const src = [base, `${base}.ets`, `${base}.ts`].find((f) => exists(f) && fs.statSync(f).isFile());
+        if (src) for (const n of usedPlatformImports(readFile(src))) out.add(n);
+      }
+    }
+    return [...out].slice(0, 8);
   }
 
   /**
