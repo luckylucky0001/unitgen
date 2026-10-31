@@ -5,14 +5,13 @@
 // platform calls); anything touching @kit.* / @ohos.* APIs is stubbed and should be verified with
 // hvigor on a real toolchain. Because the shim does not run the ArkTS compiler, generated tests are
 // also linted against the ArkTS language restrictions (arkts-no-any-unknown, ...).
-import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Coverage, parseLcov } from "../coverage.ts";
 import { estimateExecutable } from "../targets.ts";
-import { errorExcerpt, exists, json5Parse, log, preferOwnTest, processesMatching, readFile, readJson, relPath, runAsync, RunCancelled, signalAll, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
+import { errorExcerpt, exists, json5Parse, log, preferOwnTest, processesMatching, readFile, readJson, relPath, run, runAsync, RunCancelled, signalAll, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -153,9 +152,12 @@ export function parseHvigorCoverage(json: string, sourceRoots: string[], source:
   const out: Coverage = {};
   let data: { files?: HvigorFile[] };
   try { data = JSON.parse(json); } catch { return out; }
+  // Windows: hvigor may write `d:/proj/...` for a root `D:\\proj\\...` (drive case, separators).
+  const norm = (p: string) => (process.platform === "win32" ? path.resolve(p).toLowerCase() : path.resolve(p));
+  const roots = sourceRoots.map((r) => norm(r) + path.sep);
   for (const f of data.files ?? []) {
     const file = path.resolve(f.path);
-    if (!sourceRoots.some((r) => file.startsWith(r + path.sep))) continue;
+    if (!roots.some((r) => norm(file).startsWith(r))) continue;
     const counts = f.summary?.lines?.executedLineCount ?? [];
     let text: string[] = [];
     try { text = source(file).split("\n"); } catch { /* keep raw counts */ }
@@ -745,7 +747,8 @@ export class HarmonyAdapter implements Adapter {
    * its Previewers so the next run starts a fresh one.
    */
   private resetHvigor(tc: Toolchain, why: string): void {
-    spawnSync(tc.hvigor, ["--stop-daemon"], { cwd: this.root, env: { ...process.env, ...tc.env }, stdio: "ignore", timeout: 60_000 });
+    // run(): hvigorw.bat on Windows goes through cmd.exe.
+    run([tc.hvigor, "--stop-daemon"], { cwd: this.root, env: tc.env, timeoutSec: 60 });
     const left = this.ownPreviewers();
     signalAll(left, true);
     log(`stopped the hvigor daemon${left.length ? ` and ${left.length} Previewer process(es)` : ""} ${why}`);

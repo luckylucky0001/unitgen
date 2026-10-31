@@ -114,9 +114,10 @@ export async function runAsync(cmd: string[], opts: RunOpts = {}): Promise<CmdRe
   if (opts.logFile) writeFile(opts.logFile, `$ ${cmd.map(shq).join(" ")}\n\n`);
   if (stream) log(`running ${cmd[0]}; log: ${opts.logFile ?? "stderr"}`);
   return await new Promise<CmdResult>((resolve, reject) => {
-    const child = spawn(cmd[0], cmd.slice(1), {
+    const [file, args, verbatim] = spawnable(cmd);
+    const child = spawn(file, args, {
       cwd: opts.cwd, env: { ...process.env, ...opts.env },
-      detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"], windowsVerbatimArguments: verbatim,
     });
     if (child.pid && process.send) process.send({ type: "unitgen-build-start", pid: child.pid });
     let out = "", size = 0, timedOut = false, cancelled = false, overflow = false;
@@ -198,8 +199,10 @@ export async function runAsync(cmd: string[], opts: RunOpts = {}): Promise<CmdRe
 export function run(cmd: string[], opts: RunOpts = {}): CmdResult {
   const start = Date.now();
   debug(`$ (cd ${opts.cwd ?? "."}) ${cmd.map(shq).join(" ")}`);
-  const p = spawnSync(cmd[0], cmd.slice(1), {
+  const [file, args, verbatim] = spawnable(cmd);
+  const p = spawnSync(file, args, {
     cwd: opts.cwd,
+    windowsVerbatimArguments: verbatim,
     env: { ...process.env, ...(opts.env ?? {}) },
     input: opts.input,
     timeout: (opts.timeoutSec ?? 1800) * 1000,
@@ -226,14 +229,34 @@ export function shq(s: string): string {
 }
 
 export function which(name: string): string | undefined {
+  // Windows: `ohpm` is ohpm.cmd / ohpm.exe (PATHEXT); X_OK means nothing there.
+  const exts = process.platform === "win32" && !path.extname(name) ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";").filter(Boolean) : [""];
   for (const d of (process.env.PATH ?? "").split(path.delimiter)) {
-    const p = path.join(d, name);
-    try {
-      fs.accessSync(p, fs.constants.X_OK);
-      if (fs.statSync(p).isFile()) return p;
-    } catch { /* not here */ }
+    for (const ext of exts) {
+      const p = path.join(d, name + ext);
+      try {
+        fs.accessSync(p, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
+        if (fs.statSync(p).isFile()) return p;
+      } catch { /* not here */ }
+    }
   }
   return undefined;
+}
+
+/** Quote one argument for cmd.exe. */
+export function winQuote(a: string): string {
+  return a === "" || /[\s"&|<>^()%!,;=]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a;
+}
+
+/**
+ * Node refuses to spawn .bat/.cmd files without a shell (CVE-2024-27980): on Windows they run through
+ * cmd.exe with each argument quoted. Elsewhere the command is spawned as is.
+ */
+export function spawnable(cmd: string[], platform = process.platform): [string, string[], boolean] {
+  if (platform === "win32" && /\.(bat|cmd)$/i.test(cmd[0])) {
+    return [process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `"${cmd.map(winQuote).join(" ")}"`], true];
+  }
+  return [cmd[0], cmd.slice(1), false];
 }
 
 export function exists(p: string): boolean {
@@ -250,7 +273,8 @@ export function canonical(p: string): string {
   const tail: string[] = [];
   let cur = abs;
   for (;;) {
-    try { return path.join(fs.realpathSync(cur), ...tail.reverse()); } catch { /* does not exist (yet) */ }
+    // Windows: the native call also expands 8.3 short names (C:\\Users\\RUNNER~1) as tools report them.
+    try { return path.join(process.platform === "win32" ? fs.realpathSync.native(cur) : fs.realpathSync(cur), ...tail.reverse()); } catch { /* does not exist (yet) */ }
     const up = path.dirname(cur);
     if (up === cur) return abs;
     tail.push(path.basename(cur));

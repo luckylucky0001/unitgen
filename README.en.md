@@ -70,6 +70,10 @@ unitgen --help
 Or call `~/unitgen/bin/unitgen` directly. unitgen runs its TypeScript sources directly (no build
 step): keep the checkout in place.
 
+Windows (cmd or PowerShell): after `git clone`, run `npm ci` in the checkout and use `bin\unitgen.cmd`
+(or add `bin` to PATH and call `unitgen`). On Windows `UNITGEN_ENV` is a `.cmd` file that sets the
+toolchain paths with `set JAVA_HOME=...` and the like.
+
 **Check**: run `unitgen doctor` in your project. It names the project type, which runner it uses
 and why, and how to fix what is missing (for HarmonyOS, for example, the full path of DevEco's
 bundled ohpm).
@@ -338,7 +342,10 @@ parsing. When piping output, use a shell with `pipefail` to keep unitgen's exit 
 - **Android**: JVM local unit tests only; without Robolectric or `isReturnDefaultValues`,
   `android.util.Log` and similar calls throw. APK installation, device APIs and Compose UI tests are
   out of scope.
-- **Windows**: not tested.
+- **Windows**: CI runs all unit tests on windows-latest and, through `bin\unitgen.cmd`, doctor,
+  baseline, verify, mutate and report end to end on a Gradle/Java project. HarmonyOS and iOS were not
+  tested on Windows (iOS needs macOS anyway). The TRAE installer is a shell script: on Windows copy
+  the Skill directory by hand.
 
 ## Development
 

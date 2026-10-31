@@ -6,7 +6,7 @@ import { parseSwiftTestOutput } from "../src/adapters/swiftpm.ts";
 import { mergeCoverage, newlyCovered, parseJacocoXml, parseLcov, parseLlvmCovJson, ranges, summarize } from "../src/coverage.ts";
 import { extractCode } from "../src/llm.ts";
 import { estimateExecutable } from "../src/targets.ts";
-import { json5Parse, preferOwnTest } from "../src/util.ts";
+import { canonical, json5Parse, preferOwnTest } from "../src/util.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -30,7 +30,7 @@ test("llvm-cov segments -> line hits (wrapped regions, gaps, skipped)", () => {
   const cov = parseLlvmCovJson(json);
   // LLVM semantics: a line counts as executed if the region wrapping into it ran (line 2),
   // a line whose only region starts there with count 0 is not (line 3 via wrapped seg 2).
-  assert.deepEqual(cov["/p/A.swift"], { 1: 3, 2: 3, 3: 0, 4: 3 });
+  assert.deepEqual(cov[path.resolve("/p/A.swift")], { 1: 3, 2: 3, 3: 0, 4: 3 });
 });
 
 test("llvm-cov lines inside a region that hold no code (blank, comment, #if) are not executable", (t) => {
@@ -39,7 +39,7 @@ test("llvm-cov lines inside a region that hold no code (blank, comment, #if) are
   const file = path.join(dir, "F.swift");
   fs.writeFileSync(file, ["func f() -> Int {", "  let x = 1", "", "  // note", "  #if os(iOS)", "  return x", "}"].join("\n"));
   const json = { data: [{ files: [{ filename: file, segments: [[1, 18, 0, true, true, false], [7, 2, 0, false, false, false]] }] }] };
-  assert.deepEqual(Object.keys(parseLlvmCovJson(json)[fs.realpathSync(file)]).map(Number), [1, 2, 6, 7]);
+  assert.deepEqual(Object.keys(parseLlvmCovJson(json)[canonical(file)]).map(Number), [1, 2, 6, 7]);
 });
 
 test("jacoco xml resolves package paths", () => {
@@ -50,7 +50,7 @@ test("jacoco xml resolves package paths", () => {
 
 test("lcov parsing with keep filter", () => {
   const cov = parseLcov("SF:src/a.ets\nDA:1,1\nDA:2,0\nend_of_record\nSF:other.js\nDA:1,1\nend_of_record\n", "/r", (f) => f.endsWith(".ets"));
-  assert.deepEqual(cov, { "/r/src/a.ets": { 1: 1, 2: 0 } });
+  assert.deepEqual(cov, { [path.resolve("/r/src/a.ets")]: { 1: 1, 2: 0 } });
 });
 
 test("newlyCovered / merge / summarize / ranges", () => {
@@ -189,18 +189,18 @@ test("pbxproj: add and remove a test file round-trips", async () => {
     "\t\tCC0000000000000000000001 /* ATests */ = {", "\t\t\tisa = PBXNativeTarget;", "\t\t\tbuildPhases = (", "\t\t\t\tBB0000000000000000000001 /* Sources */,", "\t\t\t);", "\t\t\tname = ATests;", "\t\t\tproductType = \"com.apple.product-type.bundle.unit-test\";", "\t\t};",
     "\t};", "}",
   ].join("\n");
-  const p = new Pbxproj(txt, "/proj");
+  const p = new Pbxproj(txt, path.resolve("/proj"));
   const t = p.targets()[0];
-  assert.deepEqual(t.files, ["/proj/Tests/ATests.swift"]);
-  const ids = p.addSourceFile(t, "/proj/Tests/BUnitGenTests.swift")!;
-  assert.deepEqual(p.targets()[0].files, ["/proj/Tests/ATests.swift", "/proj/Tests/BUnitGenTests.swift"]);
+  assert.deepEqual(t.files, [path.resolve("/proj/Tests/ATests.swift")]);
+  const ids = p.addSourceFile(t, path.resolve("/proj/Tests/BUnitGenTests.swift"))!;
+  assert.deepEqual(p.targets()[0].files, [path.resolve("/proj/Tests/ATests.swift"), path.resolve("/proj/Tests/BUnitGenTests.swift")]);
   p.removeIds([ids.fileRef, ids.buildFile]);
   assert.equal(p.text, txt);
   // ObjectMapper layout: group `Tests`, file references with a subdirectory (`Sub/ATests.swift`).
-  const sub = new Pbxproj(txt.replace("path = ATests.swift;", "path = Sub/ATests.swift;"), "/proj");
-  assert.deepEqual(sub.targets()[0].files, ["/proj/Tests/Sub/ATests.swift"]);
-  sub.addSourceFile(sub.targets()[0], "/proj/Tests/Sub/BUnitGenTests.swift");
-  assert.deepEqual(sub.targets()[0].files, ["/proj/Tests/Sub/ATests.swift", "/proj/Tests/Sub/BUnitGenTests.swift"]);
+  const sub = new Pbxproj(txt.replace("path = ATests.swift;", "path = Sub/ATests.swift;"), path.resolve("/proj"));
+  assert.deepEqual(sub.targets()[0].files, [path.resolve("/proj/Tests/Sub/ATests.swift")]);
+  sub.addSourceFile(sub.targets()[0], path.resolve("/proj/Tests/Sub/BUnitGenTests.swift"));
+  assert.deepEqual(sub.targets()[0].files, [path.resolve("/proj/Tests/Sub/ATests.swift"), path.resolve("/proj/Tests/Sub/BUnitGenTests.swift")]);
   assert.match(sub.text, /path = Sub\/BUnitGenTests\.swift;/);
 });
 
@@ -233,4 +233,18 @@ test("gradle: settings includes over several lines, no includeBuild; failures pe
   assert.match(gradleFailures(out)[1].reason, /A\.kt:3:5 Unresolved reference 'foo'/);
   assert.match(gradleExcerpt(out).split("\n")[0], /^e: .*Unresolved reference/);
   assert.ok(!gradleExcerpt(out).includes("deprecated"));
+});
+
+test("Windows: .bat/.cmd run through cmd.exe with quoted arguments; other commands unchanged", async () => {
+  const { spawnable, winQuote } = await import("../src/util.ts");
+  assert.equal(winQuote("plain"), "plain");
+  assert.equal(winQuote("C:\\Program Files\\x"), '"C:\\Program Files\\x"');
+  assert.equal(winQuote('a"b'), '"a""b"');
+  const [file, args, verbatim] = spawnable(["C:\\p\\gradlew.bat", "-I", "C:\\My Dir\\init.gradle", ":app:test"], "win32");
+  assert.match(file, /cmd(\.exe)?$/i);
+  assert.deepEqual(args.slice(0, 3), ["/d", "/s", "/c"]);
+  assert.equal(args[3], '"C:\\p\\gradlew.bat -I "C:\\My Dir\\init.gradle" :app:test"');
+  assert.equal(verbatim, true);
+  assert.deepEqual(spawnable(["node", "x.js"], "win32"), ["node", ["x.js"], false]);
+  assert.deepEqual(spawnable(["./gradlew", "test"], "darwin"), ["./gradlew", ["test"], false]);
 });

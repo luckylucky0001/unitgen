@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { test } from "node:test";
+import * as path from "node:path";
 import { arktsLint, exportedNames, importLint, segmentLineCoverage, usedPlatformImports, v8LineCoverage } from "../src/adapters/harmony.ts";
 import { mutantsFor } from "../src/mutate.ts";
 
@@ -140,7 +141,7 @@ test("hvigor coverage drops lines only function-type annotations touch", async (
     ],
     summary: { lines: { executedLineCount: [-1, -1, 0, 2, 2, -1, 0] } } }] });
   const cov = parseHvigorCoverage(report, ["/p/src/main/ets"], () => src);
-  assert.deepEqual(cov["/p/src/main/ets/A.ets"], { 3: 2, 4: 2, 6: 0 });
+  assert.deepEqual(cov[path.resolve("/p/src/main/ets/A.ets")], { 3: 2, 4: 2, 6: 0 });
 });
 
 test("ArkTS compiler errors are parsed with their files (paths with spaces)", async () => {
@@ -189,7 +190,7 @@ test("review regressions: hvigor coverage keeps never-called object-literal arro
   const report = JSON.stringify({ files: [{ path: "/p/src/main/ets/B.ets",
     functions: [{ count: 0, regions: [{ startLoc: { line: 3, col: 8 }, endLoc: { line: 5, col: 4 }, count: 0 }] }],
     summary: { lines: { executedLineCount: [-1, -1, 1, 0, 0, -1] } } }] });
-  assert.deepEqual(parseHvigorCoverage(report, ["/p/src/main/ets"], () => src)["/p/src/main/ets/B.ets"], { 2: 1, 3: 0, 4: 0 });
+  assert.deepEqual(parseHvigorCoverage(report, ["/p/src/main/ets"], () => src)[path.resolve("/p/src/main/ets/B.ets")], { 2: 1, 3: 0, 4: 0 });
 });
 
 test("review regressions: builder parameters with braces, const enum exports", () => {

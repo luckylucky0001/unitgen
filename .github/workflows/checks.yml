@@ -8,8 +8,9 @@ permissions:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         node: ['22.18.0', '24']
     runs-on: ${{ matrix.os }}
     steps:
@@ -22,3 +23,24 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: sh -n bin/unitgen scripts/install-trae.sh scripts/unitgen-env.example.sh
+        if: runner.os != 'Windows'
+      # Windows: the .cmd launcher starts the CLI; doctor in an empty directory exits 1 with a clear message.
+      - run: |
+          bin\unitgen.cmd --help
+          mkdir empty-project
+          bin\unitgen.cmd doctor -C empty-project
+          if ($LASTEXITCODE -ne 1) { exit 1 } else { exit 0 }
+        if: runner.os == 'Windows'
+        shell: pwsh
+      # End to end on a generated Gradle/Java project through the platform's launcher (one Node version).
+      - uses: actions/setup-java@v4
+        if: matrix.node == '24'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        if: matrix.node == '24'
+        with:
+          gradle-version: '8.10.2'
+      - run: node scripts/e2e-jvm.mjs
+        if: matrix.node == '24'

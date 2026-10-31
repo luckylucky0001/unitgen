@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Coverage, mergeCoverage, parseJacocoXml } from "../coverage.ts";
-import { errorExcerpt, exists, log, preferOwnTest, readFile, readJson, relPath, run, stripAnsi, walkFiles, writeJson } from "../util.ts";
+import { errorExcerpt, exists, log, preferOwnTest, readFile, readJson, relPath, run, stripAnsi, walkFiles, which, writeJson } from "../util.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const INIT_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data", "unitgen-jacoco.init.gradle");
@@ -32,8 +32,8 @@ export class GradleAdapter implements Adapter {
   }
 
   private gradlew(): string[] {
-    const w = path.join(this.root, "gradlew");
-    return exists(w) ? [w] : ["gradle"];
+    const w = path.join(this.root, process.platform === "win32" ? "gradlew.bat" : "gradlew");
+    return exists(w) ? [w] : [process.platform === "win32" ? which("gradle") ?? "gradle.bat" : "gradle"];
   }
 
   doctor(): Doctor {
@@ -381,13 +381,15 @@ export class GradleAdapter implements Adapter {
 
   /** Source file of a class in a JaCoCo report: the module that ran first, then any other module (the report covers them all). */
   private resolveSource(m: Module, pkgPath: string): string | undefined {
+    // JaCoCo names files `calc/Calc.java`; on Windows the source paths use `\`.
+    const rel = pkgPath.split("/").join(path.sep);
     for (const mod of [m, ...this.modules().filter((x) => x.name !== m.name)]) {
       let files = this.resolveCache.get(mod.name);
       if (!files) {
         files = this.sourceFiles(mod);
         this.resolveCache.set(mod.name, files);
       }
-      const hit = files.find((f) => f.endsWith(path.sep + pkgPath));
+      const hit = files.find((f) => f.endsWith(path.sep + rel));
       if (hit) return hit;
       // Kotlin files whose package does not match the directory layout.
       const base = path.basename(pkgPath);
