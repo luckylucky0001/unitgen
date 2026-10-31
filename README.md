@@ -15,6 +15,8 @@ baseline（跑现有测试 + 覆盖率）
    → report
 ```
 
+**实测情况**：已在 DevEco Studio 26 和 Xcode 16.4 的真实工具链上，用 10 个开源项目做过完整验证（写测试 → verify → mutate），包括 [Kingfisher](https://github.com/onevcat/Kingfisher)（24k★）、[Ink](https://github.com/JohnSundell/Ink)、[Rainbow](https://github.com/onevcat/Rainbow)、[interview-handbook](https://github.com/HarmonyOS-Next/interview-handbook-project)、[LinysBrowser_NEXT](https://github.com/awaLiny2333/LinysBrowser_NEXT)、[DSBridge-HarmonyOS](https://github.com/751496032/DSBridge-HarmonyOS)。验证方法、逐个文件的覆盖率和变异得分、在这些项目里发现的疑似 bug，见下文[第二轮验证](#第二轮验证2026-10-31deveco-studio-26--xcode-164真实工具链)。
+
 ## 开源方案调研（2026-10-21，GitHub API 数据）
 
 结论：**没有一个开源工具能同时可靠地覆盖 iOS + Android + 鸿蒙；鸿蒙 ArkTS 方向没有找到任何开源的单测生成工具。**
@@ -43,10 +45,10 @@ unitgen 采用的就是调研结论推荐的路线：平台无关的 LLM 闭环 
 
 | 用途 | 需要 |
 |---|---|
-| CLI 本身 | Node.js ≥ 22.18（`node -v` 检查） |
+| CLI 本身 | Node.js ≥ 22.18（`node -v` 检查）；PATH 里没有合适的 Node 时自动使用 DevEco Studio 自带的 Node |
 | Android | JDK 17+（`JAVA_HOME`）、Android SDK（`ANDROID_HOME` 或工程里的 `local.properties`） |
-| iOS | Xcode（或仅 Command Line Tools：只能跑 Swift Package + Swift Testing） |
-| 鸿蒙 | 无额外要求（没有 DevEco 时用内置的 Node shim 跑纯逻辑；有 hvigor 则用 hvigor） |
+| iOS | Xcode（SwiftPM 包和 .xcodeproj 工程，后者在 iOS 模拟器上跑）；只有 Command Line Tools 时只能跑 Swift Package + Swift Testing |
+| 鸿蒙 | 推荐安装 DevEco Studio（自动发现，用真实 hvigor + ArkTS 编译器 + Previewer 运行时，不需要模拟器）；工程需在 devDependencies 里声明 `@ohos/hypium`（≥ 1.0.19 才能在 Previewer 里拿到覆盖率）并执行过 `ohpm install`。没有 DevEco 时用内置的 Node shim 跑纯逻辑 |
 
 ```bash
 git clone https://github.com/luckylucky0001/unitgen.git ~/unitgen
@@ -59,7 +61,7 @@ unitgen --help
 mkdir -p ~/.claude/skills && ln -sfn ~/unitgen/skills/unitgen ~/.claude/skills/unitgen
 ```
 
-演示建议：先在一个开源工程上跑 `unitgen doctor` → `baseline` → `targets`，再让 Claude Code 用 Skill 补 1–2 个文件，最后 `unitgen mutate` 和 `unitgen report`。Android 工程第一次构建会下载 Gradle 依赖，建议提前跑一次 `baseline` 预热。
+演示建议：先在一个开源工程上跑 `unitgen doctor` → `baseline` → `targets`，再让 Claude Code 用 Skill 补 1–2 个文件，最后 `unitgen mutate` 和 `unitgen report`。Android 工程第一次构建会下载 Gradle 依赖，建议提前跑一次 `baseline` 预热；鸿蒙工程第一次 hvigor 构建也会慢一些。`doctor` 会说明用的是哪个运行器以及原因，有问题先按它的提示处理。
 
 ## 快速开始
 
@@ -75,7 +77,9 @@ unitgen reject <测试文件> "原因"       # 放弃并隔离
 unitgen report        # .unitgen/REPORT.md
 ```
 
-需要 Node ≥ 22.18（直接运行 TypeScript 源码，无构建步骤）。如果仓库旁边有 `unitgen-env/env.sh`（本机就是），`bin/unitgen` 会自动用里面的 Node 24 / JDK 17 / Android SDK 路径，只对 unitgen 进程生效。
+鸿蒙工程先在工程根目录执行一次 `ohpm install`（DevEco Studio 打开工程时也会自动执行）；同时有 `Package.swift` 和 `.xcodeproj` 的 iOS 工程，想走 Xcode + 模拟器时，每条命令都加 `--adapter xcode`。
+
+需要 Node ≥ 22.18（直接运行 TypeScript 源码，无构建步骤）。PATH 里没有合适的 Node 时，`bin/unitgen` 会改用 DevEco Studio 自带的 Node；如果仓库旁边有 `unitgen-env/env.sh`，会自动用里面的 Node / JDK 17 / Android SDK 路径，只对 unitgen 进程生效。
 
 ### 作为 Claude Code Skill 使用
 
@@ -123,11 +127,15 @@ UNITGEN_ENV=/absolute/path/to/unitgen-env.sh /absolute/path/to/unitgen/bin/unitg
 - 长时间测试/构建使用异步子进程，构建输出实时写入日志并发送到 stderr；每 30 秒输出运行状态。`UNITGEN_QUIET=1` 只关闭终端进度，仍写日志。
 - `--json` 的结果在 stdout，stderr 是进度/诊断。不要把两者合并后当 JSON 解析。管道记录时使用支持 `pipefail` 的 shell，保留 unitgen 的实际退出码。
 - 退出码：`0` 通过；`1` 命令/环境/参数错误；`2` 质量门禁失败；`130` 用户取消。
-- `baseline` 必须构建、测试成功且有实际测试和覆盖率；失败返回非零，保留旧覆盖率作为证据，同时标记基线无效。`verify` 和 `generate` 要求成功基线。因此没有可运行测试的 Swift/ArkTS 工程需要先补充可运行的种子测试，不再把失败/空基线当作有效的 0% 基线。
+- `baseline` 只跑工程**原有**的测试（unitgen 生成的测试不计入「改造前」）。构建失败、测试失败或覆盖率拿不到时返回非零并标记基线无效，输出里写明原因和失败的用例；`--allow-failing` 可以在列出失败用例的前提下保留基线。没有任何测试的鸿蒙工程直接得到有效的 0% 基线（shim/hvigor 的覆盖率由 unitgen 自己统计，「没跑出东西」不会被误当成 0%）。`verify`、`mutate`、`generate` 要求成功的基线，并且要求和基线用同一个运行器（例如都用 hvigor）。
 - `mutate` 默认要求 `--min-score 80`，未达标或变异运行遇到环境错误返回 `2`；没有可生成的变异体明确标记 `NOT_APPLICABLE`（退出 `0`），不把它解释成断言强度 100%。仍须报告抽样数、幸存项和仅由崩溃检出的数量。
+- 速度：
+  - 鸿蒙的 hvigor 默认使用守护进程，热启动后单次运行约 1 秒，比冷启动快 3 倍左右；设 `UNITGEN_HVIGOR_DAEMON=0` 可以关闭。
+  - 变异体的超时按已经跑完的变异体实际耗时自适应（3 倍中位数 + 10 秒，下限 20 秒），死循环的变异体不会每个都白等 60 秒。
+  - 已经判定过的变异体，在测试文件没改动之前不会重跑。
 - `generate` 在 verify 后执行 mutate，将未通过的变异反馈给模型继续补强；重试耗尽则隔离该文件，并返回 `2`。`--max` 控制每轮变异预算；目前没有原生 `--llm trae`，TRAE 用户优先使用上面的 Skill 流程。
-- 一个项目一次只允许一个 CLI 命令，包括读取/恢复命令。正常 SIGINT/SIGTERM 会取消运行中的测试子进程并在 finally 中恢复源码、释放锁。macOS/Linux 会终止测试进程组；Windows 使用 `taskkill /T`，该平台尚未实测。
-- 强杀（SIGKILL）无法执行 finally。先确认 `.unitgen/run.lock` 中的 PID 及其构建子进程均已停止，再手动移除这个残留锁；下一条命令会按 journal 恢复中断的变异。不要删除活跃锁，也不要把 Agent 停止回复等同于后台构建已经停止。
+- 一个项目一次只允许一个 CLI 命令，包括读取/恢复命令。超时、SIGINT/SIGTERM 会终止测试的**整棵进程树**：包括自己另开进程组的测试助手（如 `swiftpm-testing-helper`，死循环的变异体曾让它在后台一直涨内存），然后恢复源码、释放锁。Windows 使用 `taskkill /T`，该平台尚未实测。
+- 被强杀（SIGKILL、关掉终端、Agent 会话中断）之后不需要手动处理：锁文件记录了监督进程、worker 和所有后代进程（PID + 启动时间），下一条命令会确认它们都已退出，或者自动停掉能确认身份的残留进程，然后接管锁，还原被变异的源码、被临时替换的 `List.test.ets` 和 `Package.swift`。只有仍有无法确认的构建进程在跑时才会提示你，并给出具体的 kill 命令。
 
 Android 的验证范围是 JVM 本地单测；APK 安装、真机 API 和 UI 测试需要另外验证。
 
@@ -139,15 +147,136 @@ unitgen generate --llm claude --limit 5           # 需要 claude CLI
 unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 ```
 
+已实测：`unitgen generate --llm claude --limit 1` 在 qs-arkts 的 `proto_guard.ets` 上用 hvigor 一次通过，新增覆盖 7 行，变异 6/7 杀死，全程 66 秒。
+
 ## 三端实现
 
 | | 识别 | 运行与覆盖率 | 生成测试位置 |
 |---|---|---|---|
-| iOS | `Package.swift` | `swift test --enable-code-coverage`，解析 llvm-cov 导出（与 `llvm-cov export -format=lcov` 逐行一致） | 独立 test target `<Target>UnitGenTests`（Package.swift 末尾带标记的块） |
+| iOS（SwiftPM） | `Package.swift` | `swift test --enable-swift-testing --enable-code-coverage`，解析 llvm-cov 导出（与 `llvm-cov export -format=lcov` 逐行一致） | 独立 test target `<Target>UnitGenTests`（Package.swift 末尾带标记的块） |
+| iOS（Xcode） | `.xcodeproj` / `.xcworkspace`（两者并存时 `--adapter xcode`） | `xcodebuild test` + iOS 模拟器，`-only-testing` 隔离，`xccov` 读覆盖率 | 现有测试 target 里的 `<类>UnitGenTests.swift`，需要时登记到 project.pbxproj |
 | Android | `settings.gradle(.kts)` | 自动发现每个模块的单测任务（含 flavor），`-I` 注入 JaCoCo init script，**不改任何构建文件**；兼容 configuration cache / isolated projects | `src/test/<kotlin|java>/<包路径>/<类>UnitGenTest.kt`，`--tests` 只跑这一个类，`--rerun` 防缓存 |
-| 鸿蒙 | `build-profile.json5` | 有 hvigor 用 hvigor；否则 Node shim：TS 转译 .ets + hypium 兼容实现 + 直接读 V8 块覆盖并自行映射回 .ets 行（比 c8 的行规则严格：一行里有没执行的代码就算未覆盖）+ ArkTS 语法限制 lint | `<module>/src/test/<文件>.unitgen.test.ets`，自动登记到 `List.test.ets` |
+| 鸿蒙 | `build-profile.json5`（或 git 忽略了它时的 `build-profile.template.json5`） | 默认 hvigor：自动发现 DevEco，按 DevEco 本地测试流程（`isLocalTest`/`unitTestMode`/`buildRoot=.test`）在 Previewer 里跑，真实 ArkTS 编译器；verify/mutate 时把 `List.test.ets` 临时指向被测文件，别处编译不过的旧测试不影响；读 `coverageReport.json`。备选 Node shim：TS 转译 .ets、ArkUI struct/@Builder 挖空、hypium 兼容实现、按 source map 逐段映射 V8 覆盖率、ArkTS 限制 lint | `<module>/src/test/<文件>.unitgen.test.ets`，自动登记到 `List.test.ets` |
 
-## 验证结果（2026-10-21，本机：macOS + Command Line Tools，无 Xcode / DevEco）
+## 第二轮验证（2026-10-31，DevEco Studio 26 + Xcode 16.4，真实工具链）
+
+第一轮只有 Command Line Tools，鸿蒙全部跑在 Node shim 上。这一轮装好了 DevEco Studio（HarmonyOS 26.0.0 SDK，hvigor + ArkTS 编译器 + Previewer 运行时）和 Xcode 16.4（iOS 18.6 模拟器），在 **10 个开源项目**上完整实测（写测试 → verify → mutate），其中 8 个是这轮新加的，另外 2 个（LinysBrowser_NEXT、interview-handbook）是第一轮测过、这次换真工具链复验的；另有 4 个知名项目（Wechat_HarmonyOS、HarmoneyOpenEye、Gramony、legado-Harmony）只用来检查 doctor/baseline/targets 的兼容性。
+
+### 验证方法
+
+1. **选项目**：用 GitHub API 按 star 数搜索鸿蒙 ArkTS 和 Swift 项目，排除没有源码的（例如 legado-Harmony 的 main 分支只剩 README）和纯 UI 的，保留逻辑代码多的。每个项目都是 `git clone --depth 1` 得到的干净副本，只在副本里改动。
+2. **独立执行**：每个项目交给一个**只读 Skill 文档**的独立子代理，按 `doctor → baseline → targets → brief → 写测试 → verify → mutate → report` 完整走一遍。期望值只能来自读代码或可信的外部基准（RFC 测试向量、CPython zlib），不能抄测试输出。子代理同时记录遇到的每个工具问题，并区分哪些是工具 bug、哪些是自己写错了。
+3. **修复再复验**：收集到的问题逐个修复，每个修复都配单测（单测从 31 个增加到 49 个）。修完后用最终代码把所有项目从头重跑一遍：重建基线（只含项目原有测试）、复验每个已接受的测试文件、重跑变异测试。下表的数字都来自这次统一重跑。
+4. **两种运行器交叉验证**：同一批鸿蒙测试分别在 shim 和 hvigor 上跑，对比结果是否一致（见下文）。
+5. **故障注入**：几个子代理和监督会话被整体强杀在变异测试中途（生产代码处于被改动的状态），再验证下一条命令能否自动恢复；另外构造了一个会让测试死循环的变异体，验证超时后不会有进程残留。
+
+### 结果
+
+| 项目 | 平台 · 运行器 | 目标文件 | 目标文件覆盖率 | 新增测试 | 变异得分 |
+|---|---|---|---|---:|---|
+| [Kingfisher](https://github.com/onevcat/Kingfisher) 24,405★ | iOS · Xcode + iOS 模拟器 | `KingfisherError.swift` | 29% → **99%**（62 → 211 / 213 行） | 14 | 67%（10/15 杀死，评估 15/42） |
+| [Kingfisher](https://github.com/onevcat/Kingfisher) 24,405★ | iOS · Xcode + iOS 模拟器 | `ImageFormat.swift` | 44% → **98%**（24 → 54 / 55 行） | 11 | 100%（15/15 杀死，评估 15/29；其中 1 个靠崩溃，2 个判为等价） |
+| [Ink](https://github.com/JohnSundell/Ink) 2,539★ | iOS · SwiftPM | `List.swift` | 87% → **99%**（140 → 159 / 161 行） | 10 | 80%（12/15 杀死，评估 16/40；其中 1 个靠崩溃，1 个判为等价） |
+| [Rainbow](https://github.com/onevcat/Rainbow) 1,941★ | iOS · SwiftPM | `ConditionalStyleBuilder.swift` | 53% → **100%**（67 → 127 / 127 行） | 24 | 100%（15/15 杀死，评估 18/28） |
+| [Rainbow](https://github.com/onevcat/Rainbow) 1,941★ | iOS · SwiftPM | `String+Rainbow.swift` | 89% → **100%**（199 → 223 / 223 行） | 23 | 100%（23/23 杀死，评估 23/23；其中 2 个靠崩溃） |
+| [interview-handbook-project](https://github.com/HarmonyOS-Next/interview-handbook-project) 541★ | 鸿蒙 · hvigor | `base.ets` | 0% → **100%**（0 → 6 / 6 行） | 9 | 100%（8/8 杀死，评估 11/11；1 个判为等价） |
+| [interview-handbook-project](https://github.com/HarmonyOS-Next/interview-handbook-project) 541★ | 鸿蒙 · hvigor | `InterviewItemModel.ets` | 0% → **100%**（0 → 12 / 12 行） | 8 | 100%（11/11 杀死，评估 11/11） |
+| [LinysBrowser_NEXT](https://github.com/awaLiny2333/LinysBrowser_NEXT) 292★ | 鸿蒙 · hvigor | `url.ets` | 0% → **81%**（0 → 153 / 189 行） | 25 | 94%（33/35 杀死，评估 41/165；2 个判为等价） |
+| [LinysBrowser_NEXT](https://github.com/awaLiny2333/LinysBrowser_NEXT) 292★ | 鸿蒙 · hvigor | `url-ext.ets` | 0% → **100%**（0 → 108 / 108 行） | 9 | 97%（33/34 杀死，评估 36/72；其中 1 个靠崩溃，6 个判为等价） |
+| [DSBridge-HarmonyOS](https://github.com/751496032/DSBridge-HarmonyOS) 182★ | 鸿蒙 · hvigor | `BaseBridge.ts` | 0% → **94%**（0 → 218 / 233 行） | 44 | 88%（21/24 杀死，评估 30/119） |
+| [DSBridge-HarmonyOS](https://github.com/751496032/DSBridge-HarmonyOS) 182★ | 鸿蒙 · hvigor | `AsyncCallbackHelper.ts` | 0% → **100%**（0 → 32 / 32 行） | 12 | 100%（12/12 杀死，评估 14/14） |
+| [qs-arkts](https://github.com/wgli-collab/qs-arkts) 45★ | 鸿蒙 · hvigor | `utils_encode.ets` | 0% → **97%**（0 → 115 / 118 行） | 17 | 80%（12/15 杀死，评估 19/102；6 个判为等价） |
+| [qs-arkts](https://github.com/wgli-collab/qs-arkts) 45★ | 鸿蒙 · hvigor | `proto_guard.ets` | 0% → **100%**（0 → 7 / 7 行） | 18 | 86%（6/7 杀死，评估 7/7） |
+| [Home-Assistant-HarmonyOS-Next](https://github.com/gentslava/Home-Assistant-HarmonyOS-Next) 17★ | 鸿蒙 · hvigor | `P2pHomeAssistantRepository.ets` | 0% → **91%**（0 → 50 / 55 行） | 13 | 91%（10/11 杀死，评估 17/17；2 个判为等价） |
+| [Home-Assistant-HarmonyOS-Next](https://github.com/gentslava/Home-Assistant-HarmonyOS-Next) 17★ | 鸿蒙 · hvigor | `HomeAssistantStore.ets` | 0% → **100%**（0 → 45 / 45 行） | 13 | 100%（15/15 杀死，评估 18/37；其中 1 个靠崩溃） |
+| [HarmonyOS_2048](https://github.com/amazingcoderpro/HarmonyOS_2048) 15★ | 鸿蒙 · hvigor | `SoundManger.ets` | 0% → **45%**（0 → 42 / 93 行） | 14 | 40%（6/15 杀死，评估 17/20；1 个判为等价） |
+| [lxmusic-harmony](https://github.com/Adamaik/lxmusic-harmony) 13★ | 鸿蒙 · hvigor | `Inflate.ets` | 0% → **100%**（0 → 149 / 149 行） | 19 | 87%（13/15 杀死，评估 19/153；其中 3 个靠崩溃，29 个判为等价） |
+
+口径说明：
+- 「改造前」是只跑项目原有测试的基线，鸿蒙这几个项目原来都没有测到这些文件。
+- 对项目副本的改动：除了新增的测试文件、unitgen 自己注册测试用的 `List.test.ets` / `Package.swift` / `project.pbxproj`，只有下面三处构建配置，都是为了能在 DevEco 26 上构建，生产代码一行没动：
+  - qs-arkts：加了 `@ohos/hypium` 依赖；去掉了写死的 `compileSdkVersion`（API 24，本机 SDK 是 26）；去掉了 hvigor 插件的版本锁定。
+  - DSBridge：把 `@ohos/hypium` 从 1.0.6 升到 1.0.25。在原版本下，unitgen 正确报告「覆盖率拿不到」（INFRA_ERROR）。
+  - lxmusic：按项目自己 README 的说明，从模板复制了 `build-profile.json5`。
+- 覆盖率由真工具链测出：hvigor 的 `coverageReport.json`，Xcode/SwiftPM 的 llvm-cov/xccov。
+- 变异得分 = 杀死数 / (杀死 + 存活)，只统计用当前测试文件测过的变异体。编译不过的变异体不计入分数，但算作「已评估」。
+- 每个文件这一轮最多跑 15 个变异体（`--max 15`），所以「评估 X/Y」里 X 往往小于候选总数 Y。重复运行会接着评估剩下的。
+- 表里只列在真工具链上测出的结果。interview-handbook 的 `QuestionItemModel.ets` 所在的 home 模块在 hvigor 下构建不了（缺少依赖声明，见下文），只在 shim 下验证过：0% → 100%（82 行），7 个测试，变异 16/16 杀死。
+
+怎么看这些数字：
+- 17 个目标文件里，15 个的覆盖率到了 91% 以上，所有新增测试都在真工具链上通过，没有改动任何生产代码。
+- 变异得分低的几项都是真实的测试缺口，没有被工具掩盖：
+  - **KingfisherError 67%**：上一版变异算子不会改 `case .x: return 2001` 里的错误码，当时报的是「100%（8/8）」。补上这类算子后，5 个存活的变异全是 `3001…3005` 这几个错误码，说明测试没有逐个断言它们。
+  - **BaseBridge**：一开始只有 60%，因为存活的 6 个里有 4 个是删掉项目自己封装的 `LogUtils.d/e(...)` 日志调用，这种改动观察不到，属于噪音。调优后 unitgen 能识别项目自己的日志封装，不再为它们生成变异，得分变成 88%，剩下的存活都是真正的缺口。
+  - **SoundManger 40%**：存活的变异体都是对 `soundPool.play/stop/off` 的调用。这些调用在 Previewer 里是模拟实现，只有真设备或替身才能观察到，brief 里已经给出了警告。
+- 判为「等价」的变异体，每一个都写了理由（`unitgen note`）。例如 Inflate.ets 的 29 个来自 12 行，都是读取之前一定会被覆盖的初始值、或者永远不会被读到的表槽位。
+
+兼容性检查（只跑 doctor / baseline / targets）：
+
+| 项目 | 结果 |
+|---|---|
+| [legado-Harmony](https://github.com/mgz0227/legado-Harmony) 2,228★ | main 分支没有源码，doctor 报「no module with src/main/ets」 |
+| [HarmoneyOpenEye](https://github.com/WinWang/HarmoneyOpenEye) 618★ | API 9 老工程，锁定了 hvigor 插件 2.4.2，又没有 `~/.npmrc`，自动改用 shim 并说明原因；基线 0%，targets 正常 |
+| [Wechat_HarmonyOS](https://github.com/ausboyue/Wechat_HarmonyOS) 492★ | 没有任何测试，hvigor 下得到 0% 基线；`PhotoPickerUtils`、`AudioCapturerManager` 等设备能力文件正确地排到了纯逻辑文件后面 |
+| [Gramony](https://github.com/Gramony/Gramony) 180★ | 没声明 hypium，`ohpm install` 也因为缺少本地编译产物而失败，自动改用 shim 并给出两条警告 |
+
+
+### 被测项目里发现的疑似 bug
+
+测试按当前行为写断言，并在代码里标注 `UNITGEN-SUSPECT`。下面每一条都对照过源码，标了「真机」的在 hvigor/Previewer 或 iOS 模拟器上实际跑过。
+
+| 项目 | 发现 | 依据 |
+|---|---|---|
+| LinysBrowser_NEXT | Punycode 把 emoji 编成 `8c9by4f`（拆成了两个代理项），RFC 3492 规定 U+1F4A9 应编为 `ls8h`。原因是在 Previewer 运行时里 `Array.from(label)` 按 UTF-16 码元迭代（我单独验证过：`Array.from('💩').length === 2`，按 JS 规范应为 1） | 真机（Previewer）。Node/shim 下按规范迭代，这个用例反而能通过；真设备上的方舟运行时没测 |
+| LinysBrowser_NEXT | `SCHEME_REGEX` 把 `localhost:8080` 当成 scheme 为 `localhost` 的 URI，于是不再补 `http://` | 真机 |
+| LinysBrowser_NEXT | IPv6 正则在最后一个 `:` 处切分，`64:ff9b::192.0.2.33`（RFC 6052）这类合法地址被拒绝 | 真机 |
+| interview-handbook | `getPercentText` 没处理 `total === 0`，页面会显示 `NaN%` / `Infinity%` | 真机 |
+| interview-handbook | `new InterviewItemModel({} as InterviewItem)` 把类上的默认值全部覆盖成 `undefined`，两个组件都这样构造占位对象 | 真机 |
+| DSBridge-HarmonyOS | 异步方法抛异常时，返回给 H5 的是 `code: 0`，而同步分支是 `-1`（第 183 行先设了 code 再调用） | 真机 |
+| DSBridge-HarmonyOS | `hasNativeMethod` 不检查命名空间是否存在，`nope.dsinit` 返回 true，可实际调用会失败 | 真机 |
+| HarmonyOS_2048 | `} catch(error) {` 前面没有 `try`，被解析成了一个叫 `catch` 的类方法，`loadAudio` 里的同步异常没有任何地方捕获 | 真机：编译通过，并且能直接调用 `sm.catch()` |
+| Home Assistant（手表） | `onIncoming` 没有 try/catch，一条格式错误的消息就会从 WearEngine 回调里抛出；`refreshEntity` 也没有 catch，和 `sync` 的处理不一致 | 真机 |
+| lxmusic-harmony | 项目自带的 HeartMode 测试在真机上同样失败：余弦相似度为 `1.0000000000000002 > 1`，而且推荐出来的正是种子歌曲本身；`LocalMusic.test.ets` 已经跟不上 `LocalSong` 的新字段，编译不过 | 真机：项目自己的测试 |
+| Kingfisher | `cannotSetCacheFileAttribute` 的错误描述拼接时少了空格；声明了 `static let domain` 却没实现 `errorDomain`，桥接成 NSError 后 domain 和文档不符 | iOS 模拟器 |
+| Kingfisher | `JPEGMarker.RSTn(n)` 计算 `0xD0 + n` 时，n ≥ 0x30 会 UInt8 溢出直接 trap | 读代码（测了会让测试进程崩溃） |
+
+### shim 和真工具链的交叉验证
+
+- **一致的部分**：lxmusic 自带的 95 个测试里，失败的就是同样那 5 个。qs-arkts、HA、DSBridge、lxmusic 上的生成测试，在两种运行器下的通过情况一致。纯逻辑文件的覆盖率只差在可执行行的统计口径上。
+- **只有真工具链能发现的**：
+  - `expect(返回 void 的调用)`：TypeScript 允许，ArkTS 编译器拒绝。
+  - `@Trace` 字段存的是可观察代理，`store.cards === before` 在真机上为 false。
+  - hypium 1.0.19 之前的版本没有 `.message()`。
+  - Punycode 的 UTF-16 迭代差异。
+  - 项目旧测试的类型错误。
+
+  前三条现在已经由 shim 的 lint 和 `@Trace` 模拟提前拦下，最后两条只能靠 hvigor 发现，这也是 hvigor 成为默认运行器的原因。
+
+### 这轮发现并修复的 unitgen 问题
+
+| 类别 | 问题 | 修复 |
+|---|---|---|
+| 鸿蒙 hvigor | 原来的 hvigor 路径实际跑不起来：去找根本不存在的 lcov 文件，测试失败时也照样判通过 | 按 DevEco 本地测试流程重写：解析 `test_result.txt` 和 `coverageReport.json`，自动发现 DevEco |
+| 鸿蒙 hvigor | 一个编译不过的旧测试会让所有 verify 失败 | verify/mutate 时把 `List.test.ets` 临时指向被测文件；基线自动排除编译不过的旧测试并列出来 |
+| 鸿蒙 hvigor | hypium < 1.0.19 时 Previewer 丢掉覆盖率，被判成 NO_GAIN，误导写测试的人一直补测试 | 判为 INFRA_ERROR 并给出升级建议（已验证升级到 1.0.25 后恢复正常） |
+| 鸿蒙 hvigor | 覆盖率工具把类型标注里的函数类型当成从没调用过的函数，标注所在行永远显示未覆盖 | 识别并剔除这类虚假区域 |
+| 鸿蒙 hvigor | 某个模块缺少依赖声明，导致整个基线作废 | 按模块隔离；指出没声明的那个包；`targets` 把这些模块的文件排到最后 |
+| 鸿蒙 shim | TypeScript 把两行合成一行时有一行丢了覆盖率；`?.`/`&&` 短路让整行被判为未覆盖；`if (...) {` 后面的 `{` 让条件行被判为未覆盖 | 按 source map 逐段映射，忽略短路子表达式的范围 |
+| 鸿蒙 shim | 含 `struct` 的文件被整个换成桩，同一文件里导出的工具函数也测不了 | 只挖掉 struct/@Builder，其余代码正常加载 |
+| 鸿蒙 lint | 误报 `Record` 的下标访问；漏报 import 未导出的符号、`expect(void)`、`.message()` | 全部修正，并补了单测 |
+| 鸿蒙 起步 | 没有测试的工程、只有 DevEco 模板测试的工程、`build-profile.json5` 被 git 忽略的工程，都没法开始 | 0% 基线直接有效；读模板文件；doctor 说明原因 |
+| 鸿蒙 兼容 | `compileSdkVersion` 写死成旧版本、插件锁定需要 `~/.npmrc` 的工程，hvigor 无法构建 | doctor 提前识别并自动改用 shim，说明原因 |
+| iOS SwiftPM | `swift-tools-version` < 6.0 的包（大多数库都是）里，Swift Testing 的测试 0 个被执行，verify 报 NO_TESTS | 自动加 `--enable-swift-testing` |
+| iOS SwiftPM | 带 `main.swift` 的 `.target`（Ink 的 CLI、Rainbow 的 Playground）被排成第一个目标 | 当作可执行目标排除 |
+| 进程管理 | 死循环的变异体超时后只杀掉了 `swift test`，自己另开进程组的 `swiftpm-testing-helper` 一直在后台涨内存 | 杀整棵进程树；监督进程把后代进程的 PID + 启动时间记进锁文件 |
+| 进程管理 | 被强杀后要手动确认 PID 再删锁，变异过的源码要等下一条命令才能还原 | 下一条命令自动接管过期锁，停掉能确认身份的残留进程，还原源码、`List.test.ets` 和 `Package.swift` |
+| 基线 | 重跑基线时，已经接受的生成测试被算进「改造前」（报告写成 6% → 34%，实际起点是 0） | 基线只跑项目原有的测试（四种运行器都处理了） |
+| 基线 | 因为平台桩而失败的旧测试让基线作废；shim 和 hvigor 的数据混在一起 | shim 下自动容忍这类失败（会列出来），其他情况用 `--allow-failing`；记录运行器，不一致时拒绝 verify |
+| 变异测试 | Swift 的 `if cond {`、尾随闭包、成员赋值、`case .x: return 2001`、返回的字符串都没有变异体：Rainbow 的 ConditionalStyleBuilder 只有 2 个候选，Kingfisher 的「100%」是虚高 | 补上这些算子；不再生成 `$0 → $1`、类型联合 `0 \| 1` 这类注定编译不过的变异 |
+| 变异测试 | 删除项目自己封装的日志调用（`LogUtils.d(...)`）也算作变异，存活了就拉低分数 | 识别以 Log/Logger/LogUtils 结尾的封装，`Catalog`、`Dialog` 这类名字不受影响 |
+| 变异测试 | 进程崩溃杀死的变异被算成普通 killed；报告只汇总最后一轮；重跑时用已杀死的变异填预算；`--equivalent` 写多次只保留最后一个；id 在版本之间会漂移 | 累计统计（只算当前测试内容测出的结果）；没有新变异时直接给出结果；`--equivalent` 可重复，按稳定的键记录 |
+
+## 第一轮验证结果（2026-10-21，本机：macOS + Command Line Tools，无 Xcode / DevEco）
 
 四轮共 9 个独立子代理只读 Skill 完成了大部分目标（标 ★），其余由我按同一流程完成。
 
@@ -199,9 +328,9 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 
 ## 已知限制
 
-- iOS：只支持 SwiftPM 包；纯 Xcode 工程（xcodeproj + 模拟器）尚未实现。只有 Command Line Tools 时 XCTest 不可用，已有 XCTest 用例跑不了（baseline 为 0%），只能用 Swift Testing。
+- iOS：SwiftPM 包和 Xcode 工程（iOS 模拟器）都已实测；xcodebuild 每次运行几十秒，变异测试要控制 `--max`。只有 Command Line Tools 时 XCTest 不可用，已有 XCTest 用例跑不了（baseline 为 0%），只能用 Swift Testing。UI 测试、真机不在范围内。
 - Android：只覆盖 JVM 本地单测（src/test）；`android.util.Log` 等在没有 Robolectric / `isReturnDefaultValues` 时会抛异常，相应分支不会被覆盖。
-- 鸿蒙：没有 hvigor 时的 shim 只对纯逻辑可信；`@kit.*`/`@ohos.*` 系统 API、ArkUI 全局量/装饰器、UI 组件（struct）文件都是空桩；未安装的 ohpm 包、shim 解析不了的语法、缺失的全局量都报 `INFRA_ERROR`（不会被当成测试错误）。shim 的覆盖率按「行内所有代码都执行才算覆盖」计，比 c8 严格（c8 会把提前 return 之后的 case 行误算为已覆盖，已修正）。ArkTS lint 只覆盖常见限制，最终仍需在 DevEco/hvigor 跑一遍。hvigor 原生路径已实现但未在真机工具链上验证。
+- 鸿蒙：hvigor 路径已在 DevEco Studio 26（HarmonyOS 26.0.0 SDK）上实测；跑的是本地单测（Previewer 运行时），系统 API 大多是模拟实现，设备相关逻辑和 `ohosTest`（Instrument Test）/UI 测试不在范围内。`compileSdkVersion` 写死成旧版本、`hvigor-config.json5` 锁定插件版本但没有 `~/.npmrc` 的工程，hvigor 无法构建，unitgen 会自动改用 shim 并说明原因。shim 只对纯逻辑可信：`@kit.*`/`@ohos.*` 是空桩，ArkUI struct/@Builder 被挖空，不跑 ArkTS 编译器（用 lint 近似，实测仍有漏网，例如 `expect(void 调用)`）。struct 里的私有方法、模块未导出的代码都无法测试，brief 会提前警告。
 
 ## 开发
 
@@ -210,6 +339,6 @@ npm run typecheck   # tsc --noEmit
 npm test            # node --test（解析器、门禁相关单测）
 ```
 
-调试：`UNITGEN_VERBOSE=1` 打印执行的命令；`UNITGEN_KEEP_COV=1` 保留 SwiftPM 的覆盖率 JSON。
+调试：`UNITGEN_VERBOSE=1` 打印执行的命令；`UNITGEN_KEEP_COV=1` 保留 SwiftPM 的覆盖率 JSON 和鸿蒙 shim 的转译产物/V8 原始数据。
 
-安全性：`mutate` 临时改被测源码，写日志 `.unitgen/mutation-in-progress.json`，任何 unitgen 命令启动时都会自动还原（已验证：运行中直接杀掉进程，下次启动即还原）；iOS 隔离验证时临时挪开的同 target 测试文件同理。
+安全性：`mutate` 临时改被测源码，写日志 `.unitgen/mutation-in-progress.json`；鸿蒙 hvigor 运行时临时替换 `List.test.ets`（`.unitgen/harmony-list.json`），iOS 隔离验证时临时挪开同 target 的测试文件、改写 `Package.swift`。任何 unitgen 命令启动和退出时都会在持有锁的前提下还原它们。已实测：Agent 会话在三个工程的变异运行中途被整体杀掉，下一条 `unitgen status` 自动接管过期锁并还原了全部源码。

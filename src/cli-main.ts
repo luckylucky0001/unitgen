@@ -9,7 +9,7 @@ import { pickBackend } from "./llm.ts";
 import { buildReport } from "./report.ts";
 import { State } from "./state.ts";
 import { formatTargets, rankTargets } from "./targets.ts";
-import { exists, log, relPath, writeFile } from "./util.ts";
+import { exists, log, relPath, walkFiles, writeFile } from "./util.ts";
 import { formatVerify, quarantine, verify } from "./verify.ts";
 import { formatMutation, mutate, mutationGate, recover } from "./mutate.ts";
 import * as fs from "node:fs";
@@ -38,12 +38,17 @@ Common options
       --module <name>        Restrict to one module/target
       --json                 Machine-readable output
 
+baseline:  --allow-failing    keep a baseline although some existing tests fail (they are listed)
 targets:   --limit <n> (20)  --all-kinds
 brief:     --out <file>      --feedback <file>
 verify:    --target <source> --reruns <n> (1)  --allow-no-gain  --quarantine
-mutate:    --target <source> --max <n> (15) --min-score <percent> (80) --equivalent <line,...>
+mutate:    --target <source> --max <n> (15) --min-score <percent> (80)
+           --equivalent <id|line>[,...]  exclude mutants judged equivalent (12.2 = one mutant, 12 = a line); repeatable
 generate:  --llm anthropic|claude|cmd:<sh> --model <id> --limit <n> (5) --attempts <n> (3) [files...]
            --max <n> (15 mutants/attempt) --min-score <percent> (80)
+
+Environment: UNITGEN_HARMONY_MODE=hvigor|shim (HarmonyOS runner), DEVECO_STUDIO_HOME / DEVECO_SDK_HOME,
+             UNITGEN_QUIET=1 (no build progress), UNITGEN_VERBOSE=1 (print commands), UNITGEN_ENV=<env.sh>.
 
 Exit codes: 0 passed (or mutation not applicable), 1 command/environment error,
             2 quality gate failed, 130 cancelled. Build progress goes to stderr.
@@ -61,13 +66,14 @@ export const CLI_OPTIONS = {
   target: { type: "string" },
   reruns: { type: "string" },
   "allow-no-gain": { type: "boolean" },
+  "allow-failing": { type: "boolean" },
   quarantine: { type: "boolean" },
   llm: { type: "string" },
   model: { type: "string" },
   attempts: { type: "string" },
   max: { type: "string" },
   "min-score": { type: "string" },
-  equivalent: { type: "string" },
+  equivalent: { type: "string", multiple: true },
   help: { type: "boolean", short: "h" },
 } as const;
 
@@ -84,12 +90,19 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (o.help) {
     // Per-command help: the command's line plus its option line.
-    const own = HELP.split("\n").filter((l) => new RegExp(`^\\s+${cmd}\\b|^${cmd}:`).test(l));
+    // The command's line, its option line and that option line's indented continuation lines.
+    const all = HELP.split("\n");
+    const own = all.filter((l, i) => new RegExp(`^\\s+${cmd}\\b|^${cmd}:`).test(l)
+      || (/^\s{11}\S/.test(l) && all.slice(0, i).reverse().find((x) => !/^\s{11}\S/.test(x))?.startsWith(`${cmd}:`)));
     process.stdout.write(`${own.length ? own.join("\n") : `unknown command: ${cmd}`}\n\nCommon: -C <dir>  --adapter <id>  --module <name>  --json\n`);
     return 0;
   }
   const root = path.resolve(o.project ?? process.cwd());
   const adapter = detectAdapter(root, o.adapter);
+  // File arguments may be given relative to the project root (as `targets` prints them) when -C is used.
+  const fileArg = (p: string | undefined) => p && !path.isAbsolute(p) && !exists(p) && exists(path.resolve(adapter.root, p)) ? path.resolve(adapter.root, p) : p;
+  if (["brief", "verify", "mutate", "reject"].includes(cmd) && rest[0]) rest[0] = fileArg(rest[0])!;
+  if (o.target) o.target = fileArg(o.target);
   const positive = (name: string, fallback: number) => {
     const n = Number(o[name as keyof typeof o] ?? fallback);
     if (!Number.isSafeInteger(n) || n < 1) throw new Error(`--${name} must be a positive integer`);
@@ -102,9 +115,18 @@ export async function main(argv: string[]): Promise<number> {
   if (!Number.isSafeInteger(reruns) || reruns < 0) throw new Error("--reruns must be a non-negative integer");
   const state = new State(adapter.root);
   recover(state); // a crashed `mutate` must never leave production code modified
+  adapter.recover?.();
   recoverGeneration(state);
   const mods = o.module ? adapter.modules().filter((m) => m.name === o.module) : undefined;
   if (o.module && !mods?.length) throw new Error(`unknown module ${o.module}; see \`unitgen modules\``);
+  // Coverage from different runners (hvigor vs the Node shim) is not comparable: gate on the same one.
+  const requireBaseline = () => {
+    const b = state.data.baseline;
+    if (!b?.ok) throw new Error("a successful baseline is required; run `unitgen baseline` first");
+    if (b.runner && adapter.runnerName && b.runner !== adapter.runnerName) {
+      throw new Error(`the baseline was measured with ${b.runner}, but this run would use ${adapter.runnerName}; run \`unitgen baseline\` again with the same settings (e.g. UNITGEN_HARMONY_MODE) you will verify with`);
+    }
+  };
   const print = (human: string, data: unknown) => process.stdout.write((o.json ? JSON.stringify(data, null, 2) : human) + "\n");
 
   switch (cmd) {
@@ -123,7 +145,11 @@ export async function main(argv: string[]): Promise<number> {
       state.data.baseline = { at: state.stamp(), ok: false, tests: 0, failed: 0, seconds: 0, note: "baseline in progress or interrupted" };
       state.save();
       log(`running existing tests with coverage (${adapter.id}) ...`);
-      const r = await adapter.runTests({ coverage: true, label: "baseline", modules: mods });
+      // Generated test files from earlier sessions must be registered so the real toolchain runs them too.
+      if (adapter.platform === "harmony") for (const m of mods ?? adapter.modules()) {
+        for (const f of walkFiles(m.testRoot, [adapter.testFileSuffix])) adapter.prepareTestFile(f, m);
+      }
+      const r = await adapter.runTests({ coverage: true, label: "baseline", modules: mods, excludeGenerated: true });
       const failed = r.tests.filter((t) => t.status === "failed").length;
       const cov = r.coverage ?? {};
       if (mods) {
@@ -132,10 +158,25 @@ export async function main(argv: string[]): Promise<number> {
         const own = new Set(mods.flatMap((m) => adapter.sourceFiles(m)));
         for (const f of Object.keys(prev)) if (!own.has(f) && !cov[f]) cov[f] = prev[f];
       }
-      const measured = r.ok && r.compiled && failed === 0 && r.tests.some((t) => t.status === "passed") && Object.keys(cov).length > 0;
-      const note = r.infraError ?? r.note ?? (!r.compiled ? "existing tests did not compile in this environment; baseline treated as 0% for affected modules" : failed ? `${failed} existing tests fail` : undefined);
-      const baseline = { at: state.stamp(), ok: measured, tests: r.tests.length, failed, note, seconds: r.seconds };
+      // Failing existing tests block the baseline unless the user accepts them (--allow-failing) or the
+      // runner explains them (Node shim: they use stubbed system APIs and pass only on the real toolchain).
+      const tolerated = failed > 0 && !r.infraError && r.compiled && (!!o["allow-failing"] || !!r.failuresExplained);
+      const runOk = (r.ok || tolerated) && r.compiled && !r.infraError;
+      const hasCoverage = r.tests.some((t) => t.status === "passed") && Object.keys(cov).length > 0 && !r.coverageProblem;
+      // A project without (useful) tests is a valid 0% baseline only where unitgen measures coverage
+      // itself (HarmonyOS Node shim). Elsewhere "nothing ran / nothing covered" usually means the
+      // test task or coverage agent is misconfigured, so it stays an error.
+      const empty = runOk && failed === 0 && !hasCoverage && !!r.emptyCoverageOk;
+      const measured = runOk && (failed === 0 || tolerated) && (hasCoverage || empty);
+      const failingNames = r.tests.filter((t) => t.status === "failed").map((t) => t.name);
+      const note = [r.infraError, r.note, !r.compiled ? "existing tests did not compile in this environment"
+        : tolerated ? `${failed} existing tests fail here and are excluded from the gate (${r.failuresExplained ?? "--allow-failing"}): ${failingNames.slice(0, 8).join("; ")}${failingNames.length > 8 ? "; ..." : ""}`
+        : failed ? `${failed} existing tests fail: ${failingNames.slice(0, 8).join("; ")}${failingNames.length > 8 ? "; ..." : ""}`
+        : empty ? "no existing test covers project code: every file starts at 0%" : undefined].filter(Boolean).join("; ") || undefined;
+      const baseline = { at: state.stamp(), ok: measured, tests: r.tests.length, failed, note, seconds: r.seconds, runner: adapter.runnerName };
+      const otherRunner = state.data.accepted.filter((a) => a.runner && adapter.runnerName && a.runner !== adapter.runnerName);
       if (measured) {
+        state.data.unbuildable = r.unbuildable;
         state.baselineCoverage = cov;
         state.data.adapter = adapter.id;
         state.data.baseline = baseline;
@@ -146,10 +187,20 @@ export async function main(argv: string[]): Promise<number> {
         state.save();
       }
       const s = summarize(cov);
+      const unloaded = rankTargets(adapter, cov, { modules: mods, minUncovered: 1 }).filter((t) => !t.measured);
+      const why = !r.compiled ? "existing tests do not compile here"
+        : r.infraError ? "environment problem"
+        : failed ? `${failed} existing tests fail; fix them, or re-run with --allow-failing to measure the passing ones`
+        : r.coverageProblem ? r.coverageProblem
+        : !hasCoverage ? "the existing tests ran but covered no project code (the coverage tool may not be attached)"
+        : "build, tests and coverage must succeed";
       print([`tests: ${r.tests.length} (${failed} failed)  build: ${r.compiled ? "ok" : "FAILED"}  ${r.seconds.toFixed(0)}s`,
-        `coverage: ${s.total.covered}/${s.total.executable} lines (${s.total.pct.toFixed(1)}%) in ${s.files.length} files`,
-        note ? `note: ${note}` : "", !measured ? `baseline not saved: build, tests and coverage must succeed\n${r.excerpt}\nlog: ${r.logFile}` : ""].filter(Boolean).join("\n"),
-        { ...baseline, coverage: s.total, logFile: r.logFile });
+        `coverage: ${s.total.covered}/${s.total.executable} lines (${s.total.pct.toFixed(1)}%) in ${s.files.length} files loaded by tests`,
+        unloaded.length ? `not loaded by any test: ${unloaded.length} logic/model files (~${unloaded.reduce((n, t) => n + t.executable, 0)} lines, 0%)` : "",
+        note ? `note: ${note}` : "",
+        measured && otherRunner.length ? `warning: ${otherRunner.length} accepted test file(s) were measured with ${otherRunner[0].runner}, not ${adapter.runnerName}: run \`unitgen verify\` on them again (${otherRunner.slice(0, 5).map((a) => a.testFile).join(", ")})` : "",
+        !measured ? `baseline not saved: ${why}\n${r.excerpt}\nlog: ${r.logFile}` : ""].filter(Boolean).join("\n"),
+        { ...baseline, coverage: s.total, unloadedFiles: unloaded.length, logFile: r.logFile });
       return measured ? 0 : r.infraError ? 1 : 2;
     }
     case "targets": {
@@ -157,6 +208,14 @@ export async function main(argv: string[]): Promise<number> {
       const ts = rankTargets(adapter, state.knownCoverage(), { modules: mods, includeKinds: o["all-kinds"] ? ["logic", "model", "di", "ui", "entry", "platform"] : ["logic", "model"] });
       if (!o["all-kinds"]) log("showing logic/model files; add --all-kinds to include ui, platform, di and entry files");
       const lim = Number(o.limit ?? 20);
+      // Files in modules the runner cannot build go last: they cannot be verified here.
+      const blocked = state.data.unbuildable ?? {};
+      if (Object.keys(blocked).length) {
+        const inBlocked = (t: (typeof ts)[number]) => t.module in blocked;
+        const n = ts.filter(inBlocked).length;
+        ts.sort((a, b) => Number(inBlocked(a)) - Number(inBlocked(b)));
+        if (n) log(`${n} file(s) in modules the runner cannot build (${Object.keys(blocked).join(", ")}) are listed last; see \`unitgen baseline\` note`);
+      }
       if (!ts.length) log(o["all-kinds"] ? "nothing left to cover here (every file is covered or below 3 uncovered lines)" : "no logic/model file with uncovered lines here; `--all-kinds` lists ui/platform/di files too");
       print(formatTargets(ts.slice(0, lim), root), ts.slice(0, lim).map(({ uncoveredLines, ...t }) => t));
       return 0;
@@ -173,7 +232,7 @@ export async function main(argv: string[]): Promise<number> {
     }
     case "verify": {
       if (!rest[0]) throw new Error("usage: unitgen verify <test-file> [--target <source>]");
-      if (!state.data.baseline?.ok) throw new Error("a successful baseline is required; run `unitgen baseline` first");
+      requireBaseline();
       const r = await verify(adapter, state, rest[0], {
         target: o.target ?? inferTarget(adapter, rest[0]), reruns, allowNoGain: o["allow-no-gain"], onFail: o.quarantine ? "quarantine" : "keep",
       });
@@ -183,16 +242,25 @@ export async function main(argv: string[]): Promise<number> {
     case "mutate": {
       if (!rest[0]) throw new Error("usage: unitgen mutate <test-file> [--target <source>] [--max 10]");
       const relTest = relPath(path.resolve(rest[0]), root);
-      const tgt = o.target ?? state.data.accepted.find((a) => a.testFile === relTest)?.target;
+      // Repeatable and comma-separated: --equivalent 12.2 --equivalent 14.1,15 (validated before anything runs).
+      const ids = (o.equivalent ?? []).flatMap((x) => x.split(",")).map((x) => x.trim()).filter(Boolean);
+      const bad = ids.filter((x) => !/^\d+(\.\d+)?$/.test(x));
+      if (bad.length || (o.equivalent && !ids.length)) throw new Error(`--equivalent takes line numbers (12) or mutant ids (12.2); got: ${bad.join(", ") || "nothing"}`);
+      requireBaseline();
+      const acc = state.data.accepted.find((a) => a.testFile === relTest);
+      if (acc?.runner && adapter.runnerName && acc.runner !== adapter.runnerName) {
+        throw new Error(`${relTest} was accepted with ${acc.runner}; run \`unitgen verify ${relTest}\` with ${adapter.runnerName} before mutating`);
+      }
+      const tgt = o.target ?? acc?.target;
       if (!tgt) throw new Error("pass --target <source> (no accepted target recorded for this test file)");
-      if (o.equivalent) {
+      if (ids.length) {
         const eq = (state.data.equivalent ??= {});
-        eq[relTest] = [...new Set([...(eq[relTest] ?? []), ...o.equivalent.split(",").map((x) => Number(x.trim())).filter(Boolean)])];
+        eq[relTest] = [...new Set([...(eq[relTest] ?? []).map(String), ...ids])];
         state.save();
       }
       const r = await mutate(adapter, state, rest[0], path.resolve(root, tgt), max);
       const gate = mutationGate(r, minScore);
-      print(`${formatMutation(r)}\ngate: ${gate.status} (minimum ${minScore}%)`, { ...r, gate });
+      print(`${formatMutation(r)}\ngate: ${gate.status} (minimum ${minScore}%)${gate.reason ? ` — ${gate.reason}` : ""}`, { ...r, gate });
       return gate.status === "FAILED" ? 2 : 0;
     }
     case "reject": {
@@ -202,7 +270,7 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "generate": {
-      if (!state.data.baseline?.ok) throw new Error("a successful baseline is required; run `unitgen baseline` first");
+      requireBaseline();
       const llm = pickBackend(o.llm, o.model);
       const res = await generate(adapter, state, llm, {
         limit, attempts, files: rest, module: o.module, reruns, mutationMax: max, minMutationScore: minScore,
@@ -228,7 +296,10 @@ export async function main(argv: string[]): Promise<number> {
     }
     case "status": {
       const d = state.data;
-      print([`adapter: ${adapter.id}`, `baseline: ${d.baseline ? d.baseline.at : "none"}`, `accepted: ${d.accepted.length}`, `rejected: ${d.rejected.length}`, `notes: ${d.notes.length}`].join("\n"), d);
+      const suspects = d.notes.filter((n) => n.kind === "suspect").length;
+      print([`adapter: ${adapter.id}`,
+        `baseline: ${d.baseline ? `${d.baseline.at}${d.baseline.ok ? "" : " (INVALID: run `unitgen baseline`)"}${d.baseline.runner ? `, runner ${d.baseline.runner}` : ""}` : "none"}`,
+        `accepted: ${d.accepted.length}`, `rejected: ${d.rejected.length}`, `suspected bugs: ${suspects}`, `notes: ${d.notes.length - suspects}`].join("\n"), d);
       return 0;
     }
     default:

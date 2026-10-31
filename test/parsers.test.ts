@@ -115,7 +115,7 @@ test("mutants skip strings/comments/generics and spread across lines", async () 
   const ms = mutantsFor(src, [1, 2, 3, 4]);
   assert.deepEqual(ms.filter((m) => m.line === 1).map((m) => m.op), ["== -> !=", "< -> <=", "&& -> ||", "1 -> 0"]);
   assert.equal(ms.filter((m) => m.line === 2 || m.line === 3).length, 0);
-  assert.deepEqual(ms.filter((m) => m.line === 4).map((m) => m.mutated), ["  x = y - 2"]);
+  assert.deepEqual(ms.filter((m) => m.line === 4).map((m) => m.mutated), ["  x = y - 2", "  x = y + 3"]);
   const picked = pickMutants(ms, 2);
   assert.deepEqual(picked.map((m) => m.line), [1, 4]);
 });

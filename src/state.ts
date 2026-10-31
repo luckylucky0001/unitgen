@@ -12,7 +12,9 @@ export interface AcceptedTest {
   attempts: number;
   at: string;
   /** Latest mutation run; `first` keeps the score of the first run (before strengthening). */
-  mutation?: { killed: number; survived: number; stillborn: number; score: number; first?: number; none?: boolean };
+  mutation?: { killed: number; survived: number; stillborn: number; score: number; first?: number; none?: boolean; crashes?: number; equivalent?: number; testHash?: string; stale?: boolean };
+  /** Runner that measured this file (see Adapter.runnerName). */
+  runner?: string;
 }
 
 export interface RejectedTest {
@@ -27,14 +29,16 @@ export interface RejectedTest {
 export interface StateData {
   version: 1;
   adapter?: string;
-  baseline?: { at: string; ok: boolean; tests: number; failed: number; note?: string; seconds: number };
+  baseline?: { at: string; ok: boolean; tests: number; failed: number; note?: string; seconds: number; runner?: string };
   accepted: AcceptedTest[];
   rejected: RejectedTest[];
   notes: { at: string; text: string; kind: string }[];
   /** verify runs per test file (relative path), so the report shows real attempt counts. */
   attempts?: Record<string, number>;
-  /** Lines (per test file) whose surviving mutants were judged equivalent. */
-  equivalent?: Record<string, number[]>;
+  /** Modules the last baseline could not build (name -> reason). */
+  unbuildable?: Record<string, string>;
+  /** Per test file: lines (`12`) or single mutants (`12.2`) judged equivalent. */
+  equivalent?: Record<string, (number | string)[]>;
 }
 
 export class State {

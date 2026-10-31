@@ -24,9 +24,21 @@ const RULES = `Rules (a test that breaks any of these is rejected):
 6. Keep tests small, independent and named after the behaviour they check. Prefer 5-25 focused tests over one giant test.
 7. Only use test libraries named in the Conventions section or imported by the existing tests below. Do not add dependencies.`;
 
-function declarationLines(text: string): string[] {
-  const re = /^\s*(public |open |internal |private |fileprivate |protected |export |static |final |abstract |override |data |sealed |inline |suspend |async |mutating |@\w+\s+)*(func|fun|init|class|struct|enum|protocol|interface|object|typealias|val|var|let|case|constructor|function|type)\b/;
-  return text.split("\n").filter((l) => re.test(l) && !/^\s*(private|fileprivate)\b/.test(l)).map((l) => l.replace(/\{\s*$/, "").trimEnd());
+function declarationLines(text: string, file = ""): string[] {
+  // A keyword followed by a name (`type Foo`, `object Bar`), not a field called `type:` / `object:`.
+  const re = /^\s*(public |open |internal |private |fileprivate |protected |export |static |final |abstract |override |data |sealed |inline |suspend |async |mutating |@\w+\s+)*((func|fun|class|struct|enum|protocol|interface|object|typealias|val|var|let|const|case|function|type)\s+[A-Za-z_$`]|(init|constructor)\b)/;
+  // TypeScript/ArkTS methods have no keyword: `sendMessage(x: string): Promise<void> {`.
+  const tsMethod = /^\s+(public |protected |static |async |override |readonly )*[A-Za-z_$][\w$]*\s*(<[^>]*>)?\([^)]*\)\s*(:\s*[^={;]+)?\s*\{\s*$/;
+  const isTs = /\.(ets|ts)$/.test(file);
+  return text.split("\n").filter((l) => {
+    if (/^\s*(private|fileprivate)\b/.test(l)) return false;
+    // Variables only at top level or as members (shallow indent), not locals inside function bodies.
+    const indent = l.length - l.trimStart().length;
+    // ArkTS/TS code is conventionally indented by 2 (members at 2, locals at 4+); Kotlin/Swift by 4.
+    if (/^\s*(val|var|let|const)\b/.test(l)) return indent <= (isTs ? 2 : 4);
+    if (re.test(l)) return true;
+    return isTs && tsMethod.test(l) && !/^\s*(if|for|while|switch|catch|return|function|else)\b/.test(l);
+  }).map((l) => l.replace(/\{\s*$/, "").trimEnd());
 }
 
 /** Signatures of other module files whose type names the target references. */
@@ -54,7 +66,7 @@ function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: 
     return { f, t, hits };
   }).filter((x) => x.hits > 0).sort((a, b) => b.hits - a.hits);
   for (const { f, t } of scored) {
-    const decl = declarationLines(t).join("\n");
+    const decl = declarationLines(t, f).join("\n");
     if (!decl) continue;
     const chunk = `// ${relPath(f, adapter.root)}\n${decl}`;
     if (used + chunk.length > budget) break;
@@ -64,9 +76,36 @@ function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: 
   return parts.join("\n\n");
 }
 
+// Supertypes too generic to say "this class can stand in for something the target uses".
+const GENERIC_SUPERTYPES = new Set(["Error", "Exception", "RuntimeException", "Throwable", "Object", "Any", "NSObject", "Equatable", "Hashable", "Codable", "Serializable", "Comparable", "Sendable"]);
+
+/** The source of the named type declarations only (from the declaration to its closing brace). */
+function declarationsOf(text: string, names: string[]): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  for (const name of names) {
+    const start = lines.findIndex((l) => new RegExp(`\\b(class|object|struct|enum|actor)\\s+${name}\\b`).test(l));
+    if (start < 0) continue;
+    let depth = 0;
+    for (let i = start; i < lines.length; i++) {
+      out.push(lines[i]);
+      for (const c of lines[i].replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\/\/.*$/g, "")) {
+        if (c === "{") depth++;
+        if (c === "}") depth--;
+      }
+      if (depth <= 0 && i > start) break;
+      if (depth <= 0 && lines[i].includes("}")) break;
+    }
+  }
+  return out.join("\n");
+}
+
 /** Existing fakes/stubs in the module's test sources that implement types the target uses. */
 function testDoubles(adapter: Adapter, m: Module, text: string, budget: number): string {
-  const idents = new Set(text.match(/\b[A-Z][A-Za-z0-9_]{2,}\b/g) ?? []);
+  const idents = new Set((text.match(/\b[A-Z][A-Za-z0-9_]{2,}\b/g) ?? []).filter((x) => !GENERIC_SUPERTYPES.has(x)));
+  // Production sources are not test doubles unless they say so by name (FakeX, MockX, InMemoryX, ...).
+  const prodRoots = adapter.modules().flatMap((mm) => mm.sourceRoots.map((r) => r + path.sep));
+  const doubleName = /(Fake|Mock|Stub|InMemory|Dummy|Spy|Test)/;
   const roots = [...new Set([path.dirname(m.testRoot), m.testRoot, ...(adapter.testSupportDirs?.(m) ?? [])])].filter(exists);
   const exts = [".kt", ".java", ".swift", ".ets", ".ts"];
   const parts: string[] = [];
@@ -76,12 +115,17 @@ function testDoubles(adapter: Adapter, m: Module, text: string, budget: number):
     for (const f of walkFiles(root, exts)) {
       if (seen.has(f) || /UnitGen|\.unitgen\./.test(path.basename(f))) continue;
       seen.add(f);
+      if (prodRoots.some((r) => f.startsWith(r)) && !doubleName.test(path.basename(f))) continue;
       const t = readFile(f);
       if (/XCTestCase|@Test\b|@Suite\b|\bdescribe\(|@org\.junit|import org\.junit|import kotlin\.test/.test(t) && !/\b(Fake|Test|Stub|Mock|InMemory)\w*\s*[:(<{]/.test(t.replace(/class\s+\w+Tests?\b/g, ""))) continue;
       const impl = [...t.matchAll(/\b(?:class|object|struct)\s+(\w+)[^{\n]*?(?::|implements|extends)\s*([^{\n]+)/g)]
         .filter((mm) => (mm[2].match(/\b[A-Z]\w+/g) ?? []).some((x) => idents.has(x)));
       if (!impl.length) continue;
-      const chunk = `// ${relPath(f, adapter.root)}\n${declarationLines(t).join("\n")}`;
+      // In a test file only the doubles themselves are useful, not every test method around them.
+      const isTestFile = /XCTestCase|@Test\b|@Suite\b|\bdescribe\(|@org\.junit|import org\.junit|import kotlin\.test/.test(t);
+      const body = isTestFile ? declarationsOf(t, impl.map((mm) => mm[1]).filter((n) => /Fake|Stub|Mock|InMemory|Dummy|Spy|Test\w+Repository/.test(n) || !/Tests?$/.test(n))) : t;
+      if (!body.trim()) continue;
+      const chunk = `// ${relPath(f, adapter.root)}\n${declarationLines(body, f).join("\n")}`;
       if (used + chunk.length > budget) return parts.join("\n\n");
       parts.push(chunk);
       used += chunk.length;
@@ -90,7 +134,7 @@ function testDoubles(adapter: Adapter, m: Module, text: string, budget: number):
   return parts.join("\n\n");
 }
 
-function numbered(text: string, uncovered: Set<number>, executable: Set<number>, keep?: (ln: number) => boolean): string {
+function numbered(text: string, uncovered: Set<number>, executable: Set<number>, keep?: (ln: number) => boolean, platform: Set<number> = new Set()): string {
   const lines = text.split("\n");
   const out: string[] = [];
   let skipping = false;
@@ -102,7 +146,7 @@ function numbered(text: string, uncovered: Set<number>, executable: Set<number>,
       return;
     }
     skipping = false;
-    const mark = uncovered.has(ln) ? "!" : executable.has(ln) ? " " : " ";
+    const mark = uncovered.has(ln) ? (platform.has(ln) ? "!~" : "! ") : "  ";
     out.push(`${mark}${String(ln).padStart(5)}| ${l}`);
   });
   return out.join("\n");
@@ -127,21 +171,24 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
   const text = readFile(abs);
   const cov = state.knownCoverage();
   const measured = cov[abs] !== undefined;
-  const exec = measured ? executableLines(cov, abs) : new Set(estimateExecutable(text));
+  const exec = measured ? executableLines(cov, abs) : new Set(estimateExecutable(adapter.estimateText ? adapter.estimateText(text) : text));
   const covered = measured ? coveredLines(cov, abs) : new Set<number>();
   const uncovered = [...exec].filter((l) => !covered.has(l)).sort((a, b) => a - b);
   const unc = new Set(uncovered);
   const place = adapter.placement(abs, m);
   const maxChars = opts.maxSourceChars ?? 70000;
 
-  let src = numbered(text, unc, exec);
+  // Lines that call system APIs which are stubs/mocks in this runner: covering them is possible,
+  // asserting on what those APIs return is not.
+  const platform = adapter.platformLines?.(text) ?? new Set<number>();
+  let src = numbered(text, unc, exec, undefined, platform);
   if (src.length > maxChars) {
     // Large file: keep declarations plus a window around uncovered lines.
     const declSet = new Set<number>();
     text.split("\n").forEach((l, i) => {
       if (declarationLines(l).length) declSet.add(i + 1);
     });
-    src = numbered(text, unc, exec, (ln) => declSet.has(ln) || uncovered.some((u) => Math.abs(u - ln) <= 4));
+    src = numbered(text, unc, exec, (ln) => declSet.has(ln) || uncovered.some((u) => Math.abs(u - ln) <= 4), platform);
   }
 
   const examples = adapter.exampleTests(m, abs).map((f) => {
@@ -161,14 +208,15 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     `- Test suite/class name: \`${place.suiteName}\`${place.packageName ? `  (package \`${place.packageName}\`)` : ""}`,
     place.importHint ? `- Import: \`${place.importHint}\`` : "",
     `- Coverage: ${measured ? `${covered.size}/${exec.size} executable lines covered by existing tests` : `0% (no existing test loads this file; ~${exec.size} executable lines estimated)`}; uncovered lines: ${capRanges(uncovered)}`,
-    ...(adapter.briefWarnings?.(abs) ?? []).map((w) => `- ⚠️ ${w}`),
+    ...(state.data.unbuildable?.[m.name] ? [`The last baseline could not build module \`${m.name}\` (${state.data.unbuildable[m.name]}): a test here cannot be verified with this runner. Pick a target in another module, or fix the module first.`] : [])
+      .concat(adapter.briefWarnings?.(abs) ?? []).map((w) => `- ⚠️ ${w}`),
     "",
     "## Conventions",
     adapter.conventions(m),
     "",
-    "## " + (examples.length ? RULES : RULES.replace("named in the Conventions section or imported by the existing tests below", "named in the Conventions section (this module has no existing tests to copy from)")),
+    "## " + (examples.length ? RULES : RULES.replace("named in the Conventions section or imported by the existing tests below", "named in the Conventions section (this module has no existing tests to copy from, apart from IDE templates)")),
     "",
-    "## Source under test (\"!\" = not covered yet)",
+    `## Source under test ("!" = not covered yet${[...platform].some((l) => unc.has(l)) ? `; "!~" = not covered and calls a system API that is ${adapter.platformLinesNote ?? "not real here"}: cover the logic around it, never assert on what the API returns` : ""})`,
     "```",
     src,
     "```",

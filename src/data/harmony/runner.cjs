@@ -15,9 +15,12 @@ const genDir = path.join(path.dirname(resultsFile), "gen");
 const lineMaps = {};
 const ts = require(tsDir);
 const hypium = require("./hypium.cjs");
+const { decodeMappings, stripArkUI } = require("./arkui.cjs");
 const stubPath = path.join(__dirname, "stub.cjs");
 
 const stubbed = new Set();
+// Files whose ArkUI structs/builders were blanked out: [{ file, names }].
+const stubbedUi = [];
 const localDeps = JSON.parse(process.env.UNITGEN_LOCAL_DEPS || "{}");
 function missingPackage(request, parent) {
   const e = new Error(`UNITGEN_MISSING_PACKAGE ${request} (imported by ${parent && parent.filename}): ohpm package not installed; run \`ohpm install\` in the project`);
@@ -45,8 +48,25 @@ const DECORATORS = ["ObservedV2", "Observed", "Trace", "Track", "Local", "Param"
   "LocalStorageLink", "LocalStorageProp", "BuilderParam", "Builder", "Styles", "Extend", "Concurrent", "Sendable", "Reusable",
   "ReusableV2", "Require", "Component", "ComponentV2", "Entry", "Preview", "CustomDialog", "AnimatableExtend", "LocalBuilder"];
 const FACTORY_WITH_CLASS_ARG = new Set(["Type"]);
+// State management V2: a @Trace field holds an observable proxy of an assigned Array/Map/Set/Date, so
+// `obj.items === assigned` is false on the real runtime. Mirror that (behaviour otherwise unchanged).
+function traceField(target, key) {
+  const store = new WeakMap();
+  Object.defineProperty(target, key, {
+    configurable: true, enumerable: true,
+    get() { return store.get(this); },
+    set(v) {
+      const wrap = v !== null && typeof v === "object" && (Array.isArray(v) || v instanceof Map || v instanceof Set || v instanceof Date);
+      store.set(this, wrap ? new Proxy(v, {}) : v);
+    },
+  });
+}
 for (const name of DECORATORS) {
   if (name in globalThis) continue;
+  if (name === "Trace") {
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: (target, key) => { usedGlobals.add("@Trace"); if (typeof key === "string") traceField(target, key); } });
+    continue;
+  }
   const noop = () => undefined;
   const deco = function (...args) {
     usedGlobals.add("@" + name);
@@ -104,14 +124,12 @@ Module._resolveFilename = function (request, parent, ...rest) {
 function compile(module, filename) {
   // ArkTS-only syntax TypeScript cannot parse: `import lazy { x } from '...'` (lazy import).
   const raw = fs.readFileSync(filename, "utf8");
-  // UI component files (struct + @Component/@Entry) are not TypeScript; logic that merely imports
-  // them gets an inert stub module instead (calls into them do nothing).
-  if (!testFiles.some((t) => path.resolve(t) === filename) && /^\s*(export\s+(default\s+)?)?struct\s+\w+/m.test(raw)) {
-    stubbed.add(path.basename(filename));
-    module.exports = require("./stub.cjs");
-    return;
-  }
-  const src = raw.replace(/^(\s*import\s+)lazy\s+/gm, "$1");
+  // UI components (struct + @Component/@Entry) and @Builder/@Styles/@Extend functions are not
+  // TypeScript. They are blanked out (line numbers kept); the rest of the file (helpers, classes,
+  // constants next to the component) loads and is measured normally.
+  const ui = testFiles.some((t) => path.resolve(t) === filename) ? { text: raw, names: [] } : stripArkUI(raw);
+  if (ui.names.length) stubbedUi.push({ file: filename, names: ui.names });
+  const src = ui.text.replace(/^(\s*import\s+)lazy\s+/gm, "$1");
   const out = ts.transpileModule(src, {
     fileName: filename,
     reportDiagnostics: true,
@@ -132,43 +150,32 @@ function compile(module, filename) {
   fs.mkdirSync(path.dirname(genPath), { recursive: true });
   const js = out.outputText.replace(/\n\/\/# sourceMappingURL=.*$/, "");
   fs.writeFileSync(genPath, js);
-  lineMaps[genPath] = { source: filename, lines: genToSourceLines(JSON.parse(out.sourceMapText).mappings) };
+  const segs = decodeMappings(JSON.parse(out.sourceMapText).mappings);
+  lineMaps[genPath] = { source: filename, lines: genToSourceLines(segs), segs };
   module._compile(js, genPath);
 }
 
-/** Decode source-map VLQ mappings into generated line -> lowest original line (1-based). */
-function genToSourceLines(mappings) {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+/** Generated line -> lowest original line (1-based), for stack traces. */
+function genToSourceLines(segs) {
   const out = [];
-  let srcLine = 0;
-  mappings.split(";").forEach((lineStr, genLine) => {
-    let best;
-    for (const seg of lineStr.split(",")) {
-      if (!seg) continue;
-      const vals = [];
-      let shift = 0, value = 0;
-      for (const ch of seg) {
-        const digit = chars.indexOf(ch);
-        value += (digit & 31) << shift;
-        if (digit & 32) shift += 5;
-        else { vals.push(value & 1 ? -(value >> 1) : value >> 1); value = 0; shift = 0; }
-      }
-      if (vals.length >= 4) {
-        srcLine += vals[2];
-        if (best === undefined || srcLine < best) best = srcLine;
-      }
-    }
-    if (best !== undefined) out[genLine + 1] = best + 1;
-  });
+  for (const [g, , s] of segs) if (out[g] === undefined || s < out[g]) out[g] = s;
   return out;
 }
 
 /** Rewrite "<gen>.js:L:C" in stack traces to the original "<file>.ets:L". */
 function mapStack(text) {
-  return String(text).replace(/(\/[^\s():]+\.js):(\d+)(?::\d+)?/g, (all, file, line) => {
-    const m = lineMaps[file];
-    return m && m.lines[Number(line)] ? `${m.source}:${m.lines[Number(line)]}` : all;
-  });
+  // Match the known generated paths literally: project paths may contain spaces or parentheses.
+  let out = String(text);
+  for (const [file, m] of Object.entries(lineMaps)) {
+    if (!out.includes(file)) continue;
+    out = out.split(file).map((part, i) => {
+      if (i === 0) return part;
+      const pos = /^:(\d+)(?::\d+)?/.exec(part);
+      if (!pos || !m.lines[Number(pos[1])]) return file + part;
+      return `${m.source}:${m.lines[Number(pos[1])]}` + part.slice(pos[0].length);
+    }).join("");
+  }
+  return out;
 }
 require.extensions[".ets"] = compile;
 require.extensions[".ts"] = compile;
@@ -177,6 +184,7 @@ require.extensions[".ts"] = compile;
   const loadErrors = [];
   for (const f of testFiles) {
     try {
+      hypium.setFile(path.resolve(f));
       const mod = require(path.resolve(f));
       const fn = typeof mod.default === "function" ? mod.default : typeof mod === "function" ? mod : undefined;
       if (fn) fn();
@@ -187,7 +195,7 @@ require.extensions[".ts"] = compile;
   const results = [...loadErrors, ...(await hypium.runAll())].map((r) => (r.message ? { ...r, message: mapStack(r.message) } : r));
   fs.writeFileSync(path.join(path.dirname(resultsFile), "linemaps.json"), JSON.stringify(lineMaps));
   fs.writeFileSync(resultsFile, JSON.stringify(results, null, 2));
-  fs.writeFileSync(resultsFile.replace(/\.json$/, ".stubs.json"), JSON.stringify({ modules: [...stubbed], globals: [...usedGlobals] }));
+  fs.writeFileSync(resultsFile.replace(/\.json$/, ".stubs.json"), JSON.stringify({ modules: [...stubbed], globals: [...usedGlobals], ui: stubbedUi }));
   for (const r of results) process.stdout.write(`${r.status === "passed" ? "PASS" : "FAIL"} ${r.name}${r.message ? "\n    " + r.message.replace(/\n/g, "\n    ") : ""}\n`);
   process.exitCode = results.some((r) => r.status === "failed") ? 1 : 0;
 })();

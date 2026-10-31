@@ -28,8 +28,15 @@ export function estimateExecutable(text: string): number[] {
   const out: number[] = [];
   let inBlock = false;
   let unavailable = false;
+  let inImport = false;
   lines.forEach((raw, i) => {
     const l = raw.trim();
+    // Multi-line `import { a, b } from '...'` (TS/ArkTS) is not executable code.
+    if (inImport) {
+      if (/\bfrom\s+['"]|^\}\s*;?$|['"]\s*;?$/.test(l)) inImport = false;
+      return;
+    }
+    if (/^import\s*(type\s*)?\{[^}]*$/.test(l)) { inImport = true; return; }
     if (/@available\(\s*\*\s*,\s*unavailable/.test(l)) {
       unavailable = true;
       return;
@@ -49,6 +56,8 @@ export function estimateExecutable(text: string): number[] {
     }
     if (!l || l.startsWith("//") || l.startsWith("*") || l.startsWith("@") || l.startsWith("import ") || l.startsWith("package ")) return;
     if (/^[{}()\[\],;]+$/.test(l)) return;
+    // Continuation lines of a data literal (`'com', 'net', 'org',` / `0x1F, 0x20,`) are one expression.
+    if (/^((['"`])(?:\\.|(?!\2).)*\2|-?(0x[\da-f]+|\d+(\.\d+)?)|true|false|null)(\s*,\s*((['"`])(?:\\.|(?!\8).)*\8|-?(0x[\da-f]+|\d+(\.\d+)?)|true|false|null))*\s*,?\s*[\])}]?[;,]?$/i.test(l)) return;
     // Field / interface member declarations without an initializer ("name?: string;", "val id: Int").
     if (/^(public |private |protected |readonly |static |override |val |var |let |declare )*[\w$]+[?!]?\s*:\s*[^=(){}]+[;,]?$/.test(l)) return;
     if (/^(public |private |internal |protected |open |final |abstract |data |sealed |export |static )*(class|struct|enum|protocol|interface|object|extension|namespace)\b/.test(l)) return;
@@ -76,7 +85,9 @@ export function rankTargets(adapter: Adapter, cov: Coverage, opts: { modules?: M
       const kind = adapter.classify(file, text);
       if (opts.includeKinds ? !opts.includeKinds.includes(kind) : KIND_WEIGHT[kind] === 0) continue;
       const measured = haveCoverage && cov[file] !== undefined;
-      if (moduleMeasured && !measured && adapter.platform === "android") continue;
+      // JaCoCo and llvm-cov/xccov report every compiled file that has executable code: in a measured
+      // module, a missing file has none (constants, declarations). The HarmonyOS shim only sees loaded files.
+      if (moduleMeasured && !measured && (adapter.platform === "android" || adapter.platform === "ios")) continue;
       let exec: number[];
       let covered: Set<number>;
       if (measured) {
@@ -84,7 +95,7 @@ export function rankTargets(adapter: Adapter, cov: Coverage, opts: { modules?: M
         covered = coveredLines(cov, file);
       } else {
         // Compiled into the coverage report's binary but absent => never loaded; or no report at all.
-        exec = estimateExecutable(text);
+        exec = estimateExecutable(adapter.estimateText ? adapter.estimateText(text) : text);
         covered = new Set();
       }
       const uncoveredLines = exec.filter((l) => !covered.has(l)).sort((a, b) => a - b);

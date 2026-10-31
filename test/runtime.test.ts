@@ -63,7 +63,7 @@ test("cancellation terminates child process groups", { skip: process.platform ==
 });
 
 test("a second invocation cannot recover or mutate a locked project", (t) => {
-  const dir = temp(t), release = acquireProjectLock(dir);
+  const dir = temp(t), { release } = acquireProjectLock(dir);
   fs.writeFileSync(path.join(dir, "settings.gradle"), "include ':app'\n");
   const target = path.join(dir, "A.kt"), backup = path.join(dir, "backup");
   fs.writeFileSync(target, "mutated"); fs.writeFileSync(backup, "original");
@@ -77,7 +77,82 @@ test("a second invocation cannot recover or mutate a locked project", (t) => {
     assert.equal(fs.readFileSync(target, "utf8"), "mutated");
   }
   finally { release(); }
-  acquireProjectLock(dir)();
+  acquireProjectLock(dir).release();
+});
+
+test("a timeout also kills helpers the build started in their own process group (swiftpm-testing-helper)", { skip: process.platform === "win32" }, async (t) => {
+  const dir = temp(t), pidFile = path.join(dir, "helper.pid");
+  // The "build" starts a detached helper (new process group, like swift test does) and both hang.
+  const helperJs = path.join(dir, "helper.js"), buildJs = path.join(dir, "build.js");
+  fs.writeFileSync(helperJs, `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`);
+  fs.writeFileSync(buildJs, `const h = require("node:child_process").spawn(process.execPath, [${JSON.stringify(helperJs)}], { detached: true, stdio: "ignore" }); h.unref(); setInterval(() => {}, 1000);`);
+  const run = runAsync([process.execPath, buildJs], { timeoutSec: 2, stream: false });
+  for (let i = 0; i < 1000 && !fs.existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 10));
+  const helper = Number(fs.readFileSync(pidFile, "utf8"));
+  t.after(() => { try { process.kill(helper, "SIGKILL"); } catch { /* gone */ } });
+  const r = await run;
+  assert.equal(r.timedOut, true);
+  for (let i = 0; i < 200; i++) {
+    try { process.kill(helper, 0); } catch { return; }
+    await new Promise((res) => setTimeout(res, 10));
+  }
+  assert.fail(`helper ${helper} survived the timeout`);
+});
+
+test("a stale lock's recorded leftovers (same PID and start time) are stopped before taking over", { skip: process.platform === "win32" }, async (t) => {
+  const dir = temp(t);
+  fs.mkdirSync(path.join(dir, ".unitgen"), { recursive: true });
+  const orphan = (await import("node:child_process")).spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  t.after(() => { try { process.kill(orphan.pid!, "SIGKILL"); } catch { /* gone */ } });
+  await new Promise((r) => setTimeout(r, 100));
+  const { processTable } = await import("../src/util.ts");
+  const me = processTable().find((p) => p.pid === orphan.pid)!;
+  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+  fs.writeFileSync(path.join(dir, ".unitgen", "run.lock"), JSON.stringify({ pid: Number(dead), at: "earlier", builds: [orphan.pid], procs: [{ pid: orphan.pid, start: me.start }] }));
+  const msgs: string[] = [];
+  acquireProjectLock(dir, (m) => msgs.push(m)).release();
+  assert.match(msgs.join("\n"), new RegExp(`stopped 1 process.*${orphan.pid}`));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.throws(() => process.kill(orphan.pid!, 0), /ESRCH/);
+});
+
+test("a lock left by a killed command is taken over and the interrupted mutation restored", { skip: process.platform === "win32" }, (t) => {
+  const dir = temp(t);
+  fs.writeFileSync(path.join(dir, "settings.gradle"), "include ':app'\n");
+  fs.mkdirSync(path.join(dir, ".unitgen"), { recursive: true });
+  const target = path.join(dir, "A.kt"), backup = path.join(dir, "backup");
+  fs.writeFileSync(target, "mutated"); fs.writeFileSync(backup, "original");
+  fs.writeFileSync(path.join(dir, ".unitgen", "mutation-in-progress.json"), JSON.stringify({ target, backup }));
+  // A PID that cannot be running: the previous command and its builds are gone.
+  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+  fs.writeFileSync(path.join(dir, ".unitgen", "run.lock"), JSON.stringify({ pid: Number(dead), at: "earlier", worker: Number(dead), builds: [Number(dead)] }));
+  const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+  const result = spawnSync(process.execPath, [cli, "status", "-C", dir], { encoding: "utf8", env: { ...process.env, UNITGEN_QUIET: "1" } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /removed a stale lock/);
+  assert.equal(fs.readFileSync(target, "utf8"), "original");
+  assert.equal(fs.existsSync(path.join(dir, ".unitgen", "run.lock")), false);
+});
+
+test("a stale lock whose build is still running is not taken over", { skip: process.platform === "win32" }, async (t) => {
+  const dir = temp(t);
+  fs.mkdirSync(path.join(dir, ".unitgen"), { recursive: true });
+  const build = (await import("node:child_process")).spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  t.after(() => { try { process.kill(-build.pid!, "SIGKILL"); } catch { /* gone */ } });
+  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+  fs.writeFileSync(path.join(dir, ".unitgen", "run.lock"), JSON.stringify({ pid: Number(dead), at: "earlier", builds: [build.pid] }));
+  assert.throws(() => acquireProjectLock(dir, () => {}), new RegExp(`still running \\(${build.pid}\\).*kill -TERM -${build.pid}`));
+});
+
+test("per-command help includes option continuation lines; --equivalent validates its values", (t) => {
+  const dir = temp(t), cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+  const help = spawnSync(process.execPath, [cli, "mutate", "--help"], { encoding: "utf8", cwd: dir });
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /--equivalent <id\|line>/);
+  fs.writeFileSync(path.join(dir, "settings.gradle"), "include ':app'\n");
+  const bad = spawnSync(process.execPath, [cli, "mutate", "-C", dir, "x.kt", "--target", "y.kt", "--equivalent", "12.x"], { encoding: "utf8", env: { ...process.env, UNITGEN_QUIET: "1" } });
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /--equivalent takes line numbers \(12\) or mutant ids \(12\.2\); got: 12\.x/);
 });
 
 test("help and empty commands accept leading common options outside a project", (t) => {
@@ -169,7 +244,7 @@ test("CLI cancellation also stops synchronous doctor discovery and releases its 
   const child = spawn(process.execPath, [cli, "doctor", "-C", dir], { stdio: "ignore", env: { ...process.env, JAVA_HOME: path.join(dir, "jdk") } });
   t.after(() => child.kill("SIGKILL"));
   const closed = new Promise<number | null>((resolve) => child.on("close", resolve));
-  for (let i = 0; i < 300 && !fs.existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 1000 && !fs.existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 10));
   assert.equal(fs.existsSync(pidFile), true);
   child.kill("SIGTERM");
   assert.equal(await closed, 130);
@@ -219,7 +294,7 @@ test("generate feeds mutation failures back to the model and accepts strengthene
     placement: () => ({ path: testFile, suiteName: "AnswerUnitGenTest" }), exampleTests: () => [],
     prepareTestFile: () => {}, countAssertions: () => 1,
     async runTests(req) {
-      const failed = req.label.startsWith("mutant-") && req.label !== "mutant-0-clean" && fs.readFileSync(testFile, "utf8").includes("strong");
+      const failed = req.label.startsWith("mutant-") && !req.label.endsWith("-0-clean") && fs.readFileSync(testFile, "utf8").includes("strong");
       return { ok: !failed, compiled: true, tests: [{ name: "AnswerUnitGenTest.answer", status: failed ? "failed" : "passed", message: failed ? "AssertionError: expected 1" : undefined }],
         coverage: req.coverage ? { [target]: { 1: 1 } } : undefined, logFile: "fixture", excerpt: "", seconds: 0.01 };
     },
@@ -242,7 +317,7 @@ test("generate feeds mutation failures back to the model and accepts strengthene
 
   const runTests = adapter.runTests;
   adapter.runTests = async (req) => {
-    if (req.label === "mutant-0-clean") throw new RunCancelled();
+    if (req.label.endsWith("-0-clean")) throw new RunCancelled();
     return await runTests(req);
   };
   await assert.rejects(generate(adapter, state, weak, { files: [target], limit: 1, attempts: 1, reruns: 1, mutationMax: 1 }), RunCancelled);

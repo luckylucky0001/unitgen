@@ -2,6 +2,9 @@
 // Any property access returns another stub; calling or constructing one returns a stub too,
 // so modules that merely import platform APIs still load. Behaviour is NOT emulated.
 "use strict";
+// The hypium shim reads which stubbed APIs a failing test touched (to tell shim limits from real failures).
+let hits;
+try { hits = require("./hypium.cjs").stubHits; } catch { hits = undefined; }
 function make(name) {
   const fn = function () { return make(name + "()"); };
   return new Proxy(fn, {
@@ -13,8 +16,8 @@ function make(name) {
       if (prop === "toString") return () => `[stub ${name}]`;
       return make(`${name}.${String(prop)}`);
     },
-    construct() { return make(`new ${name}`); },
-    apply() { return make(`${name}()`); },
+    construct() { if (hits) hits.current.add(name.split(".").slice(0, 2).join(".")); return make(`new ${name}`); },
+    apply() { if (hits) hits.current.add(name.replace(/\(\)/g, "").split(".").slice(0, 3).join(".")); return make(`${name}()`); },
   });
 }
 module.exports = make("ohos");

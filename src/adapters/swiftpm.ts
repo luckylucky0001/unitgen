@@ -29,7 +29,7 @@ export class SwiftPMAdapter implements Adapter {
   readonly testFileSuffix = `${SUFFIX}.swift`;
   private dump: any;
   private resolved: Record<string, string> = {};
-  private toolchain?: { clt: boolean; xctest: boolean; frameworksDir?: string; libDir?: string };
+  private toolchain?: { clt: boolean; xctest: boolean; frameworksDir?: string; libDir?: string; swiftTestingFlag: boolean };
 
   readonly root: string;
   private readonly stateDir: string;
@@ -73,7 +73,10 @@ export class SwiftPMAdapter implements Adapter {
     const lib = "/Library/Developer/CommandLineTools/Library/Developer/usr/lib";
     // Xcode toolchains ship XCTest; the CLT ships Swift Testing only.
     const xctest = !clt || exists(path.join(fw, "XCTest.framework"));
-    this.toolchain = { clt, xctest, frameworksDir: clt ? fw : undefined, libDir: clt ? lib : undefined };
+    // SwiftPM enables Swift Testing by default only for tools-version >= 6.0 manifests; older packages
+    // (most libraries) need --enable-swift-testing or their @Test functions silently never run.
+    const swiftTestingFlag = run(["swift", "test", "--help"]).out.includes("--enable-swift-testing");
+    this.toolchain = { clt, xctest, frameworksDir: clt ? fw : undefined, libDir: clt ? lib : undefined, swiftTestingFlag };
     return this.toolchain;
   }
 
@@ -90,7 +93,8 @@ export class SwiftPMAdapter implements Adapter {
     try {
       const d = this.loadDump();
       const ts: DumpTarget[] = d.targets;
-      lines.push(`package: ${d.name} (${ts.filter((x) => x.type === "regular").length} library targets, ${ts.filter((x) => x.type === "executable").length} executable targets (not tested), ${ts.filter((x) => x.type === "test").length} test targets)`);
+      const implicit = ts.filter((x) => x.type === "regular" && this.isImplicitExecutable(x));
+      lines.push(`package: ${d.name} (${ts.filter((x) => x.type === "regular").length - implicit.length} library targets, ${ts.filter((x) => x.type === "executable").length + implicit.length} executable targets (not tested${implicit.length ? `; ${implicit.map((x) => x.name).join(", ")} declared as .target but has main.swift` : ""}), ${ts.filter((x) => x.type === "test").length} test targets)`);
       for (const m of this.modules()) {
         if (!exists(m.dir)) { ok = false; lines.push(`error: source directory of target ${m.name} not found: ${relPath(m.dir, this.root)}`); }
         else if (!this.sourceFiles(m).length) lines.push(`warning: target ${m.name} has no .swift files in ${relPath(m.dir, this.root)}`);
@@ -130,12 +134,17 @@ export class SwiftPMAdapter implements Adapter {
     return path.join(this.root, bases[0], t.name);
   }
 
+  /** A plain `.target` with a top-level main.swift builds as an executable: tests cannot import it. */
+  private isImplicitExecutable(t: DumpTarget): boolean {
+    return exists(path.join(this.targetDir(t), "main.swift"));
+  }
+
   modules(): Module[] {
     const d = this.loadDump();
     const targets: DumpTarget[] = d.targets;
     const testDirs = targets.filter((t) => t.type === "test").map((t) => this.targetDir(t));
     return targets
-      .filter((t) => t.type === "regular" && !t.name.endsWith(SUFFIX))
+      .filter((t) => t.type === "regular" && !t.name.endsWith(SUFFIX) && !this.isImplicitExecutable(t))
       .map((t) => {
         const dir = this.targetDir(t);
         const conventional = path.join(this.root, "Tests", `${t.name}${SUFFIX}`);
@@ -222,6 +231,10 @@ export class SwiftPMAdapter implements Adapter {
     return path.join(this.stateDir, "Package.swift.orig");
   }
 
+  recover(): void {
+    this.restoreIfCrashed();
+  }
+
   private restoreIfCrashed(): void {
     if (exists(this.backupPath())) {
       fs.copyFileSync(this.backupPath(), this.manifestPath());
@@ -263,7 +276,7 @@ export class SwiftPMAdapter implements Adapter {
   }
 
   /** Temporarily rewrite Package.swift so the run works on this toolchain. Returns a restore fn. */
-  private applyRuntimeManifest(onlyOurs: boolean): () => void {
+  private applyRuntimeManifest(onlyOurs: boolean, withoutOurs = false): () => void {
     const t = this.tc();
     const d = this.loadDump();
     const original = readFile(this.manifestPath());
@@ -272,6 +285,7 @@ export class SwiftPMAdapter implements Adapter {
     if (!t.xctest || onlyOurs) {
       patches.push(`package.targets.removeAll { $0.type == .test && !$0.name.hasSuffix("${SUFFIX}") }`);
     }
+    if (withoutOurs) patches.push(`package.targets.removeAll { $0.type == .test && $0.name.hasSuffix("${SUFFIX}") }`);
     const hasOurTargets = original.includes(BEGIN);
     // Swift Testing needs macOS 10.15+ and tools-version >= 5.9 semantics.
     const mac = (d.platforms ?? []).find((p: any) => p.platformName === "macos");
@@ -302,11 +316,12 @@ export class SwiftPMAdapter implements Adapter {
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
     const mods = req.modules ?? this.modules();
     const ours = req.testFiles !== undefined;
-    const restore = this.applyRuntimeManifest(ours);
+    const restore = this.applyRuntimeManifest(ours, !ours && !!req.excludeGenerated);
     if (ours) this.park(req.testFiles!);
     const start = Date.now();
     try {
       const args = ["swift", "test"];
+      if (t.swiftTestingFlag) args.push("--enable-swift-testing");
       if (req.coverage) args.push("--enable-code-coverage");
       if (t.clt && t.frameworksDir) {
         args.push("-Xswiftc", `-F${t.frameworksDir}`, "-Xlinker", `-F${t.frameworksDir}`,

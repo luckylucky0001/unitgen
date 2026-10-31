@@ -36,6 +36,16 @@ export interface TestRun {
   coverageWarnings?: string[];
   /** Informational remark for the user (e.g. suites skipped on this toolchain). */
   note?: string;
+  /** Why failing existing tests are expected in this environment (the baseline then tolerates them). */
+  failuresExplained?: string;
+  /** Modules the runner could not build at all (name -> reason); their files cannot be verified. */
+  unbuildable?: Record<string, string>;
+  /** Coverage of the whole run is unusable (e.g. tests passed but no line was recorded anywhere). */
+  coverageProblem?: string;
+  /** The build failed in code other than the test files run (e.g. production code). */
+  compileErrorOutsideTests?: string;
+  /** Coverage is measured by unitgen itself, so "tests ran, nothing covered" really means 0%. */
+  emptyCoverageOk?: boolean;
 }
 
 export interface RunRequest {
@@ -43,6 +53,8 @@ export interface RunRequest {
   testFiles?: string[];
   /** Restrict to these modules. */
   modules?: Module[];
+  /** Baseline: run only the project's own tests, not files unitgen generated (their gains are tracked separately). */
+  excludeGenerated?: boolean;
   coverage: boolean;
   label: string;
   /** Hard limit for the whole run (default: adapter-specific, long). */
@@ -83,12 +95,22 @@ export interface Adapter {
   prepareTestFile(testFile: string, m: Module): void;
   /** Extra directories holding test helpers/fakes the module's tests can use (e.g. a :shared-test module). */
   testSupportDirs?(m: Module): string[];
+  /** Lines that call system APIs which are stubs or mocks under this runner (marked `!~` in briefs). */
+  platformLines?(text: string): Set<number>;
+  /** How those APIs behave here, for the brief legend (e.g. "a mock in the Previewer"). */
+  readonly platformLinesNote?: string;
+  /** Source text used to estimate executable lines of a never-loaded file (e.g. without UI DSL blocks). */
+  estimateText?(text: string): string;
   /** Warnings to put at the top of a brief (missing packages, stubbed APIs, ...). */
   briefWarnings?(source: string): string[];
+  /** Undo temporary project edits a killed run left behind (parked files, swapped test lists). Runs under the project lock. */
+  recover?(): void;
   /** Undo prepareTestFile side effects when a file is quarantined (optional). */
   forgetTestFile?(testFile: string, m: Module): void;
   runTests(req: RunRequest): Promise<TestRun>;
   /** Language-level hints: does the test file contain at least one real assertion? */
   countAssertions(text: string): number;
   readonly testFileSuffix: string;
+  /** Which runner measures coverage (when an adapter has several, e.g. hvigor vs the Node shim). */
+  readonly runnerName?: string;
 }
