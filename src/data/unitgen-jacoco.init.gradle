@@ -39,9 +39,11 @@ gradle.beforeProject { p ->
       def mv = (tn =~ /^test(\w+)UnitTest$/)
       def v = mv.matches() ? (mv.group(1)[0].toLowerCase() + mv.group(1).substring(1)) : 'main'
       def tt = p.tasks.findByName(tn)
-      if (tt != null) {
+      // A test task without JaCoCo (created before the plugin applied, or a module without tests): no data.
+      def jx = tt?.extensions?.findByName('jacoco')
+      if (tt != null && jx != null) {
         r.dependsOn(tt)
-        r.executionData.from(tt.extensions.getByName('jacoco').destinationFile)
+        r.executionData.from(jx.destinationFile)
       }
       // Classes of project q compiled for variant w. Bytecode-transforming plugins (Hilt, ASM
       // instrumentation) run tests against rewritten classes; JaCoCo must analyze exactly those or it
@@ -57,17 +59,19 @@ gradle.beforeProject { p ->
           exclude unitgenExcludes
         }
       }
-      // Tests of one module also run code of the modules it depends on: report those classes too, one
-      // variant per module (the same as the test's, else debug, else main), never two copies of a class.
-      r.classDirectories.from(p.files({
-        def trees = [classesOf(p, v)]
-        p.rootProject.allprojects.findAll { it != p }.each { q ->
-          def w = [v, 'debug', 'main'].find { cand -> !classesOf(q, cand).isEmpty() }
-          if (w != null) trees << classesOf(q, w)
-        }
-        return trees
-      }))
-      r.sourceDirectories.from(p.files({ p.rootProject.allprojects.collect { q -> [q.file('src/main/java'), q.file('src/main/kotlin')] }.flatten() }))
+      // Tests of one module also run code of the modules it depends on: every report reads the execution
+      // data of all test tasks in this run (-Punitgen.tasks), so that code counts in its own module's
+      // report. Those tasks are named by path, so ordering after them creates no other task.
+      map.each { path, task ->
+        if (path == p.path) return
+        def q = p.rootProject.findProject(path)
+        if (q == null) return
+        r.mustRunAfter("${path == ':' ? '' : path}:${task}")
+        def exec = new File(q.layout.buildDirectory.get().asFile, "jacoco/${task}.exec")
+        r.executionData.from(p.files({ exec.exists() ? [exec] : [] }))
+      }
+      r.classDirectories.from(p.files({ classesOf(p, v) }))
+      r.sourceDirectories.from(p.files('src/main/java', 'src/main/kotlin'))
       r.reports {
         xml.required = true
         html.required = false
