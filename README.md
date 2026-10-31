@@ -129,6 +129,10 @@ UNITGEN_ENV=/absolute/path/to/unitgen-env.sh /absolute/path/to/unitgen/bin/unitg
 - 退出码：`0` 通过；`1` 命令/环境/参数错误；`2` 质量门禁失败；`130` 用户取消。
 - `baseline` 只跑工程**原有**的测试（unitgen 生成的测试不计入「改造前」）。构建失败、测试失败或覆盖率拿不到时返回非零并标记基线无效，输出里写明原因和失败的用例；`--allow-failing` 可以在列出失败用例的前提下保留基线。没有任何测试的鸿蒙工程直接得到有效的 0% 基线（shim/hvigor 的覆盖率由 unitgen 自己统计，「没跑出东西」不会被误当成 0%）。`verify`、`mutate`、`generate` 要求成功的基线，并且要求和基线用同一个运行器（例如都用 hvigor）。
 - `mutate` 默认要求 `--min-score 80`，未达标或变异运行遇到环境错误返回 `2`；没有可生成的变异体明确标记 `NOT_APPLICABLE`（退出 `0`），不把它解释成断言强度 100%。仍须报告抽样数、幸存项和仅由崩溃检出的数量。
+- 速度：
+  - 鸿蒙的 hvigor 默认使用守护进程，热启动后单次运行约 1 秒，比冷启动快 3 倍左右；设 `UNITGEN_HVIGOR_DAEMON=0` 可以关闭。
+  - 变异体的超时按已经跑完的变异体实际耗时自适应（3 倍中位数 + 10 秒，下限 20 秒），死循环的变异体不会每个都白等 60 秒。
+  - 已经判定过的变异体，在测试文件没改动之前不会重跑。
 - `generate` 在 verify 后执行 mutate，将未通过的变异反馈给模型继续补强；重试耗尽则隔离该文件，并返回 `2`。`--max` 控制每轮变异预算；目前没有原生 `--llm trae`，TRAE 用户优先使用上面的 Skill 流程。
 - 一个项目一次只允许一个 CLI 命令，包括读取/恢复命令。超时、SIGINT/SIGTERM 会终止测试的**整棵进程树**：包括自己另开进程组的测试助手（如 `swiftpm-testing-helper`，死循环的变异体曾让它在后台一直涨内存），然后恢复源码、释放锁。Windows 使用 `taskkill /T`，该平台尚未实测。
 - 被强杀（SIGKILL、关掉终端、Agent 会话中断）之后不需要手动处理：锁文件记录了监督进程、worker 和所有后代进程（PID + 启动时间），下一条命令会确认它们都已退出，或者自动停掉能确认身份的残留进程，然后接管锁，还原被变异的源码、被临时替换的 `List.test.ets` 和 `Package.swift`。只有仍有无法确认的构建进程在跑时才会提示你，并给出具体的 kill 命令。
@@ -162,13 +166,31 @@ unitgen generate --llm 'cmd:<任意读 stdin 输出代码的命令>'
 
 1. **选项目**：用 GitHub API 按 star 数搜索鸿蒙 ArkTS 和 Swift 项目，排除没有源码的（例如 legado-Harmony 的 main 分支只剩 README）和纯 UI 的，保留逻辑代码多的。每个项目都是 `git clone --depth 1` 得到的干净副本，只在副本里改动。
 2. **独立执行**：每个项目交给一个**只读 Skill 文档**的独立子代理，按 `doctor → baseline → targets → brief → 写测试 → verify → mutate → report` 完整走一遍。期望值只能来自读代码或可信的外部基准（RFC 测试向量、CPython zlib），不能抄测试输出。子代理同时记录遇到的每个工具问题，并区分哪些是工具 bug、哪些是自己写错了。
-3. **修复再复验**：收集到的问题逐个修复，每个修复都配单测（单测从 31 个增加到 46 个）。修完后用最终代码把所有项目从头重跑一遍：重建基线（只含项目原有测试）、复验每个已接受的测试文件、重跑变异测试。下表的数字都来自这次统一重跑。
+3. **修复再复验**：收集到的问题逐个修复，每个修复都配单测（单测从 31 个增加到 49 个）。修完后用最终代码把所有项目从头重跑一遍：重建基线（只含项目原有测试）、复验每个已接受的测试文件、重跑变异测试。下表的数字都来自这次统一重跑。
 4. **两种运行器交叉验证**：同一批鸿蒙测试分别在 shim 和 hvigor 上跑，对比结果是否一致（见下文）。
 5. **故障注入**：几个子代理和监督会话被整体强杀在变异测试中途（生产代码处于被改动的状态），再验证下一条命令能否自动恢复；另外构造了一个会让测试死循环的变异体，验证超时后不会有进程残留。
 
 ### 结果
 
-ROUND2_TABLE_ROWS
+| 项目 | 平台 · 运行器 | 目标文件 | 目标文件覆盖率 | 新增测试 | 变异得分 |
+|---|---|---|---|---:|---|
+| [Kingfisher](https://github.com/onevcat/Kingfisher) 24,405★ | iOS · Xcode + iOS 模拟器 | `KingfisherError.swift` | 29% → **99%**（62 → 211 / 213 行） | 14 | 67%（10/15 杀死，评估 15/42） |
+| [Kingfisher](https://github.com/onevcat/Kingfisher) 24,405★ | iOS · Xcode + iOS 模拟器 | `ImageFormat.swift` | 44% → **98%**（24 → 54 / 55 行） | 11 | 100%（15/15 杀死，评估 15/29；其中 1 个靠崩溃，2 个判为等价） |
+| [Ink](https://github.com/JohnSundell/Ink) 2,539★ | iOS · SwiftPM | `List.swift` | 87% → **99%**（140 → 159 / 161 行） | 10 | 80%（12/15 杀死，评估 16/40；其中 1 个靠崩溃，1 个判为等价） |
+| [Rainbow](https://github.com/onevcat/Rainbow) 1,941★ | iOS · SwiftPM | `ConditionalStyleBuilder.swift` | 53% → **100%**（67 → 127 / 127 行） | 24 | 100%（15/15 杀死，评估 18/28） |
+| [Rainbow](https://github.com/onevcat/Rainbow) 1,941★ | iOS · SwiftPM | `String+Rainbow.swift` | 89% → **100%**（199 → 223 / 223 行） | 23 | 100%（23/23 杀死，评估 23/23；其中 2 个靠崩溃） |
+| [interview-handbook-project](https://github.com/HarmonyOS-Next/interview-handbook-project) 541★ | 鸿蒙 · hvigor | `base.ets` | 0% → **100%**（0 → 6 / 6 行） | 9 | 100%（8/8 杀死，评估 11/11；1 个判为等价） |
+| [interview-handbook-project](https://github.com/HarmonyOS-Next/interview-handbook-project) 541★ | 鸿蒙 · hvigor | `InterviewItemModel.ets` | 0% → **100%**（0 → 12 / 12 行） | 8 | 100%（11/11 杀死，评估 11/11） |
+| [LinysBrowser_NEXT](https://github.com/awaLiny2333/LinysBrowser_NEXT) 292★ | 鸿蒙 · hvigor | `url.ets` | 0% → **81%**（0 → 153 / 189 行） | 25 | 94%（33/35 杀死，评估 41/165；2 个判为等价） |
+| [LinysBrowser_NEXT](https://github.com/awaLiny2333/LinysBrowser_NEXT) 292★ | 鸿蒙 · hvigor | `url-ext.ets` | 0% → **100%**（0 → 108 / 108 行） | 9 | 97%（33/34 杀死，评估 36/72；其中 1 个靠崩溃，6 个判为等价） |
+| [DSBridge-HarmonyOS](https://github.com/751496032/DSBridge-HarmonyOS) 182★ | 鸿蒙 · hvigor | `BaseBridge.ts` | 0% → **94%**（0 → 218 / 233 行） | 44 | 88%（21/24 杀死，评估 30/119） |
+| [DSBridge-HarmonyOS](https://github.com/751496032/DSBridge-HarmonyOS) 182★ | 鸿蒙 · hvigor | `AsyncCallbackHelper.ts` | 0% → **100%**（0 → 32 / 32 行） | 12 | 100%（12/12 杀死，评估 14/14） |
+| [qs-arkts](https://github.com/wgli-collab/qs-arkts) 45★ | 鸿蒙 · hvigor | `utils_encode.ets` | 0% → **97%**（0 → 115 / 118 行） | 17 | 80%（12/15 杀死，评估 19/102；6 个判为等价） |
+| [qs-arkts](https://github.com/wgli-collab/qs-arkts) 45★ | 鸿蒙 · hvigor | `proto_guard.ets` | 0% → **100%**（0 → 7 / 7 行） | 18 | 86%（6/7 杀死，评估 7/7） |
+| [Home-Assistant-HarmonyOS-Next](https://github.com/gentslava/Home-Assistant-HarmonyOS-Next) 17★ | 鸿蒙 · hvigor | `P2pHomeAssistantRepository.ets` | 0% → **91%**（0 → 50 / 55 行） | 13 | 91%（10/11 杀死，评估 17/17；2 个判为等价） |
+| [Home-Assistant-HarmonyOS-Next](https://github.com/gentslava/Home-Assistant-HarmonyOS-Next) 17★ | 鸿蒙 · hvigor | `HomeAssistantStore.ets` | 0% → **100%**（0 → 45 / 45 行） | 13 | 100%（15/15 杀死，评估 18/37；其中 1 个靠崩溃） |
+| [HarmonyOS_2048](https://github.com/amazingcoderpro/HarmonyOS_2048) 15★ | 鸿蒙 · hvigor | `SoundManger.ets` | 0% → **45%**（0 → 42 / 93 行） | 14 | 40%（6/15 杀死，评估 17/20；1 个判为等价） |
+| [lxmusic-harmony](https://github.com/Adamaik/lxmusic-harmony) 13★ | 鸿蒙 · hvigor | `Inflate.ets` | 0% → **100%**（0 → 149 / 149 行） | 19 | 87%（13/15 杀死，评估 19/153；其中 3 个靠崩溃，29 个判为等价） |
 
 口径说明：
 - 「改造前」是只跑项目原有测试的基线，鸿蒙这几个项目原来都没有测到这些文件。
@@ -179,11 +201,13 @@ ROUND2_TABLE_ROWS
 - 覆盖率由真工具链测出：hvigor 的 `coverageReport.json`，Xcode/SwiftPM 的 llvm-cov/xccov。
 - 变异得分 = 杀死数 / (杀死 + 存活)，只统计用当前测试文件测过的变异体。编译不过的变异体不计入分数，但算作「已评估」。
 - 每个文件这一轮最多跑 15 个变异体（`--max 15`），所以「评估 X/Y」里 X 往往小于候选总数 Y。重复运行会接着评估剩下的。
+- 表里只列在真工具链上测出的结果。interview-handbook 的 `QuestionItemModel.ets` 所在的 home 模块在 hvigor 下构建不了（缺少依赖声明，见下文），只在 shim 下验证过：0% → 100%（82 行），7 个测试，变异 16/16 杀死。
 
 怎么看这些数字：
-- 17 个目标文件里，14 个的覆盖率到了 91% 以上，所有新增测试都在真工具链上通过，没有改动任何生产代码。
+- 17 个目标文件里，15 个的覆盖率到了 91% 以上，所有新增测试都在真工具链上通过，没有改动任何生产代码。
 - 变异得分低的几项都是真实的测试缺口，没有被工具掩盖：
-  - **KingfisherError 67%、BaseBridge 60%**：上一版变异算子不会改 `case .x: return 2001` 里的错误码和返回的错误字符串，当时报的是「100%（8/8）」。这轮补上这些算子之后，才发现测试并没有逐个断言错误码和文案。
+  - **KingfisherError 67%**：上一版变异算子不会改 `case .x: return 2001` 里的错误码，当时报的是「100%（8/8）」。补上这类算子后，5 个存活的变异全是 `3001…3005` 这几个错误码，说明测试没有逐个断言它们。
+  - **BaseBridge**：一开始只有 60%，因为存活的 6 个里有 4 个是删掉项目自己封装的 `LogUtils.d/e(...)` 日志调用，这种改动观察不到，属于噪音。调优后 unitgen 能识别项目自己的日志封装，不再为它们生成变异，得分变成 88%，剩下的存活都是真正的缺口。
   - **SoundManger 40%**：存活的变异体都是对 `soundPool.play/stop/off` 的调用。这些调用在 Previewer 里是模拟实现，只有真设备或替身才能观察到，brief 里已经给出了警告。
 - 判为「等价」的变异体，每一个都写了理由（`unitgen note`）。例如 Inflate.ets 的 29 个来自 12 行，都是读取之前一定会被覆盖的初始值、或者永远不会被读到的表槽位。
 
@@ -248,7 +272,8 @@ ROUND2_TABLE_ROWS
 | 进程管理 | 被强杀后要手动确认 PID 再删锁，变异过的源码要等下一条命令才能还原 | 下一条命令自动接管过期锁，停掉能确认身份的残留进程，还原源码、`List.test.ets` 和 `Package.swift` |
 | 基线 | 重跑基线时，已经接受的生成测试被算进「改造前」（报告写成 6% → 34%，实际起点是 0） | 基线只跑项目原有的测试（四种运行器都处理了） |
 | 基线 | 因为平台桩而失败的旧测试让基线作废；shim 和 hvigor 的数据混在一起 | shim 下自动容忍这类失败（会列出来），其他情况用 `--allow-failing`；记录运行器，不一致时拒绝 verify |
-| 变异测试 | Swift 的 `if cond {`、尾随闭包、成员赋值、`case .x: return 2001`、返回的字符串都没有变异体，Kingfisher 和 Rainbow 的 100% 是虚高 | 补上这些算子；不再生成 `$0 → $1`、类型联合 `0 \| 1` 这类注定编译不过的变异 |
+| 变异测试 | Swift 的 `if cond {`、尾随闭包、成员赋值、`case .x: return 2001`、返回的字符串都没有变异体：Rainbow 的 ConditionalStyleBuilder 只有 2 个候选，Kingfisher 的「100%」是虚高 | 补上这些算子；不再生成 `$0 → $1`、类型联合 `0 \| 1` 这类注定编译不过的变异 |
+| 变异测试 | 删除项目自己封装的日志调用（`LogUtils.d(...)`）也算作变异，存活了就拉低分数 | 识别以 Log/Logger/LogUtils 结尾的封装，`Catalog`、`Dialog` 这类名字不受影响 |
 | 变异测试 | 进程崩溃杀死的变异被算成普通 killed；报告只汇总最后一轮；重跑时用已杀死的变异填预算；`--equivalent` 写多次只保留最后一个；id 在版本之间会漂移 | 累计统计（只算当前测试内容测出的结果）；没有新变异时直接给出结果；`--equivalent` 可重复，按稳定的键记录 |
 
 ## 第一轮验证结果（2026-10-21，本机：macOS + Command Line Tools，无 Xcode / DevEco）

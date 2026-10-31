@@ -124,7 +124,9 @@ function isMemberAssignment(t: string): boolean {
 }
 
 /** Logging statements: mutating them (or the string concatenation inside) changes nothing a test should check. */
-const LOG_CALL = /^(console|hilog|Log|Logger|logger|log|Timber|print|println|debugPrint|NSLog|os_log)\b\s*[.(]/;
+// Includes project wrappers named like loggers (LogUtils.d, AppLogger.info, this.logger.warn, TLog.e) —
+// a capital "Log" suffix, so Catalog/Dialog are not matched.
+const LOG_CALL = /^(await\s+)?((this|self)\.)?(console|hilog|Log|Logger|logger|log|Timber|print|println|debugPrint|NSLog|os_log|(?:[A-Za-z_$][\w$]*?)?(Log|Logger|LogUtils?|Logging)|[a-z][\w$]*?(Logger|LogUtils?))\b\s*[.(]/;
 
 export function mutantsFor(text: string, lines: number[]): Mutant[] {
   const out = mutantsForLines(text, lines);

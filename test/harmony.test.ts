@@ -105,6 +105,12 @@ test("usedPlatformImports ignores logging/error types and unused imports", () =>
   assert.deepEqual(usedPlatformImports(text), ["util"]);
 });
 
+test("project logging wrappers are not mutated, look-alike names are", () => {
+  const src = ["  LogUtils.e(err)", "  this.logger.info('x')", "  AppLogger.d('y')", "  catalog.add(x)", "  Dialog.show(x)"].join("\n");
+  const lines = mutantsFor(src, [1, 2, 3, 4, 5]).map((m) => m.line);
+  assert.deepEqual([...new Set(lines)], [4, 5]);
+});
+
 test("mutants get per-line ids and logging statements are not mutated", () => {
   const src = ["if (a < b && c) {", "  console.info('x = ' + x);", "  hilog.info(0x0, 'tag', 'n=%d', n + 1);", "  y = a + 1;", "}"].join("\n");
   const ms = mutantsFor(src, [1, 2, 3, 4]);
