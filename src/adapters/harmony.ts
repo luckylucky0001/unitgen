@@ -832,7 +832,14 @@ export class HarmonyAdapter implements Adapter {
     const passed = tests.filter((t) => t.status === "passed").length;
     const anyHit = Object.values(coverage).some((lines) => Object.values(lines).some((h) => h > 0));
     let coverageProblem: string | undefined;
-    if (req.coverage && passed > 0 && !anyHit) {
+    // Only suspicious when the tests that ran import project code (IDE template tests touch none).
+    const ran = files ?? this.listedTests(m);
+    const local = Object.keys(this.localDeps());
+    const touchesProject = ran.some((f) => {
+      const t = readFile(f);
+      return /from\s+['"]\.{1,2}\/[^'"]*main\/ets\//.test(t) || local.some((d) => t.includes(`'${d}`) || t.includes(`"${d}`));
+    });
+    if (req.coverage && passed > 0 && !anyHit && touchesProject) {
       const v = this.hypium()?.version;
       coverageProblem = `hvigor recorded 0 executed lines although ${passed} test(s) passed${exists(reportFile) ? "" : " (no coverageReport.json)"}: the coverage data never reached hvigor. `
         + `${v && versionLess(v, "1.0.19") ? `@ohos/hypium ${v} sends it through printSync, which the Previewer drops: upgrade @ohos/hypium (devDependencies) to 1.0.19 or newer and run \`ohpm install\`. ` : ""}`
