@@ -43,69 +43,92 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
 
 ## Workflow
 
-1. **Baseline (once):** `"$UNITGEN" baseline` — runs the project's own tests with coverage
+0. **Start clean:** `git status`. If an earlier session was interrupted, run any unitgen command
+   first (`"$UNITGEN" status`): it takes over a stale lock and restores interrupted mutations and
+   temporary edits (it says so). Production code must show no changes before you continue.
+1. **Doctor:** read the `runner:` line. On HarmonyOS it says whether the real toolchain (hvigor:
+   ArkTS compiler + Previewer runtime) or the Node shim is used, and why — for example
+   `ohpm install` not run, `@ohos/hypium` not declared, an old hypium, `compileSdkVersion` not
+   matching the installed SDK. Tell the user what would enable the real toolchain; do not edit
+   build files yourself.
+2. **Baseline (once):** `"$UNITGEN" baseline` — runs the project's own tests with coverage
    (files unitgen generated are excluded). Require exit 0 before generating tests. A project
-   without tests gets a valid 0% baseline. If existing tests fail, the output lists them: report
-   them; `baseline --allow-failing` keeps a baseline from the passing ones (the HarmonyOS shim
-   does this by itself for tests that fail only because they call stubbed system APIs).
-   A failed baseline marks the baseline invalid; read its message and log, fix the environment
-   or report it. Re-run the baseline after switching runners (e.g. `UNITGEN_HARMONY_MODE`).
-2. **Pick targets:** `"$UNITGEN" targets --limit 15`. If the user named files or a module,
+   without tests gets a valid 0% baseline. Read the `note:` line: existing tests that do not
+   compile, failing tests, modules the runner cannot build (and why) — report them to the user.
+   If existing tests fail, `baseline --allow-failing` keeps a baseline from the passing ones (the
+   HarmonyOS shim does this by itself for tests that fail only because they call stubbed system
+   APIs). Re-run the baseline after switching runners (e.g. `UNITGEN_HARMONY_MODE`); verify
+   refuses a baseline measured with another runner.
+3. **Pick targets:** `"$UNITGEN" targets --limit 15`. If the user named files or a module,
    use those (`--module <name>` narrows the list). Prefer `logic` kind with many uncovered
-   lines. Skip a target if it is pure glue around platform APIs you cannot fake.
-3. **For each target, one at a time:**
+   lines. Files listed last sit in modules the runner cannot build. Skip a target that is pure
+   glue around platform APIs you cannot fake. Run `targets` again after each accepted file:
+   one test file often covers other files too, so their uncovered counts change.
+4. **For each target, one at a time:**
    1. `"$UNITGEN" brief <source-file>` and read the whole brief. It names the exact test
       file path and suite/class name to use — keep both, the gate depends on them.
-      Lines starting with ⚠️ at the top (uninstalled packages, stubbed platform APIs) often
-      mean the target cannot be verified here: prefer another target.
+      Lines starting with ⚠️ at the top (uninstalled packages, a file that exports nothing,
+      ArkUI components, a module that does not build) often mean the target cannot be verified
+      here: prefer another target. In the source, `!` marks uncovered lines; `!~` marks uncovered
+      lines that call a system API which is only a stub/mock here — cover the logic around them,
+      never assert on what that API returns.
    2. Open any other source the brief references but does not include (constructors of
       collaborators, data classes, test-helper modules) before writing assertions.
       Read the actual network/local/domain model fields; do not infer that they share names.
       Check fakes for TODO/unimplemented methods. If needed, implement a small test-local fake
       using existing interfaces; do not change shared fakes or add dependencies.
    3. Write the test file at the given path. Follow the brief's rules; reuse listed test
-      doubles; mirror the imports of the example tests.
+      doubles; mirror the imports of the example tests. Things that cost attempts in practice:
+      - Formatted output (`description`, `String(describing:)`, `toString()`, error messages):
+        read how the code builds the string, character by character; do not guess.
+      - Global or static state (enabled flags, singletons, caches): save and restore it in the
+        test, and serialize the suite if the framework runs tests in parallel (Swift Testing).
+      - Collections stored in observable/state fields may come back as proxies or copies:
+        compare contents, not identity.
    4. `"$UNITGEN" verify <test-file> --target <source-file>` and act on the verdict:
 
       | verdict | what to do |
       |---|---|
       | `ACCEPTED` | done; move on |
       | `COMPILE_ERROR` | fix the test using the compiler output |
-      | `TEST_FAILURES` | re-read the production code; fix the *expectation*. If the code is really wrong, assert current behaviour and add `// UNITGEN-SUSPECT: <why>` (collected into the report automatically) |
+      | `TEST_FAILURES` | re-read the production code; fix the *expectation*. If the code is really wrong, assert current behaviour and add `// UNITGEN-SUSPECT: <why>` (collected into the report automatically). If the feedback lists stubbed APIs, check whether the failing value comes from one before calling it a bug |
       | `FLAKY` | remove the source of nondeterminism (time, ordering, shared state, real dispatchers) |
       | `NO_GAIN` | the tests only hit already-covered lines; aim at the `!` lines in a fresh brief. `--allow-no-gain` only when a file is intentionally redundant, and say why in a note |
       | `NO_ASSERTIONS` / `NO_TESTS` | add real assertions / check suite & class naming |
       | `INFRA_ERROR` | environment problem (missing SDK, uninstalled ohpm packages, production code that does not compile, coverage that never arrives, ...): follow the fix the message names or report it and pick another target; don't edit tests to dodge it. It does not count as an attempt |
 
-   5. **Check assertion strength:** `"$UNITGEN" mutate <test-file>` flips operators / deletes
-      calls on the lines your test covers and re-runs it. Coverage alone does not prove the
-      assertions check anything. For each *survived* mutant, add an assertion that would fail
-      (then `verify` and `mutate` again), unless the mutant is equivalent (no observable change,
-      e.g. an unreachable bound or a value nobody reads) — exclude it with
-      `"$UNITGEN" mutate <test-file> --equivalent <id>[,<id>...]` using the mutant ids printed in
-      brackets (`[12.2]`; a bare line number excludes every mutant on that line) and say why in
-      `"$UNITGEN" note "..."`. Excluded mutants are not run again.
-      Require the configured gate (default `--min-score 80`); exit 2 means it failed.
-      Check observable side effects too (for example, data actually saved to the network fake),
-      not just the local return value. Report sampled counts and crash-only kills separately.
-      A run samples up to `--max` (default 15) mutants, preferring deleted calls,
-      negated conditions and comparison flips; the output says how many candidates exist. Re-runs
-      re-check previous survivors first and then move on to mutants not tried yet.
-      Mutants that don't compile are replaced and don't count; the source is always restored,
-      also after a crash or forced kill (the next command restores it and takes over the stale lock).
-      A mutant that makes the code loop forever is killed by a timeout together with every
-      process the test run started.
-      Re-verifying after strengthening shows "+0 vs. its previously accepted version" and is
-      still ACCEPTED — new assertions don't need new lines.
+   5. **Check assertion strength:** `"$UNITGEN" mutate <test-file>` changes the lines your test
+      covers (operators, conditions, constants, returned strings, deleted calls and assignments)
+      and re-runs the test. Coverage alone does not prove the assertions check anything.
+      - Each *survivor* is printed with an id (`[12.2]`) and the changed line. Add an assertion
+        that would fail for it, `verify`, then `mutate` again: survivors are re-checked first,
+        and mutants already decided for the current test file are not run again.
+      - Only a mutant with no observable effect is *equivalent* (a value nobody reads, a bound
+        that cannot be reached, a slot overwritten before use). Exclude it with
+        `"$UNITGEN" mutate <test-file> --equivalent <id>[,<id>...]` and explain why with
+        `"$UNITGEN" note "..."`. A bare line number excludes every mutant on that line: avoid it.
+      - A survivor whose effect is only visible through a stubbed/mocked system API is *not*
+        equivalent: leave it, note it, and report the score as it is.
+      - The gate (default `--min-score 80`) counts every mutant evaluated with the current test
+        file; exit 2 means it failed (the test stays accepted). `--max` caps one run: about
+        1–2 s per mutant with hvigor, 3–10 s with SwiftPM/Gradle, 10–25 s with Xcode, so use
+        `--max 10` on Xcode. Re-run to evaluate more candidates.
+      - Kills by a crash (exception, index out of range, hang) rather than an assertion are
+        reported separately; mutants that do not compile are discarded. The source is always
+        restored, also after a crash or forced kill (by the next command).
+      - Re-verifying after strengthening shows "+0 vs. its previously accepted version" and is
+        still ACCEPTED — new assertions don't need new lines.
    6. Give up on a target after ~4 attempts: `"$UNITGEN" reject <test-file> "<why>"` moves the
       file into `.unitgen/rejected/` (and unregisters it) so the build stays green.
    **Large single files** (one 1000+ line source, e.g. a whole library in one file): build the
    test file up in passes — one feature area per pass (parsing, accessors, operators, errors…),
    `verify` after each pass. Each pass must add coverage or it is `NO_GAIN`.
    Use `"$UNITGEN" note "<text>"` only for findings that are not already a `UNITGEN-SUSPECT` comment.
-4. **Finish:** `"$UNITGEN" report` writes `.unitgen/REPORT.md` (coverage before/after,
-   accepted/rejected files, suspected bugs). Summarise it for the user, including what you
-   could not cover and why (e.g. code paths needing a device, Robolectric, or a real network).
+5. **Finish:** `"$UNITGEN" report` writes `.unitgen/REPORT.md`. Summarise it for the user with
+   the numbers, not adjectives: coverage before → after per target (lines), tests added, the
+   runner, mutation score with evaluated/candidate counts, crash-only kills, discarded and
+   equivalent mutants (and why), suspected bugs with their evidence, and what could not be
+   covered and why (system APIs, a device, a module that does not build, ...).
 
 ## Hard rules
 
@@ -117,7 +140,9 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
   you are responsible for them being meaningful.
 - Expected values come from reading the code (or a trustworthy oracle such as an RFC
   test vector), never from "whatever the test printed".
-- Run one `verify` at a time per project: runs share build directories.
+- Run one unitgen command at a time per project (the lock enforces it): runs share build directories.
+- Never commit, push or build the project yourself while a `mutate` is running: the target
+  file is temporarily mutated.
 - All CLI commands acquire a project lock, including recovery. Never remove `.unitgen/run.lock`
   by hand: after a forced kill the next command checks that the old command and the processes
   it started are gone (stopping leftovers it can identify), takes the lock over and restores
