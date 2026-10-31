@@ -410,3 +410,14 @@ test("under a narrowing type checker, flips inside a literal comparison chain ar
   assert.ok(strict.includes("5:=== -> !=="));
   assert.ok(strict.includes("8:!== -> ==="), "typeof compares its own result");
 });
+
+test("`a ?? fallback` is mutated to the fallback; `??=` and keywords are left alone", () => {
+  const ts = [
+    "this.children = init.children ?? [];",
+    "const n = parseInt(s) ?? 0;",
+    "return opts?.name ?? 'anon';",
+    "cache ??= new Map();",
+  ].join("\n");
+  const m = mutantsFor(ts, [1, 2, 3, 4]).filter((x) => x.op === "?? -> fallback").map((x) => `${x.line}:${x.mutated}`);
+  assert.deepEqual(m, ["1:this.children = [];", "2:const n = 0;", "3:return 'anon';"]);
+});

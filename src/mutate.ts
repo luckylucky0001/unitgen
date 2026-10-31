@@ -59,6 +59,9 @@ export function mutationGate(r: MutationReport, minimum = 80): { status: "PASSED
   }
   if (r.killed + r.survived === 0) return { status: "FAILED", minimum, reason: "no mutant was evaluated (all were discarded or excluded)" };
   if (r.score * 100 < minimum) return { status: "FAILED", minimum, reason: `score ${(r.score * 100).toFixed(0)}% is below ${minimum}%` };
+  // A pass on a sample is a pass, but say so: the rest may still hold survivors.
+  const tried = r.triedTotal ?? r.results.length;
+  if (tried < r.candidates) return { status: "PASSED", minimum, reason: `on ${tried} of ${r.candidates} candidates; ${r.candidates - tried} not evaluated yet, which may still survive (re-run mutate to evaluate them)` };
   return { status: "PASSED", minimum };
 }
 
@@ -295,6 +298,11 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
       if (op === "+ -> -" && (masked[m.index - 1] === "\u0000" || masked[m.index + m[0].length] === "\u0000")) continue;
       const mutated = original.slice(0, m.index) + rep + original.slice(m.index + m[0].length);
       out.push({ line: ln, op, original, mutated });
+    }
+    // `a ?? fallback` -> `fallback`: does any test see the value when it is present?
+    const nc = /(?<![\w$.)\]])([A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*|\([^()]*\)|\[[^\]]*\])*)\s*\?\?(?!=)\s*/.exec(masked);
+    if (nc && !/^(return|await|throw|new|typeof|case)$/.test(nc[1])) {
+      out.push({ line: ln, op: "?? -> fallback", original, mutated: original.slice(0, nc.index) + original.slice(nc.index + nc[0].length) });
     }
     // Negate a simple condition: if (flag) / if (a.b) / if (list.isEmpty()) -> if (!(...)).
     const cond = /\bif\s*\(\s*(!?[A-Za-z_$][\w$.]*(?:\(\))?)\s*\)/.exec(masked);

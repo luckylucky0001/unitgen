@@ -1,5 +1,7 @@
 # unitgen
 
+[English](#english) · 中文
+
 面向 **iOS（Swift）/ Android（Kotlin/Java）/ 鸿蒙（ArkTS）** 的「覆盖率驱动」单元测试补全工具：CLI + Agent Skill（Claude Code / TRAE）。
 
 思路借鉴 Meta TestGen-LLM 与 Qodo Cover-Agent：**生成不是难点，筛选才是**。模型（或 Claude Code 本身）负责写测试，unitgen 负责决定测什么、并且只保留真正有价值的测试：
@@ -16,6 +18,49 @@ baseline（跑现有测试 + 覆盖率）
 ```
 
 **实测情况**：已在 DevEco Studio 26 和 Xcode 16.4 的真实工具链上，用 10 个开源项目做过完整验证（写测试 → verify → mutate），包括 [Kingfisher](https://github.com/onevcat/Kingfisher)（24k★）、[Ink](https://github.com/JohnSundell/Ink)、[Rainbow](https://github.com/onevcat/Rainbow)、[interview-handbook](https://github.com/HarmonyOS-Next/interview-handbook-project)、[LinysBrowser_NEXT](https://github.com/awaLiny2333/LinysBrowser_NEXT)、[DSBridge-HarmonyOS](https://github.com/751496032/DSBridge-HarmonyOS)。验证方法、逐个文件的覆盖率和变异得分、在这些项目里发现的疑似 bug，见下文[第二轮验证](#第二轮验证2026-10-31deveco-studio-26--xcode-164真实工具链)。
+
+## English
+
+unitgen is a coverage-driven unit-test backfilling tool for **iOS (Swift), Android (Kotlin/Java) and
+HarmonyOS (ArkTS)**: a CLI plus an Agent Skill for Claude Code and TRAE. An agent (or a model in
+unattended mode) writes the tests; unitgen decides what to test and keeps only tests that compile,
+pass repeatedly, assert something and add line coverage, then measures their strength with mutation
+testing.
+
+**Install** (Node ≥ 22.18; the platform toolchain you need: Xcode, JDK 17 + Android SDK, or DevEco
+Studio, which is found automatically):
+
+```bash
+git clone https://github.com/luckylucky0001/unitgen.git ~/unitgen
+cd ~/unitgen && npm ci
+~/unitgen/bin/unitgen --help          # or link it into your PATH
+ln -sfn ~/unitgen/skills/unitgen ~/.claude/skills/unitgen   # optional: Claude Code Skill
+```
+
+**Use** (in the project root; add `.unitgen/` to its `.gitignore`):
+
+```bash
+unitgen doctor                      # project type, toolchain, which runner and why
+unitgen baseline                    # the project's own tests + coverage, once
+unitgen targets                     # files with the most untested logic
+unitgen brief <source>              # context for writing the test (uncovered lines marked)
+unitgen verify <test> --target <source>   # ACCEPTED / COMPILE_ERROR / TEST_FAILURES / FLAKY / NO_GAIN / ...
+unitgen mutate <test>               # mutation score; survivors listed with ids
+unitgen report                      # .unitgen/REPORT.md
+```
+
+HarmonyOS: runs DevEco's real hvigor + ArkTS compiler in the Previewer runtime (no device or emulator
+needed); without DevEco, a Node shim runs pure-logic tests. iOS: SwiftPM packages, or `.xcodeproj` on
+an iOS Simulator with `--adapter xcode`. The Skill ([skills/unitgen/SKILL.md](skills/unitgen/SKILL.md))
+describes the whole agent workflow. Exit codes: 0 passed, 1 command/environment error, 2 quality gate
+failed, 130 cancelled.
+
+**Validation**: run end to end on real toolchains (DevEco Studio 26, Xcode 16.4) on 10 open-source
+projects, among them Kingfisher, Ink, Rainbow, interview-handbook, LinysBrowser_NEXT and
+DSBridge-HarmonyOS (per-file coverage and mutation scores in the tables below), then out-of-box tests
+from a fresh clone, each by an agent that only read the README and Skill, on CoolMallArkTS, SwiftDate,
+SwiftyJSON and Aigis. Every unitgen bug these found is listed with its fix under
+「这轮发现并修复的 unitgen 问题」.
 
 ## 开源方案调研（2026-10-21，GitHub API 数据）
 
