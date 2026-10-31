@@ -134,7 +134,7 @@ test("hvigor coverage drops lines only function-type annotations touch", async (
   const src = ["", "export const f: (a: number) => number =", "  (a: number): number => {", "    return a;", "  };", "export const g = (): number => 1;"].join("\n");
   const report = JSON.stringify({ files: [{ path: "/p/src/main/ets/A.ets",
     functions: [
-      { count: 0, regions: [{ startLoc: { line: 2, col: 17 }, endLoc: { line: 2, col: 40 }, count: 0 }] }, // the annotation
+      { count: 0, regions: [{ startLoc: { line: 2, col: 17 }, endLoc: { line: 2, col: 38 }, count: 0 }] }, // `(a: number) => number`
       { count: 2, regions: [{ startLoc: { line: 3, col: 3 }, endLoc: { line: 5, col: 4 }, count: 2 }] },
       { count: 0, regions: [{ startLoc: { line: 6, col: 17 }, endLoc: { line: 6, col: 33 }, count: 0 }] }, // a real, never-called arrow
     ],
@@ -162,4 +162,46 @@ test("platformLines marks lines that call imported system APIs, not logging or l
     "}",
   ].join("\n");
   assert.deepEqual([...a.platformLines(text)], [5]);
+});
+
+test("review regressions: mutant generation edge cases", () => {
+  // A chained assignment continues on the next line: deleting its first line is a syntax error.
+  const chain = ["    this.visible = items", "      .filter((x) => x.ok);", "    this.count = 1;"].join("\n");
+  const ops = mutantsFor(chain, [1, 2, 3]).map((m) => `${m.line}:${m.op}`);
+  assert.ok(!ops.includes("1:delete assignment"));
+  assert.ok(ops.includes("3:delete assignment"));
+  // `if f {`: the condition is negated, not the keyword.
+  const neg = mutantsFor("        if f {", [1]).find((m) => m.op === "negate condition");
+  assert.equal(neg?.mutated, "        if !f {");
+  const guard = mutantsFor("    guard a else { return }", [1]).find((m) => m.op === "negate condition");
+  assert.equal(guard?.mutated, "    guard !a else { return }");
+  // A `return "..."` inside a trailing comment is not code.
+  assert.equal(mutantsFor("  x = y; // return 'old'", [1]).filter((m) => m.op === "string -> empty").length, 0);
+  // Domain objects whose names end in Log are not loggers.
+  const domain = ["  changeLog.push(entry)", "  auditLog.record(x)", "  AuditLog.e(err)"].join("\n");
+  assert.deepEqual([...new Set(mutantsFor(domain, [1, 2, 3]).map((m) => m.line))], [1, 2]);
+});
+
+test("review regressions: hvigor coverage keeps never-called object-literal arrows", async () => {
+  const { parseHvigorCoverage } = await import("../src/adapters/harmony.ts");
+  const src = ["", "const ops: Ops = {", "  add: (a: number, b: number): number => {", "    return a + b;", "  },", "};"].join("\n");
+  const report = JSON.stringify({ files: [{ path: "/p/src/main/ets/B.ets",
+    functions: [{ count: 0, regions: [{ startLoc: { line: 3, col: 8 }, endLoc: { line: 5, col: 4 }, count: 0 }] }],
+    summary: { lines: { executedLineCount: [-1, -1, 1, 0, 0, -1] } } }] });
+  assert.deepEqual(parseHvigorCoverage(report, ["/p/src/main/ets"], () => src)["/p/src/main/ets/B.ets"], { 2: 1, 3: 0, 4: 0 });
+});
+
+test("review regressions: builder parameters with braces, const enum exports", () => {
+  const r = stripArkUI(["@Builder", "function overBuilder($$: { paramA1: string }) {", "  Row() {", "    Text($$.paramA1)", "  }", "}", "export const K = 1;"].join("\n"));
+  assert.match(r.text, /^function overBuilder\(\) \{\}\n{6}export const K = 1;$/);
+  assert.ok(exportedNames("export const enum Color { Red }")!.has("Color"));
+});
+
+test("review regressions: signalAll skips a PID whose start time no longer matches", { skip: process.platform === "win32" }, async (t) => {
+  const { signalAll } = await import("../src/util.ts");
+  const p = (await import("node:child_process")).spawn("sleep", ["30"], { stdio: "ignore" });
+  t.after(() => { try { process.kill(p.pid!, "SIGKILL"); } catch { /* gone */ } });
+  signalAll([{ pid: p.pid!, start: "Thu Jan  1 00:00:00 1970" }], true);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.doesNotThrow(() => process.kill(p.pid!, 0));
 });

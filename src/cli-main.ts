@@ -166,7 +166,7 @@ export async function main(argv: string[]): Promise<number> {
       // A project without (useful) tests is a valid 0% baseline only where unitgen measures coverage
       // itself (HarmonyOS Node shim). Elsewhere "nothing ran / nothing covered" usually means the
       // test task or coverage agent is misconfigured, so it stays an error.
-      const empty = runOk && failed === 0 && !hasCoverage && !!r.emptyCoverageOk;
+      const empty = runOk && failed === 0 && !hasCoverage && !!r.emptyCoverageOk && !r.coverageProblem;
       const measured = runOk && (failed === 0 || tolerated) && (hasCoverage || empty);
       const failingNames = r.tests.filter((t) => t.status === "failed").map((t) => t.name);
       const note = [r.infraError, r.note, !r.compiled ? "existing tests did not compile in this environment"

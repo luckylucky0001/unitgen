@@ -158,9 +158,19 @@ export function parseHvigorCoverage(json: string, sourceRoots: string[], source:
     const counts = f.summary?.lines?.executedLineCount ?? [];
     let text: string[] = [];
     try { text = source(file).split("\n"); } catch { /* keep raw counts */ }
+    const regionText = (r: HvigorRegion) => {
+      const ls = text.slice(r.startLoc.line - 1, r.endLoc.line);
+      if (!ls.length) return "";
+      ls[ls.length - 1] = ls[ls.length - 1].slice(0, Math.max(0, r.endLoc.col - 1));
+      ls[0] = ls[0].slice(Math.max(0, r.startLoc.col - 1));
+      return ls.join("\n");
+    };
+    // In a type position (after `:`), without a body, and returning a type: `(a: T) => U | V[]`.
+    // An object-literal arrow (`add: (a, b) => { ... }` or `=> a + b`) is real code.
     const phantom = (r: HvigorRegion) => {
       const before = (text[r.startLoc.line - 1] ?? "").slice(0, Math.max(0, r.startLoc.col - 1)).replace(/<[^<>]*>\s*$/, "").trimEnd();
-      return before.endsWith(":");
+      const body = regionText(r);
+      return before.endsWith(":") && !body.includes("{") && /=>\s*[A-Za-z_$][\w$.]*(\s*<[^>]*>)?(\[\])*(\s*\|\s*[A-Za-z_$][\w$.]*(\s*<[^>]*>)?(\[\])*)*\s*$/.test(body);
     };
     const realZero = new Set<number>();
     const phantomZero = new Set<number>();
@@ -603,8 +613,10 @@ export class HarmonyAdapter implements Adapter {
     // A syntax error inside production code (not the test file) is a shim limitation, not the test's fault.
     const prodSyntax = loadFail.map((t) => /SyntaxError: (\S+\.(?:ets|ts)):\d+/.exec(t.message ?? "")?.[1]).filter((f): f is string => !!f && !files.includes(f));
     if (prodSyntax.length) {
+      const what = `the Node shim cannot parse ${[...new Set(prodSyntax)].map((f) => relPath(f, this.root)).join(", ")} (ArkTS syntax TypeScript does not support). Verify with hvigor/DevEco or pick another target.`;
+      // For a mutant this simply means "does not compile"; verify reports it as an environment problem.
       return { ok: false, compiled: false, tests: [], logFile, seconds: (Date.now() - start) / 1000, excerpt: loadFail.map((t) => t.message).join("\n"),
-        infraError: `the Node shim cannot parse ${[...new Set(prodSyntax)].map((f) => relPath(f, this.root)).join(", ")} (ArkTS syntax TypeScript does not support). Verify with hvigor/DevEco or pick another target.` };
+        ...(req.testFiles ? { compileErrorOutsideTests: what } : { infraError: what }) };
     }
     const compiled = loadFail.length === 0 && lint.length === 0;
     let coverage;
@@ -756,12 +768,13 @@ export class HarmonyAdapter implements Adapter {
       // A full run executes List.test.ets; existing tests that do not compile are dropped (and reported)
       // so one stale test file does not hide every other test's result.
       const dropped: string[] = [];
+      let settled = false;
       for (let attempt = 0; attempt < 4; attempt++) {
         const r = await this.hvigorModuleRun(m, tc, files, req, `${req.label}-${m.name.replace(/\W+/g, "_")}${attempt ? `-retry${attempt}` : ""}`);
         combinedLog += r.log;
         if (r.infraError) {
           infraError = `${r.infraError}${r.infraError === "timeout" ? "" : " (hvigor environment problem; fix it, or set UNITGEN_HARMONY_MODE=shim to run pure-logic tests on Node)"}`;
-          excerpts.push(r.excerpt); ok = false; break;
+          excerpts.push(r.excerpt); ok = false; settled = true; break;
         }
         if (!r.compiled) {
           const own = new Set((req.testFiles ?? []).map((f) => path.resolve(f)));
@@ -784,6 +797,7 @@ export class HarmonyAdapter implements Adapter {
             notes.push(`module ${m.name} skipped: ${reason}; its files cannot be verified with hvigor (UNITGEN_HARMONY_MODE=shim can test their pure logic)`);
             unbuildable[m.name] = reason;
             skipped++;
+            settled = true;
             break;
           }
           compiled = false; ok = false;
@@ -800,7 +814,13 @@ export class HarmonyAdapter implements Adapter {
         if (r.coverageProblem) coverageProblem = r.coverageProblem;
         if (r.tests.some((t) => t.status === "failed")) ok = false;
         if (!r.tests.length && r.excerpt) excerpts.push(r.excerpt);
+        settled = true;
         break;
+      }
+      // Every attempt still found existing tests that do not compile: that is a failed run, not an empty one.
+      if (!settled && !infraError && compiled) {
+        compiled = false; ok = false;
+        excerpts.push(`existing tests in module ${m.name} still do not compile after excluding ${dropped.length}: ${dropped.map((f) => relPath(f, this.root)).join(", ")}`);
       }
       if (dropped.length) notes.push(`excluded existing tests that do not compile with the ArkTS compiler: ${dropped.map((f) => relPath(f, this.root)).join(", ")}`);
     }
@@ -1053,7 +1073,7 @@ function importedSources(testFile: string, text: string): { spec: string; file: 
 export function exportedNames(text: string): Set<string> | undefined {
   if (/^\s*export\s+\*\s+from/m.test(text)) return undefined;
   const out = new Set<string>();
-  for (const m of text.matchAll(/^\s*export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:class|interface|function\*?|const|let|var|enum|type|struct|namespace)\s+([A-Za-z_$][\w$]*)/gm)) out.add(m[1]);
+  for (const m of text.matchAll(/^\s*export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:const\s+enum|class|interface|function\*?|const|let|var|enum|type|struct|namespace)\s+([A-Za-z_$][\w$]*)/gm)) out.add(m[1]);
   for (const m of text.matchAll(/^\s*export\s*(?:type\s*)?\{([^}]*)\}/gm)) {
     for (const part of m[1].split(",")) {
       const name = part.trim().split(/\s+as\s+/).pop()?.trim();

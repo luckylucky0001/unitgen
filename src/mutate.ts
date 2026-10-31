@@ -126,7 +126,11 @@ function isMemberAssignment(t: string): boolean {
 /** Logging statements: mutating them (or the string concatenation inside) changes nothing a test should check. */
 // Includes project wrappers named like loggers (LogUtils.d, AppLogger.info, this.logger.warn, TLog.e) —
 // a capital "Log" suffix, so Catalog/Dialog are not matched.
-const LOG_CALL = /^(await\s+)?((this|self)\.)?(console|hilog|Log|Logger|logger|log|Timber|print|println|debugPrint|NSLog|os_log|(?:[A-Za-z_$][\w$]*?)?(Log|Logger|LogUtils?|Logging)|[a-z][\w$]*?(Logger|LogUtils?))\b\s*[.(]/;
+const LOG_CALL = new RegExp([
+  String.raw`^(await\s+)?((this|self)\.)?(console|hilog|Log|Logger|logger|log|Timber|print|println|debugPrint|NSLog|os_log)\b\s*[.(]`,
+  // Wrappers must call a logging method: `auditLog.record(x)` / `changeLog.push(x)` are domain code.
+  String.raw`^(await\s+)?((this|self)\.)?(?:[A-Za-z_$][\w$]*?)?(Log|Logger|LogUtils?|Logging)\s*\.\s*(v|d|i|w|e|f|debug|info|warn|warning|error|fatal|trace|verbose|log)\s*\(`,
+].join("|"));
 
 export function mutantsFor(text: string, lines: number[]): Mutant[] {
   const out = mutantsForLines(text, lines);
@@ -164,7 +168,7 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
       // Swift/Kotlin-style without parentheses: `if flag {`, `guard isReady else {`, `while hasMore {`.
       const bare = /\b(if|guard|while)\s+(!?)([A-Za-z_$][\w$.]*(?:\(\))?)\s*(\{|else\b)/.exec(masked);
       if (bare && !/^(let|var|case)$/.test(bare[3])) {
-        const at = bare.index + bare[0].indexOf(bare[2] + bare[3]);
+        const at = bare.index + bare[0].indexOf(bare[2] + bare[3], bare[1].length);
         const mutated = original.slice(0, at) + (bare[2] ? original.slice(at + 1) : `!${original.slice(at)}`);
         out.push({ line: ln, op: "negate condition", original, mutated });
       }
@@ -180,14 +184,21 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
       out.push({ line: ln, op: `${num[1]} -> ${Number(num[1]) + 1}`, original, mutated: original.slice(0, num.index) + String(Number(num[1]) + 1) + original.slice(num.index + num[1].length) });
     }
     // Returned string literals (messages, keys, formats): does a test look at the text at all?
-    const ret = /\breturn\s+("(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+')/.exec(original);
+    // `masked` has comments blanked already; find the comment in the string-masked original.
+    const comment = maskStrings(original).indexOf("//");
+    const ret = /\breturn\s+("(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+')/.exec(comment >= 0 ? original.slice(0, comment) : original);
     if (ret && !/\\\(|\$\{/.test(ret[1])) {
       const at = ret.index + ret[0].length - ret[1].length;
       const q = ret[1][0];
       out.push({ line: ln, op: "string -> empty", original, mutated: original.slice(0, at) + q + q + original.slice(at + ret[1].length) });
     }
     // Statement deletion: does any test notice the call (or the stored value) never happens?
-    if (isCallStatement(t)) {
+    // Not when the statement continues on the next line (`x = items` + `.filter(...)`) or this line
+    // continues the previous one: deleting part of an expression only yields a syntax error.
+    const next = src.slice(ln).find((l) => l.trim() && !/^\s*\/\//.test(l))?.trim() ?? "";
+    const prev = [...src.slice(0, ln - 1)].reverse().find((l) => l.trim() && !/^\s*\/\//.test(l))?.replace(/\/\/.*$/, "").trimEnd() ?? "";
+    const partOfLonger = /^(\?\.|\.|[+\-*/%]|&&|\|\||\?\?|\?|:|\)|\]|,)/.test(next) || /([=(\[,.+\-*/%&|?:]|=>)$/.test(prev);
+    if (partOfLonger) { /* no deletion mutant */ } else if (isCallStatement(t)) {
       out.push({ line: ln, op: "delete statement", original, mutated: original.replace(t, "/* unitgen: statement deleted */") });
     } else if (isMemberAssignment(t)) {
       out.push({ line: ln, op: "delete assignment", original, mutated: original.replace(t, "/* unitgen: assignment deleted */") });
@@ -268,7 +279,9 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   if (!lines.length) throw new Error(`${relTest} covers no line of ${relPath(absTarget, adapter.root)}`);
   const original = readFile(absTarget);
   const generated = mutantsFor(original, lines);
-  const key = (mu: Mutant) => `${mu.line}|${mu.op}|${mu.mutated}`;
+  // The original text is part of the key: deletions share their `mutated` placeholder, and a changed
+  // source line must not inherit an outcome measured on different code.
+  const key = (mu: Mutant) => `${mu.line}|${mu.op}|${mu.original}|${mu.mutated}`;
   // Mutants the user judged equivalent are not run: `12` = every mutant on line 12, `12.2` = one
   // mutant. Ids are resolved to a stable key (line, operator, mutated text) the first time they are
   // used, so a later unitgen version that numbers mutants differently cannot exclude the wrong one.

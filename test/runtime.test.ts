@@ -280,6 +280,45 @@ test("TRAE installer preserves references, is repeatable and refuses existing us
   assert.equal(fs.readFileSync(path.join(bin, "unitgen"), "utf8"), "user executable");
 });
 
+test("a changed source line does not inherit the mutation outcome of the old code", async (t) => {
+  const dir = temp(t), target = path.join(dir, "A.kt"), testFile = path.join(dir, "tests", "AUnitGenTest.kt");
+  fs.mkdirSync(path.dirname(testFile));
+  fs.writeFileSync(testFile, "assertEquals(1, a())\n");
+  fs.writeFileSync(target, "fun a(): Int {\n    save()\n    return 1\n}\n");
+  const state = new State(dir);
+  const relTest = path.relative(dir, testFile);
+  state.setTestCoverage(relTest, { [target]: { 2: 1 } });
+  state.data.accepted.push({ testFile: relTest, target: "A.kt", tests: 1, gainedLines: 1, gained: {}, attempts: 1, at: state.stamp() });
+  state.save();
+  const module = { name: ":app", dir, sourceRoots: [dir], testRoot: path.dirname(testFile), kind: "android" };
+  let mutantRuns = 0;
+  const adapter: Adapter = {
+    id: "fixture", platform: "android", root: dir, testFileSuffix: "UnitGenTest.kt",
+    doctor: () => ({ ok: true, lines: [] }), modules: () => [module], moduleFor: () => module,
+    sourceFiles: () => [target], classify: () => "logic", conventions: () => "", placement: () => ({ path: testFile, suiteName: "AUnitGenTest" }),
+    exampleTests: () => [], prepareTestFile: () => {}, countAssertions: () => 1,
+    async runTests(req) {
+      const deleted = fs.readFileSync(target, "utf8").includes("statement deleted");
+      if (!req.label.endsWith("-0-clean")) mutantRuns++;
+      return { ok: !deleted, compiled: true, tests: [{ name: "AUnitGenTest.a", status: deleted ? "failed" : "passed", message: deleted ? "AssertionError: expected" : undefined }],
+        logFile: "fixture", excerpt: "", seconds: 0.01 };
+    },
+  };
+  const first = await mutate(adapter, state, testFile, target, 5);
+  assert.equal(first.killed, 1);
+  assert.equal(mutantRuns, 1);
+  // Same line, same operator, different statement: must be evaluated again.
+  fs.writeFileSync(target, "fun a(): Int {\n    other()\n    return 1\n}\n");
+  mutantRuns = 0;
+  await mutate(adapter, state, testFile, target, 5);
+  assert.equal(mutantRuns, 1);
+  // Unchanged code and test: nothing new to run.
+  mutantRuns = 0;
+  const third = await mutate(adapter, state, testFile, target, 5);
+  assert.equal(mutantRuns, 0);
+  assert.equal(third.killed, 1);
+});
+
 test("generate feeds mutation failures back to the model and accepts strengthened assertions", async (t) => {
   const dir = temp(t), target = path.join(dir, "Answer.kt"), testFile = path.join(dir, "tests", "AnswerUnitGenTest.kt");
   fs.mkdirSync(path.dirname(testFile));

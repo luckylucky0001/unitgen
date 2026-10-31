@@ -74,10 +74,17 @@ export function processTree(roots: number[], table: ProcInfo[] = processTable())
   return [...seen.values()];
 }
 
-/** Signal each process, and the process group of each group leader among them. */
-export function signalAll(procs: { pid: number; pgid?: number }[], hard: boolean): void {
+/**
+ * Signal each process, and the process group of each group leader among them. Entries with a start
+ * time are signalled only while that exact process (PID *and* start time) still exists: a PID seen
+ * earlier may since have been reused by an unrelated process.
+ */
+export function signalAll(procs: { pid: number; pgid?: number; start?: string }[], hard: boolean): void {
   const sig = hard ? "SIGKILL" : "SIGTERM";
+  const table = procs.some((p) => p.start) ? processTable() : [];
+  const live = new Map(table.map((p) => [p.pid, p]));
   for (const p of procs) {
+    if (p.start && live.get(p.pid)?.start !== p.start) continue;
     for (const target of p.pgid === p.pid ? [-p.pid, p.pid] : [p.pid]) {
       try { process.kill(target, sig); } catch { /* already gone */ }
     }
