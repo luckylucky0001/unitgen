@@ -83,7 +83,9 @@ export function rankTargets(adapter: Adapter, cov: Coverage, opts: { modules?: M
       const kind = adapter.classify(file, text);
       if (opts.includeKinds ? !opts.includeKinds.includes(kind) : KIND_WEIGHT[kind] === 0) continue;
       const measured = haveCoverage && cov[file] !== undefined;
-      if (moduleMeasured && !measured && adapter.platform === "android") continue;
+      // JaCoCo and llvm-cov/xccov report every compiled file that has executable code: in a measured
+      // module, a missing file has none (constants, declarations). The HarmonyOS shim only sees loaded files.
+      if (moduleMeasured && !measured && (adapter.platform === "android" || adapter.platform === "ios")) continue;
       let exec: number[];
       let covered: Set<number>;
       if (measured) {
