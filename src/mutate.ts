@@ -93,7 +93,75 @@ function maskStrings(line: string): string {
 const KEYWORD_START = /^(return|val|var|let|const|if|else|for|while|do|throw|try|catch|finally|case|default|guard|defer|import|package|func|fun|class|struct|enum|interface|object|switch|when|break|continue|super|this\s*\(|init|deinit|subscript|get|set|willSet|didSet|extension|protocol|typealias|associatedtype|where|operator|precedencegroup|actor|mutating|nonmutating|convenience|required|lazy|weak|unowned|fileprivate|open|final|indirect|override|private|public|internal|protected|static|export|function|async|await|yield|@)\b|^@/;
 
 /** A declaration line (Swift/Kotlin/TS): its operators are part of a signature, not code (`static func + (`). */
-const DECLARATION = /^\s*((public|private|internal|fileprivate|open|static|class|final|override|mutating|nonmutating|convenience|required|prefix|postfix|infix|@\w+(\([^)]*\))?)\s+)*(func|fun|subscript|init|deinit|operator|precedencegroup)\b/;
+const DECLARATION = /^\s*((public|private|internal|fileprivate|open|static|class|final|override|mutating|nonmutating|convenience|required|prefix|postfix|infix|@\w+(\([^)]*\))?)\s+)*(func|fun|subscript|init|deinit|operator|precedencegroup|constructor)\b/;
+
+/** A TS/ArkTS method header with a return type (`toString(): string {`): never a trailing-closure call. */
+const TS_METHOD = /^\s*(async\s+)?[A-Za-z_$][\w$]*\s*(<[^>]*>)?\s*\([^)]*\)\s*:\s*[^=;]+\{\s*$/;
+
+/** Is line `ln` (1-based) inside a constructor / init body? */
+function inConstructor(src: string[], ln: number): boolean {
+  let depth = 0;
+  for (let j = ln - 2; j >= 0 && j >= ln - 400; j--) {
+    const l = maskStrings(src[j].replace(/\/\/.*$/, ""));
+    for (let i = l.length - 1; i >= 0; i--) {
+      if (l[i] === "}") depth++;
+      else if (l[i] === "{" && depth-- === 0) {
+        depth = 0;
+        if (/\b(constructor\s*\(|init\s*[({?!]|init\s*$)/.test(l)) return true;
+        if (DECLARATION.test(l) || TS_METHOD.test(l) || /^\s*(export\s+)?(class|struct|object|interface|enum|extension)\b/.test(l)) return false;
+      }
+    }
+  }
+  return false;
+}
+
+/** Text of the class/struct declaration around line `ln` (1-based), or "" when there is none. */
+function enclosingType(src: string[], ln: number): string {
+  const head = /^\s*((export|default|public|private|internal|fileprivate|open|final|abstract|data|sealed)\s+)*(class|struct|actor)\b/;
+  let start = -1;
+  for (let j = ln - 2; j >= 0; j--) if (head.test(src[j])) { start = j; break; }
+  if (start < 0) return "";
+  let depth = 0, opened = false;
+  for (let j = start; j < src.length; j++) {
+    for (const c of maskStrings(src[j].replace(/\/\/.*$/, ""))) {
+      if (c === "{") { depth++; opened = true; }
+      if (c === "}") depth--;
+    }
+    if (opened && depth <= 0) return j + 1 >= ln ? src.slice(start, j + 1).join("\n") : "";
+  }
+  return src.slice(start).join("\n");
+}
+
+/**
+ * `name` is a stored field without a default (`id: number;`, `let id: Int`, `val id: Int`): the
+ * compiler requires every constructor to assign it, so deleting that assignment cannot compile.
+ */
+function fieldWithoutDefault(text: string, name: string): boolean {
+  const n = name.replace(/\$/g, "\\$");
+  return new RegExp(`^\\s*((public|private|protected|internal|fileprivate|readonly|final|override|let|var|val)\\s+)*${n}\\s*:\\s*[^=?{}\\n]+?[^?]\\s*;?\\s*$`, "m").test(text)
+    && !new RegExp(`^\\s*.*\\b(lateinit|optional)\\b.*\\b${n}\\s*:`, "m").test(text);
+}
+
+/**
+ * `x == null || x.y`, `x != null && x.y`, and `!x || x.y` / `x && x.y` for an `x` declared optional or
+ * nullable in this file: with the other operator the compiler sees a dereference of a missing value.
+ * (For a plain `string`, `s && s.length` -> `||` still compiles, so truthiness alone is not enough.)
+ */
+function nullGuard(masked: string, op: "&&" | "||", text: string): boolean {
+  const i = masked.indexOf(` ${op} `);
+  if (i < 0) return false;
+  const left = masked.slice(0, i), right = masked.slice(i + op.length + 2);
+  const g = op === "||"
+    ? /(?:!\s*([\w$.]+)|([\w$.]+)\s*===?\s*(?:null|undefined|nil))\s*\)*\s*$/.exec(left)
+    : /(?:(?<![!=<>]\s*)\b([\w$.]+)|([\w$.]+)\s*!==?\s*(?:null|undefined|nil))\s*$/.exec(left);
+  const name = g?.[2] ?? g?.[1];
+  if (!name) return false;
+  if (!g?.[2]) {
+    const n = name.split(".").pop()!.replace(/\$/g, "\\$");
+    if (!new RegExp(`\\b${n}\\s*\\?\\s*:|\\b${n}\\s*:[^=;,)\\n]*\\|\\s*(null|undefined)\\b|\\b${n}\\s*:\\s*(null|undefined)\\s*\\|`).test(text)) return false;
+  }
+  return new RegExp(`^\\(*\\s*${name.replace(/[.$]/g, "\\$&")}(\\?|!)?\\.`).test(right);
+}
 
 /** Parentheses and braces balance (strings masked) and never go negative. */
 function balanced(t: string): boolean {
@@ -175,6 +243,7 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
     for (const [op, re, rep] of OPERATORS) {
       const m = re.exec(masked);
       if (!m) continue;
+      if ((op === "|| -> &&" && nullGuard(masked, "||", text)) || (op === "&& -> ||" && nullGuard(masked, "&&", text))) continue;
       const mutated = original.slice(0, m.index) + rep + original.slice(m.index + m[0].length);
       out.push({ line: ln, op, original, mutated });
     }
@@ -227,8 +296,10 @@ function mutantsForLines(text: string, lines: number[]): Mutant[] {
     if (partOfLonger) { /* no deletion mutant */ } else if (isCallStatement(t)) {
       out.push({ line: ln, op: "delete statement", original, mutated: original.replace(t, "/* unitgen: statement deleted */") });
     } else if (isMemberAssignment(t)) {
+      const field = /^(?:this|self)\.([A-Za-z_$][\w$]*)\s*=/.exec(t)?.[1];
+      if (field && inConstructor(src, ln) && fieldWithoutDefault(enclosingType(src, ln), field)) continue;
       out.push({ line: ln, op: "delete assignment", original, mutated: original.replace(t, "/* unitgen: assignment deleted */") });
-    } else if (!KEYWORD_START.test(t.replace(/^(try|await)\s+/, "")) && (/^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\($/.test(t) || (CALL_START.test(t) && /\{\s*(\w+(\s*,\s*\w+)*\s+in)?\s*$/.test(t) && !/[^=!<>]=[^=]/.test(maskStrings(t).split("{")[0])))) {
+    } else if (!DECLARATION.test(original) && !TS_METHOD.test(original) && !KEYWORD_START.test(t.replace(/^(try|await)\s+/, "")) && (/^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\($/.test(t) || (CALL_START.test(t) && /\{\s*(\w+(\s*,\s*\w+)*\s+in)?\s*$/.test(t) && !/[^=!<>]=[^=]/.test(maskStrings(t).split("{")[0])))) {
       // Multi-line call: `dao.insert(` ... `)`, or a trailing closure `builder.add(x) {` ... `}`:
       // delete the whole statement if it closes cleanly.
       let p = 0, b = 0;
@@ -312,7 +383,11 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   // mutant. Ids are resolved to a stable key (line, operator, mutated text) the first time they are
   // used, so a later unitgen version that numbers mutants differently cannot exclude the wrong one.
   const eqAll = (state.data.equivalent ??= {});
+  // Marks recorded before the key included the original text (`key:line|op|mutated`): upgrade in place.
+  const legacy = (mu: Mutant) => `key:${mu.line}|${mu.op}|${mu.mutated}`;
   const specs = (eqAll[relTest] ?? []).map(String).map((x) => {
+    const old = x.startsWith("key:") && !generated.some((g) => `key:${key(g)}` === x) ? generated.find((g) => legacy(g) === x) : undefined;
+    if (old) return `key:${key(old)}`;
     if (!/^\d+\.\d+$/.test(x)) return x;
     const mu = generated.find((g) => g.id === x);
     if (!mu) { log(`warning: --equivalent ${x}: no such mutant on the covered lines (ignored)`); return x; }

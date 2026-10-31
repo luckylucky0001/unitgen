@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { acquireProjectLock } from "../src/lock.ts";
 import { processesMatching, runAsync, RunCancelled, signalAll } from "../src/util.ts";
-import { mutate, mutationGate, type MutationReport } from "../src/mutate.ts";
+import { mutantsFor, mutate, mutationGate, type MutationReport } from "../src/mutate.ts";
 import { State } from "../src/state.ts";
 import type { Adapter } from "../src/adapters/types.ts";
 import { generate, recoverGeneration } from "../src/generate.ts";
@@ -352,6 +352,36 @@ test("a hanging mutant counts as a crash-only kill; outcomes measured with anoth
   (adapter as { runnerName?: string }).runnerName = "hvigor";
   await mutate(adapter, state, testFile, target, 5);
   assert.equal(mutantRuns, 1);
+});
+
+test("equivalence marks recorded with the older key format still exclude their mutant", async (t) => {
+  const dir = temp(t), target = path.join(dir, "A.kt"), testFile = path.join(dir, "tests", "AUnitGenTest.kt");
+  fs.mkdirSync(path.dirname(testFile));
+  fs.writeFileSync(testFile, "assertEquals(1, a())\n");
+  fs.writeFileSync(target, "fun a(): Int {\n    save()\n    return 1\n}\n");
+  const state = new State(dir);
+  const relTest = path.relative(dir, testFile);
+  state.setTestCoverage(relTest, { [target]: { 2: 1 } });
+  state.data.accepted.push({ testFile: relTest, target: "A.kt", tests: 1, gainedLines: 1, gained: {}, attempts: 1, at: state.stamp() });
+  const [mu] = mutantsFor(fs.readFileSync(target, "utf8"), [2]);
+  state.data.equivalent = { [relTest]: [`key:${mu.line}|${mu.op}|${mu.mutated}`] };
+  state.save();
+  const module = { name: ":app", dir, sourceRoots: [dir], testRoot: path.dirname(testFile), kind: "android" };
+  let mutantRuns = 0;
+  const adapter: Adapter = {
+    id: "fixture", platform: "android", root: dir, testFileSuffix: "UnitGenTest.kt",
+    doctor: () => ({ ok: true, lines: [] }), modules: () => [module], moduleFor: () => module,
+    sourceFiles: () => [target], classify: () => "logic", conventions: () => "", placement: () => ({ path: testFile, suiteName: "AUnitGenTest" }),
+    exampleTests: () => [], prepareTestFile: () => {}, countAssertions: () => 1,
+    async runTests(req) {
+      if (!req.label.endsWith("-0-clean")) mutantRuns++;
+      return { ok: true, compiled: true, tests: [{ name: "AUnitGenTest.a", status: "passed" }], logFile: "fixture", excerpt: "", seconds: 0.01 };
+    },
+  };
+  const r = await mutate(adapter, state, testFile, target, 5);
+  assert.equal(mutantRuns, 0);
+  assert.equal(r.excluded, 1);
+  assert.deepEqual(new State(dir).data.equivalent?.[relTest], [`key:${mu.line}|${mu.op}|${mu.original}|${mu.mutated}`]);
 });
 
 test("processesMatching finds a process by command line with a start time signalAll accepts", { skip: process.platform === "win32" }, async (t) => {

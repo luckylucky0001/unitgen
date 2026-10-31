@@ -247,3 +247,63 @@ test("List.test.ets loses imports of generated tests deleted by hand, keeps ever
     "",
   ].join("\n"));
 });
+
+test("no mutants that cannot compile: required-field assignments in constructors, constructors, null guards", () => {
+  const ts = [
+    "export interface ItemInit {",
+    "  count: number;",
+    "}",
+    "export class Item {",
+    "  id: number;",
+    "  pic?: string;",
+    "  count: number = 0;",
+    "  constructor(init: ItemInit) {",
+    "    this.id = init.id;",
+    "    this.pic = init.pic;",
+    "    this.count = init.count;",
+    "  }",
+    "  reset(): void {",
+    "    this.id = 0;",
+    "  }",
+    "  toString(): string {",
+    "    return `${this.id}`;",
+    "  }",
+    "}",
+    "export function size(xs?: number[]): number {",
+    "  if (!xs || xs.length === 0) {",
+    "    return 0;",
+    "  }",
+    "  return xs && xs.length > 2 ? 1 : 2;",
+    "}",
+  ].join("\n");
+  const ops = mutantsFor(ts, ts.split("\n").map((_, i) => i + 1)).map((m) => `${m.line}:${m.op}`);
+  assert.ok(!ops.includes("9:delete assignment"), "required field assigned in the constructor");
+  assert.ok(ops.includes("10:delete assignment"), "optional field");
+  assert.ok(ops.includes("11:delete assignment"), "field with a default");
+  assert.ok(ops.includes("14:delete assignment"), "outside the constructor");
+  assert.ok(!ops.some((o) => /^(8|16):delete statement/.test(o)), "constructor / method declarations are not statements");
+  assert.ok(!ops.includes("21:|| -> &&") && ops.includes("21:=== -> !=="));
+  assert.ok(!ops.includes("24:&& -> ||"));
+  const plain = "export function nonEmpty(s: string): boolean {\n  return s && s.length > 0 ? true : false;\n}\nexport function isNull(v: Item | null): boolean {\n  return v === null || v.id === 0;\n}\n";
+  const pops = mutantsFor(plain, [2, 5]).map((m) => `${m.line}:${m.op}`);
+  assert.ok(pops.includes("2:&& -> ||"), "a plain string's truthiness guard still compiles when flipped");
+  assert.ok(!pops.includes("5:|| -> &&"), "an explicit null comparison does not");
+  const swift = [
+    "struct Point {",
+    "  let x: Int",
+    "  var label: String?",
+    "  init(x: Int, label: String?) {",
+    "    self.x = x",
+    "    self.label = label",
+    "  }",
+    "  func build(_ b: Builder) {",
+    "    b.add(x) {",
+    "      print(1)",
+    "    }",
+    "  }",
+    "}",
+  ].join("\n");
+  const sops = mutantsFor(swift, swift.split("\n").map((_, i) => i + 1)).map((m) => `${m.line}:${m.op}`);
+  assert.ok(!sops.includes("5:delete assignment") && sops.includes("6:delete assignment"));
+  assert.ok(sops.includes("9:delete statement"), "Swift trailing-closure call is still deleted");
+});
