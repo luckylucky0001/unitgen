@@ -559,7 +559,7 @@ export class HarmonyAdapter implements Adapter {
     });
     // Coverage comes straight from V8 (NODE_V8_COVERAGE) on the transpiled JS under <work>/gen and is
     // mapped back to .ets lines here; see v8LineCoverage for why c8's line rule is not used.
-    const args = ["node", path.join(work, "runner.cjs"), tsDir, results, exists(ohm) ? ohm : "-", ...files];
+    const args = [process.execPath, path.join(work, "runner.cjs"), tsDir, results, exists(ohm) ? ohm : "-", ...files];
     const r = await runAsync(args, { cwd: work, timeoutSec: req.timeoutSec ?? 900, logFile, env: {
       UNITGEN_LOCAL_DEPS: JSON.stringify(this.localDeps()), UNITGEN_ROOT: this.root,
       ...(req.coverage ? { NODE_V8_COVERAGE: path.join(work, "tmp") } : {}),

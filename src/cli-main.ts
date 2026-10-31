@@ -38,12 +38,17 @@ Common options
       --module <name>        Restrict to one module/target
       --json                 Machine-readable output
 
+baseline:  --allow-failing    keep a baseline although some existing tests fail (they are listed)
 targets:   --limit <n> (20)  --all-kinds
 brief:     --out <file>      --feedback <file>
 verify:    --target <source> --reruns <n> (1)  --allow-no-gain  --quarantine
-mutate:    --target <source> --max <n> (15) --min-score <percent> (80) --equivalent <line,...>
+mutate:    --target <source> --max <n> (15) --min-score <percent> (80)
+           --equivalent <id|line>[,...]  exclude mutants judged equivalent (12.2 = one mutant, 12 = a line); repeatable
 generate:  --llm anthropic|claude|cmd:<sh> --model <id> --limit <n> (5) --attempts <n> (3) [files...]
            --max <n> (15 mutants/attempt) --min-score <percent> (80)
+
+Environment: UNITGEN_HARMONY_MODE=hvigor|shim (HarmonyOS runner), DEVECO_STUDIO_HOME / DEVECO_SDK_HOME,
+             UNITGEN_QUIET=1 (no build progress), UNITGEN_VERBOSE=1 (print commands), UNITGEN_ENV=<env.sh>.
 
 Exit codes: 0 passed (or mutation not applicable), 1 command/environment error,
             2 quality gate failed, 130 cancelled. Build progress goes to stderr.
@@ -85,7 +90,10 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (o.help) {
     // Per-command help: the command's line plus its option line.
-    const own = HELP.split("\n").filter((l) => new RegExp(`^\\s+${cmd}\\b|^${cmd}:`).test(l));
+    // The command's line, its option line and that option line's indented continuation lines.
+    const all = HELP.split("\n");
+    const own = all.filter((l, i) => new RegExp(`^\\s+${cmd}\\b|^${cmd}:`).test(l)
+      || (/^\s{11}\S/.test(l) && all.slice(0, i).reverse().find((x) => !/^\s{11}\S/.test(x))?.startsWith(`${cmd}:`)));
     process.stdout.write(`${own.length ? own.join("\n") : `unknown command: ${cmd}`}\n\nCommon: -C <dir>  --adapter <id>  --module <name>  --json\n`);
     return 0;
   }
