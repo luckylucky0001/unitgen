@@ -381,13 +381,15 @@ export class GradleAdapter implements Adapter {
 
   /** Source file of a class in a JaCoCo report: the module that ran first, then any other module (the report covers them all). */
   private resolveSource(m: Module, pkgPath: string): string | undefined {
+    // JaCoCo names files `calc/Calc.java`; on Windows the source paths use `\`.
+    const rel = pkgPath.split("/").join(path.sep);
     for (const mod of [m, ...this.modules().filter((x) => x.name !== m.name)]) {
       let files = this.resolveCache.get(mod.name);
       if (!files) {
         files = this.sourceFiles(mod);
         this.resolveCache.set(mod.name, files);
       }
-      const hit = files.find((f) => f.endsWith(path.sep + pkgPath));
+      const hit = files.find((f) => f.endsWith(path.sep + rel));
       if (hit) return hit;
       // Kotlin files whose package does not match the directory layout.
       const base = path.basename(pkgPath);

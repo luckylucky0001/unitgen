@@ -273,7 +273,8 @@ export function canonical(p: string): string {
   const tail: string[] = [];
   let cur = abs;
   for (;;) {
-    try { return path.join(fs.realpathSync(cur), ...tail.reverse()); } catch { /* does not exist (yet) */ }
+    // Windows: the native call also expands 8.3 short names (C:\\Users\\RUNNER~1) as tools report them.
+    try { return path.join(process.platform === "win32" ? fs.realpathSync.native(cur) : fs.realpathSync(cur), ...tail.reverse()); } catch { /* does not exist (yet) */ }
     const up = path.dirname(cur);
     if (up === cur) return abs;
     tail.push(path.basename(cur));
