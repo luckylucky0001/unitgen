@@ -443,3 +443,13 @@ test("commands run in a subdirectory find the project root; a HarmonyOS module d
   fs.mkdirSync(none);
   assert.equal(findProjectRoot(none), none);
 });
+
+test("assignments to locals declared without a value are not deleted", () => {
+  const swift = ["func load() -> Font {", "  let font: Font?", "  if a {", "    font = load(path)", "  } else {", "    font = nil", "  }", "  var count: Int?", "  count = compute()", "  return font!", "}"].join("\n");
+  const ops = mutantsFor(swift, [4, 6, 9]).map((m) => `${m.line}:${m.op}`);
+  assert.ok(!ops.includes("4:delete assignment") && !ops.includes("6:delete assignment"));
+  assert.ok(ops.includes("9:delete assignment"), "an optional var starts as nil");
+  const ts = ["let n: number;", "n = parse(s);", "let m: number | undefined;", "m = parse(s);"].join("\n");
+  const tops = mutantsFor(ts, [2, 4]).map((m) => `${m.line}:${m.op}`);
+  assert.deepEqual(tops.filter((o) => o.endsWith("delete assignment")), ["4:delete assignment"]);
+});

@@ -184,6 +184,24 @@ test("mutation quality gate rejects survivors below threshold and infrastructure
   assert.equal(mutationGate({ ...report, score: 1, results: [{ line: 1, op: "", original: "", mutated: "", outcome: "error" }] }).status, "FAILED");
   assert.equal(mutationGate({ ...report, candidates: 0 }).status, "NOT_APPLICABLE");
   assert.equal(mutationGate({ ...report, killed: 0, survived: 0, score: 0, results: [{ line: 1, op: "", original: "", mutated: "", outcome: "equivalent" }] }).status, "NOT_APPLICABLE");
+  // Every candidate failed to compile (the rest equivalent): nothing to score, not a failure.
+  const none = { ...report, candidates: 1, killed: 0, survived: 0, score: 0, triedTotal: 1, results: [{ line: 1, op: "", original: "", mutated: "", outcome: "stillborn" }] } as MutationReport;
+  assert.equal(mutationGate(none).status, "NOT_APPLICABLE");
+  assert.equal(mutationGate({ ...none, candidates: 3 }).status, "FAILED");
+  // A pass on a sample says so.
+  assert.match(mutationGate({ ...report, killed: 4, survived: 1, score: 0.8, triedTotal: 5, candidates: 9 }).reason ?? "", /on 5 of 9 candidates/);
+});
+
+test("coverage stored in .unitgen survives moving the project directory", (t) => {
+  const parent = temp(t), a = path.join(parent, "a"), b = path.join(parent, "b");
+  fs.mkdirSync(a);
+  const st = new State(a);
+  st.baselineCoverage = { [path.join(a, "Sources", "X.swift")]: { 3: 1 } };
+  st.setTestCoverage("Tests/XUnitGenTests.swift", { [path.join(a, "Sources", "X.swift")]: { 4: 1 } });
+  fs.renameSync(a, b);
+  const moved = new State(b);
+  assert.deepEqual(Object.keys(moved.baselineCoverage), [path.join(b, "Sources", "X.swift")]);
+  assert.deepEqual(moved.knownCoverage()[path.join(b, "Sources", "X.swift")], { 3: 1, 4: 1 });
 });
 
 test("mutation restores source and journal when the clean run throws", async (t) => {

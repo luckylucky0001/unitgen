@@ -1,4 +1,5 @@
 // Line-coverage model plus parsers for every report format the adapters produce.
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { canonical } from "./util.ts";
 
@@ -113,6 +114,16 @@ export function parseLlvmCovJson(json: any, keep: (file: string) => boolean = ()
           lines[line] = count;
         }
         if (starts.length) wrapped = starts[starts.length - 1];
+      }
+      // A region spans blank lines, comments and #if/#else/#endif: llvm-cov reports them as never
+      // executed. They hold no code.
+      if (Object.values(lines).some((h) => h === 0)) {
+        let src: string[] = [];
+        try { src = fs.readFileSync(file, "utf8").split("\n"); } catch { /* not readable */ }
+        for (const ln of Object.keys(lines).map(Number)) {
+          const t = src[ln - 1]?.trim();
+          if (lines[ln] === 0 && t !== undefined && (t === "" || t.startsWith("//") || /^#(if|elseif|else|endif)\b/.test(t))) delete lines[ln];
+        }
       }
       out[file] = lines;
     }

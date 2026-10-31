@@ -66,22 +66,36 @@ export class State {
     writeJson(this.file("state.json"), this.data);
   }
 
+  // Coverage files store source paths relative to the project root, so a project directory that is
+  // moved, renamed or copied keeps its results (absolute keys from older versions still load).
+  private toDisk(c: Coverage): Coverage {
+    return Object.fromEntries(Object.entries(c).map(([f, v]) => {
+      const rel = path.relative(this.root, f);
+      return [rel.startsWith("..") || path.isAbsolute(rel) ? f : rel.split(path.sep).join("/"), v];
+    }));
+  }
+
+  private fromDisk(c: Coverage): Coverage {
+    return Object.fromEntries(Object.entries(c).map(([f, v]) => [path.isAbsolute(f) ? f : path.join(this.root, f), v]));
+  }
+
   get baselineCoverage(): Coverage {
-    return readJson<Coverage>(this.file("baseline.cov.json"), {});
+    return this.fromDisk(readJson<Coverage>(this.file("baseline.cov.json"), {}));
   }
 
   set baselineCoverage(c: Coverage) {
-    writeJson(this.file("baseline.cov.json"), c);
+    writeJson(this.file("baseline.cov.json"), this.toDisk(c));
   }
 
   /** Covered lines contributed by each accepted test file (key: test file relative to root). */
   get perTestCoverage(): Record<string, Coverage> {
-    return readJson<Record<string, Coverage>>(this.file("accepted.cov.json"), {});
+    const all = readJson<Record<string, Coverage>>(this.file("accepted.cov.json"), {});
+    return Object.fromEntries(Object.entries(all).map(([t, c]) => [t, this.fromDisk(c)]));
   }
 
   setTestCoverage(testFile: string, c: Coverage | undefined): void {
-    const all = this.perTestCoverage;
-    if (c) all[testFile] = c;
+    const all = readJson<Record<string, Coverage>>(this.file("accepted.cov.json"), {});
+    if (c) all[testFile] = this.toDisk(c);
     else delete all[testFile];
     writeJson(this.file("accepted.cov.json"), all);
   }

@@ -203,9 +203,9 @@ export class SwiftPMAdapter implements Adapter {
       `Platform: iOS/Swift package, target \`${m.name}\`. Tests compile into the dedicated test target \`${m.meta?.testTarget}\` (directory ${relPath(m.testRoot, this.root)}).`,
       fw,
       `Start the file with \`import ${legacy ? "XCTest" : "Testing"}\`, \`import Foundation\` if needed, and \`@testable import ${m.name}\` (internal symbols are visible, private/fileprivate are not).`,
-      "Tests run on macOS via `swift test`: do not use UIKit/AppKit, the network, the real file system outside a temporary directory, or timers.",
+      "Tests run on macOS via `swift test`: no UIKit, network, real file system outside a temporary directory, or timers. AppKit types are fine where the code under test returns them (NSColor, NSFont).",
       legacy ? "For tables of inputs loop over an array of cases inside one test method; pass the case to XCTAssert's message." : "Use parameterized tests (`@Test(arguments: [...])`) for tables of inputs.",
-      "Floating point: compare with a tolerance, e.g. `#expect(abs(x - 0.3) < 1e-9)`.",
+      legacy ? "Floating point: `XCTAssertEqual(x, 0.3, accuracy: 1e-9)`." : "Floating point: compare with a tolerance, e.g. `#expect(abs(x - 0.3) < 1e-9)`.",
       "Name clashes: Foundation (macOS 15+) defines types such as `Expression`, `Predicate`, `Measurement`. Only `import Foundation` when needed; if a type annotation is ambiguous, avoid the annotation or qualify it.",
       t.xctest ? "" : "The package's own XCTest suites cannot run here, but they are the best oracle: grep Tests/ for the API you test and reuse their inputs and expected values (port them to Swift Testing).",
       "Give closures in dictionary/array literals explicit types (`let f: SymbolEvaluator = { args in ... }`) — the type checker cannot infer multi-statement closures there.",
@@ -271,12 +271,11 @@ export class SwiftPMAdapter implements Adapter {
     for (const d of dirs) {
       for (const f of walkFiles(d, [".swift"])) {
         if (keepSet.has(f) || !f.endsWith(`${SUFFIX}.swift`)) continue;
-        const to = path.join(this.stateDir, "swift-parked", relPath(f, this.root));
-        fs.mkdirSync(path.dirname(to), { recursive: true });
-        moved.push({ from: f, to });
+        moved.push({ from: f, to: path.join(this.stateDir, "swift-parked", relPath(f, this.root)) });
       }
     }
     if (!moved.length) return;
+    for (const m of moved) fs.mkdirSync(path.dirname(m.to), { recursive: true });
     writeFile(this.parkJournal(), JSON.stringify(moved));
     for (const m of moved) fs.renameSync(m.from, m.to);
   }
@@ -286,6 +285,9 @@ export class SwiftPMAdapter implements Adapter {
     const moved = JSON.parse(readFile(this.parkJournal())) as { from: string; to: string }[];
     for (const m of moved) if (exists(m.to)) fs.renameSync(m.to, m.from);
     fs.unlinkSync(this.parkJournal());
+    // Only empty directories are left; never delete a file that could not be moved back.
+    const parked = path.join(this.stateDir, "swift-parked");
+    if (exists(parked) && !walkFiles(parked, [""], new Set()).length) fs.rmSync(parked, { recursive: true, force: true });
   }
 
   /** Temporarily rewrite Package.swift so the run works on this toolchain. Returns a restore fn. */

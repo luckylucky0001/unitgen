@@ -51,7 +51,7 @@ export function buildReport(adapter: Adapter, state: State): string {
       `|---|---|---:|---:|---:|---:|---|${mixed ? "---|" : ""}`);
     for (const x of d.accepted) {
       const m = x.mutation;
-      const ms = m?.none ? "n/a (nothing mutable)" : m
+      const ms = m?.none ? "n/a (nothing mutable)" : m && m.killed + m.survived === 0 ? "n/a (no mutant compiled)" : m
         ? `${m.first !== undefined && m.first !== m.score ? `${Math.round(m.first * 100)}% → ` : ""}${Math.round(m.score * 100)}%${m.stale ? " (stale: test changed since)" : ""}`
         : "—";
       const detail = m && !m.none ? `${m.killed} / ${m.survived} (${m.crashes ?? 0}, ${m.stillborn}, ${m.equivalent ?? 0})${m.candidates ? `; evaluated ${m.evaluated}/${m.candidates}` : ""}` : "";

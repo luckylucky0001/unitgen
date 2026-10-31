@@ -102,7 +102,11 @@ export function rankTargets(adapter: Adapter, cov: Coverage, opts: { modules?: M
       if (uncoveredLines.length < minUncovered) continue;
       const branches = countBranches(text);
       const density = Math.min(2, 1 + branches / Math.max(1, exec.length));
-      const score = uncoveredLines.length * KIND_WEIGHT[kind] * density;
+      // Measured tools count every line of a data literal (`red: 0.66,` in a color table) as code:
+      // those weigh a fifth of a line of logic, so constant tables do not outrank real logic.
+      const logic = measured ? new Set(estimateExecutable(adapter.estimateText ? adapter.estimateText(text) : text)) : undefined;
+      const weight = logic ? uncoveredLines.reduce((n, l) => n + (logic.has(l) ? 1 : 0.2), 0) : uncoveredLines.length;
+      const score = weight * KIND_WEIGHT[kind] * density;
       out.push({
         file, rel: relPath(file, adapter.root), module: m.name, kind,
         executable: exec.length, covered: covered.size, uncovered: uncoveredLines.length, uncoveredLines,

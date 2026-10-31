@@ -57,7 +57,11 @@ export function mutationGate(r: MutationReport, minimum = 80): { status: "PASSED
   if (errors.length) {
     return { status: "FAILED", minimum, reason: `${errors.length} mutant run(s) produced no test results (${errors.map((e) => `line ${e.line}`).join(", ")}): the test run crashed or exited early; see the mutant logs. Fix the cause (e.g. a test awaiting a promise that never settles) and re-run` };
   }
-  if (r.killed + r.survived === 0) return { status: "FAILED", minimum, reason: "no mutant was evaluated (all were discarded or excluded)" };
+  if (r.killed + r.survived === 0) {
+    // Every candidate failed to compile or is marked equivalent: there is nothing to score.
+    if ((r.triedTotal ?? r.results.length) >= r.candidates) return { status: "NOT_APPLICABLE", minimum, reason: "no candidate mutant compiles (the rest are marked equivalent): nothing to score" };
+    return { status: "FAILED", minimum, reason: "no mutant was evaluated yet: re-run mutate" };
+  }
   if (r.score * 100 < minimum) return { status: "FAILED", minimum, reason: `score ${(r.score * 100).toFixed(0)}% is below ${minimum}%` };
   // A pass on a sample is a pass, but say so: the rest may still hold survivors.
   const tried = r.triedTotal ?? r.results.length;
@@ -117,6 +121,37 @@ function inConstructor(src: string[], ln: number): boolean {
     }
   }
   return false;
+}
+
+/**
+ * A local declared without a value (`let font: Font?` / `let x: number;` then `x = ...`): deleting the
+ * assignment uses it before it is set, which Swift and strict TS reject. A `var` whose type admits
+ * nil/undefined starts with that value, so deleting is fine there.
+ */
+function declaredWithoutValue(text: string, name: string): boolean {
+  const n = name.replace(/\$/g, "\\$");
+  const m = new RegExp(`^\\s*(let|var)\\s+${n}\\s*(?::\\s*([^=\\n;]*?))?\\s*;?\\s*$`, "m").exec(text);
+  if (!m) return false;
+  // TS `let x: T | undefined;` may stay unassigned; a Swift `let x: T?` may not.
+  if (m[1] === "let") return !(m[2] && /\b(undefined|null)\b/.test(m[2]));
+  return !(m[2] && /\?\s*$|\b(undefined|null)\b|^Optional</.test(m[2]));
+}
+
+/** Lines of the function body around line `ln` (1-based) up to that line; top-level code: the lines above it. */
+function enclosingFunction(src: string[], ln: number): string {
+  let depth = 0;
+  for (let j = ln - 2; j >= 0; j--) {
+    const l = maskStrings(src[j].replace(/\/\/.*$/, ""));
+    for (let i = l.length - 1; i >= 0; i--) {
+      if (l[i] === "}") depth++;
+      else if (l[i] === "{" && depth-- === 0) {
+        depth = 0;
+        if (DECLARATION.test(l) || TS_METHOD.test(l) || /\bfunction\b|=>\s*\{\s*$|\b(get|set|willSet|didSet)\s*\{/.test(l)) return src.slice(j + 1, ln - 1).join("\n");
+        if (/^\s*((export|public|private|internal|fileprivate|open|final|abstract|data)\s+)*(class|struct|enum|extension|actor|object|interface)\b/.test(l)) return "";
+      }
+    }
+  }
+  return src.slice(0, ln - 1).join("\n");
 }
 
 /** Text of the class/struct declaration around line `ln` (1-based), or "" when there is none. */
@@ -363,7 +398,7 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
     // continues the previous one: deleting part of an expression only yields a syntax error.
     const next = src.slice(ln).find((l) => l.trim() && !/^\s*\/\//.test(l))?.trim() ?? "";
     const prev = [...src.slice(0, ln - 1)].reverse().find((l) => l.trim() && !/^\s*\/\//.test(l))?.replace(/\/\/.*$/, "").trimEnd() ?? "";
-    const partOfLonger = /^(\?\.|\.|[+\-*/%]|&&|\|\||\?\?|\?|:|\)|\]|,)/.test(next) || /([=(\[,.+\-*/%&|?:]|=>)$/.test(prev);
+    const partOfLonger = /^(\?\.|\.|[+\-*/%]|&&|\|\||\?\?|\?|:|\)|\]|,)/.test(next) || /([=(\[,.+\-*/%&|:]|=>|\s\?)$/.test(prev);
     // A delegating initializer must call `self.init`: deleting it never compiles.
     if (partOfLonger || /^self\.init\b/.test(t)) { /* no deletion mutant */ } else if (isCallStatement(t)) {
       out.push({ line: ln, op: "delete statement", original, mutated: original.replace(t, "/* unitgen: statement deleted */") });
@@ -376,6 +411,7 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
       // is mutated at all. Only when no other operator applies, to keep the budget for conditions.
       const field = /^([A-Za-z_$][\w$]*)\s*=/.exec(t)?.[1];
       if (field && inConstructor(src, ln) && fieldWithoutDefault(enclosingType(src, ln), field)) continue;
+      if (field && declaredWithoutValue(enclosingFunction(src, ln), field)) continue;
       out.push({ line: ln, op: "delete assignment", original, mutated: original.replace(t, "/* unitgen: assignment deleted */") });
     } else if (!DECLARATION.test(original) && !TS_METHOD.test(original) && !KEYWORD_START.test(t.replace(/^(try|await)\s+/, "")) && (/^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*)*\($/.test(t) || (CALL_START.test(t) && /\{\s*(\w+(\s*,\s*\w+)*\s+in)?\s*$/.test(t) && !/[^=!<>]=[^=]/.test(maskStrings(t).split("{")[0])))) {
       // Multi-line call: `dao.insert(` ... `)`, or a trailing closure `builder.add(x) {` ... `}`:
