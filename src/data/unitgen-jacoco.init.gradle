@@ -1,0 +1,86 @@
+// Injected by unitgen with `-I`. Adds JaCoCo to every JVM/Android project and registers
+// `unitgenJacocoReport`, which reports the test task named in -Punitgen.tasks=":a=testDebugUnitTest,:b=test".
+// Uses beforeProject (not allprojects) so it also works with isolated projects disabled per-run.
+import org.gradle.testing.jacoco.tasks.JacocoReport
+
+def unitgenExcludes = [
+  '**/R.class', '**/R$*.class', '**/BuildConfig.*', '**/Manifest*.*', '**/*_Factory*.*',
+  '**/*_MembersInjector*.*', '**/Hilt_*.*', '**/*_HiltModules*.*', '**/*_HiltComponents*.*',
+  '**/Dagger*.*', '**/*Module_Provide*.*', '**/hilt_aggregated_deps/**', '**/dagger/hilt/**',
+  '**/*ComposableSingletons*.*', '**/*$$serializer*.*', '**/*_Impl*.*', '**/*Test*.*',
+  '**/*$special$$inlined*.*'
+]
+
+gradle.beforeProject { p ->
+  def setup = {
+    if (p.extensions.findByName('unitgenConfigured') != null) return
+    p.extensions.add('unitgenConfigured', true)
+    p.pluginManager.apply('jacoco')
+    p.tasks.withType(Test).configureEach { t ->
+      // unitgen reads pass/fail from the JUnit XML; a failing test must not skip the coverage report.
+      t.ignoreFailures = true
+      // Baseline: the project's own tests only; unitgen tracks its generated tests separately.
+      def skip = p.findProperty('unitgen.excludeGenerated')
+      if (skip) {
+        t.filter { excludeTestsMatching(skip.toString()); failOnNoMatchingTests = false }
+      }
+      t.extensions.findByName('jacoco')?.with {
+        includeNoLocationClasses = true
+        excludes = ['jdk.internal.*']
+      }
+    }
+    p.tasks.register('unitgenJacocoReport', JacocoReport) { r ->
+      def map = [:]
+      (p.findProperty('unitgen.tasks') ?: '').toString().split(',').each { e ->
+        def kv = e.split('=')
+        if (kv.length == 2) map[kv[0]] = kv[1]
+      }
+      def tn = map[p.path] ?: 'test'
+      def mv = (tn =~ /^test(\w+)UnitTest$/)
+      def v = mv.matches() ? (mv.group(1)[0].toLowerCase() + mv.group(1).substring(1)) : 'main'
+      def tt = p.tasks.findByName(tn)
+      // A test task without JaCoCo (created before the plugin applied, or a module without tests): no data.
+      def jx = tt?.extensions?.findByName('jacoco')
+      if (tt != null && jx != null) {
+        r.dependsOn(tt)
+        r.executionData.from(jx.destinationFile)
+      }
+      // Classes of project q compiled for variant w. Bytecode-transforming plugins (Hilt, ASM
+      // instrumentation) run tests against rewritten classes; JaCoCo must analyze exactly those or it
+      // drops the data ("Execution data ... does not match").
+      def classesOf = { q, String w ->
+        def qb = q.layout.buildDirectory.get().asFile
+        def W = w.capitalize()
+        def asm = new File(qb, "intermediates/classes/${w}/transform${W}ClassesWithAsm")
+        if (asm.exists()) return q.fileTree(asm) { include 'dirs/**', 'jars/**/*.jar'; exclude unitgenExcludes }
+        return q.fileTree(qb) {
+          include "tmp/kotlin-classes/${w}/**", "intermediates/javac/${w}/**/classes/**",
+                  "intermediates/built_in_kotlinc/${w}/**/classes/**", "classes/kotlin/${w}/**", "classes/java/${w}/**"
+          exclude unitgenExcludes
+        }
+      }
+      // Tests of one module also run code of the modules it depends on: every report reads the execution
+      // data of all test tasks in this run (-Punitgen.tasks), so that code counts in its own module's
+      // report. Those tasks are named by path, so ordering after them creates no other task.
+      map.each { path, task ->
+        if (path == p.path) return
+        def q = p.rootProject.findProject(path)
+        if (q == null) return
+        r.mustRunAfter("${path == ':' ? '' : path}:${task}")
+        def exec = new File(q.layout.buildDirectory.get().asFile, "jacoco/${task}.exec")
+        r.executionData.from(p.files({ exec.exists() ? [exec] : [] }))
+      }
+      r.classDirectories.from(p.files({ classesOf(p, v) }))
+      r.sourceDirectories.from(p.files('src/main/java', 'src/main/kotlin'))
+      r.reports {
+        xml.required = true
+        html.required = false
+        csv.required = false
+        xml.outputLocation = p.layout.buildDirectory.file('unitgen/jacoco.xml')
+      }
+    }
+  }
+  ['java', 'org.jetbrains.kotlin.jvm', 'com.android.library', 'com.android.application', 'com.android.dynamic-feature', 'com.android.test'].each { id ->
+    p.pluginManager.withPlugin(id) { setup() }
+  }
+}

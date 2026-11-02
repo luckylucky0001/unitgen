@@ -1,0 +1,42 @@
+#!/bin/sh
+# Runs the TypeScript sources directly via Node's built-in type stripping (Node >= 22.18).
+# If unitgen-env exists next to the checkout (Node/JDK installed for unitgen), use it for this
+# process only, so no shell profile changes are needed.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+done
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+ENV_SH="${UNITGEN_ENV:-$DIR/../unitgen-env/env.sh}"
+if [ -f "$ENV_SH" ]; then
+  # shellcheck disable=SC1090
+  . "$ENV_SH"
+elif [ -n "${UNITGEN_ENV:-}" ]; then
+  echo "unitgen: UNITGEN_ENV file not found: $ENV_SH" >&2
+  exit 1
+fi
+if [ -n "${JAVA_HOME:-}" ]; then
+  PATH="$JAVA_HOME/bin:$PATH"
+  export PATH
+fi
+node_ok() {
+  "$1" -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 18) ? 0 : 1)' >/dev/null 2>&1
+}
+NODE="$(command -v node 2>/dev/null || true)"
+if [ -z "$NODE" ] || ! node_ok "$NODE"; then
+  # DevEco Studio / Command Line Tools for HarmonyOS bundle a recent Node.js: use it when PATH has none.
+  for cand in "${DEVECO_STUDIO_HOME:-}/tools/node/bin/node" "/Applications/DevEco-Studio.app/Contents/tools/node/bin/node" \
+              "$HOME/Applications/DevEco-Studio.app/Contents/tools/node/bin/node" "$HOME/command-line-tools/tool/node/bin/node"; do
+    if [ -x "$cand" ] && node_ok "$cand"; then NODE="$cand"; break; fi
+  done
+fi
+if [ -z "$NODE" ]; then
+  echo "unitgen: Node >= 22.18 is required; install it or configure PATH / UNITGEN_ENV" >&2
+  exit 1
+fi
+if ! node_ok "$NODE"; then
+  echo "unitgen: Node >= 22.18 required; found $("$NODE" -v) at $NODE (install a newer Node, or DevEco Studio which bundles one)" >&2
+  exit 1
+fi
+exec "$NODE" --disable-warning=ExperimentalWarning "$DIR/src/cli.ts" "$@"
