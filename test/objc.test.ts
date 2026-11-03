@@ -180,7 +180,9 @@ test("xccov and llvm-cov: preprocessor and block-comment lines inside a region a
   fs.writeFileSync(file, ["- (void)f {", "#if DEBUG", "    g();", "#endif", "    /* a", "       b */", "    h(); /* c */", "    *error = nil;", "#pragma mark - x", "}"].join("\n"));
   const lines = Array.from({ length: 10 }, (_, i) => ({ line: i + 1, isExecutable: true, executionCount: 1 }));
   const cov = parseXccovArchiveJson({ [file]: lines });
-  assert.deepEqual(Object.keys(cov[fs.realpathSync(file)] ?? cov[file]).map(Number), [1, 3, 7, 8, 10]);
+  // One file in the result, under its canonical path (on Windows the long form of 8.3 temp paths).
+  assert.equal(Object.keys(cov).length, 1);
+  assert.deepEqual(Object.keys(Object.values(cov)[0]).map(Number), [1, 3, 7, 8, 10]);
 });
 
 test("estimateExecutable: Objective-C directives and preprocessor lines, @try and NSError out-parameters", () => {
@@ -252,11 +254,11 @@ test("xcode modules: Objective-C sources, a tool sharing a framework's files kee
   const byName = Object.fromEntries(mods.map((m) => [m.name, m]));
   assert.deepEqual(Object.keys(byName).sort(), ["Lib", "LibTool"]);
   assert.equal(byName.Lib.meta?.testTarget, "LibTests");
-  assert.deepEqual(a.sourceFiles(byName.Lib).map((f) => path.relative(dir, f)).sort(), ["Lib/A.m", "Lib/B.m"]);
-  assert.deepEqual(a.sourceFiles(byName.LibTool).map((f) => path.relative(dir, f)).sort(), ["Tool/Extra.m", "Tool/main.m"]);
+  assert.deepEqual(a.sourceFiles(byName.Lib).map((f) => path.relative(dir, f).split(path.sep).join("/")).sort(), ["Lib/A.m", "Lib/B.m"]);
+  assert.deepEqual(a.sourceFiles(byName.LibTool).map((f) => path.relative(dir, f).split(path.sep).join("/")).sort(), ["Tool/Extra.m", "Tool/main.m"]);
   // The generated test of an Objective-C source: name, language, header import.
   const place = a.placement(path.join(dir, "Lib", "A.m"), byName.Lib);
-  assert.equal(path.relative(dir, place.path), path.join("Tests", "AUnitGenTests.m"));
+  assert.equal(path.relative(dir, place.path).split(path.sep).join("/"), "Tests/AUnitGenTests.m");
   assert.equal(place.suiteName, "AUnitGenTests");
   assert.equal(place.importHint, "#import \"A.h\"");
   assert.equal(a.moduleFor(place.path)?.name, "Lib");
