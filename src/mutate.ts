@@ -4,6 +4,7 @@
 // compile are discarded. The source file is always restored, also after a crash (see recover()).
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isObjC } from "./adapters/objc.ts";
 import type { Adapter } from "./adapters/types.ts";
 import type { State } from "./state.ts";
 import { exists, log, readFile, readJson, relPath, writeFile } from "./util.ts";
@@ -107,8 +108,43 @@ const KEYWORD_START = /^(return|val|var|let|const|if|else|for|while|do|throw|try
 /** A declaration line (Swift/Kotlin/TS): its operators are part of a signature, not code (`static func + (`). */
 const DECLARATION = /^\s*((public|private|internal|fileprivate|open|static|class|final|override|mutating|nonmutating|convenience|required|prefix|postfix|infix|@\w+(\([^)]*\))?)\s+)*(func|fun|subscript|init|deinit|operator|precedencegroup|constructor)\b/;
 
+/** An Objective-C method header (`- (NSString *)nameFor:(NSInteger)x {`): its parentheses hold types, not code. */
+const OBJC_METHOD = /^\s*[-+]\s*\(\s*[A-Za-z_][\w\s*<>,]*\)\s*[A-Za-z_]\w*/;
+
+/**
+ * An Objective-C message send used as a statement, balanced on one line: `[self.items addObject:x];`.
+ * Not `[super ...]` (dealloc/init chains), not an assignment (`x = [y z];` is handled as one).
+ */
+function isMessageSend(t: string): boolean {
+  if (!/^\[/.test(t) || /^\[\s*super\b/.test(t) || !/\]\s*;$/.test(t)) return false;
+  const m = maskStrings(t);
+  let depth = 0;
+  for (let i = 0; i < m.length; i++) {
+    if ("[({".includes(m[i])) depth++;
+    else if ("])}".includes(m[i])) depth--;
+    else if (depth === 0 && m[i] === "=" && m[i + 1] !== "=") return false;
+    if (depth < 0) return false;
+  }
+  return depth === 0;
+}
+
 /** A TS/ArkTS method header with a return type (`toString(): string {`): never a trailing-closure call. */
 const TS_METHOD = /^\s*(async\s+)?[A-Za-z_$][\w$]*\s*(<[^>]*>)?\s*\([^)]*\)\s*:\s*[^=;]+\{\s*$/;
+
+/**
+ * Is line `ln` (1-based) inside an Objective-C `-dealloc` or a Swift `deinit`? What runs there happens
+ * while the object is destroyed: no test can observe it.
+ */
+function inDestructor(src: string[], ln: number, objc: boolean): boolean {
+  for (let j = ln - 2; j >= 0 && j >= ln - 300; j--) {
+    const l = src[j];
+    if (objc && /^\s*[-+]\s*\(/.test(l)) return /^\s*-\s*\(\s*void\s*\)\s*dealloc\b/.test(l);
+    if (objc && /^\s*@(implementation|end)\b/.test(l)) return false;
+    if (!objc && /^\s*deinit\s*\{/.test(l)) return true;
+    if (!objc && DECLARATION.test(l)) return false;
+  }
+  return false;
+}
 
 /** Is line `ln` (1-based) inside a constructor / init body? */
 function inConstructor(src: string[], ln: number): boolean {
@@ -237,7 +273,7 @@ function isCallStatement(t: string): boolean {
 function isPlainAssignment(t: string): boolean {
   const m = maskStrings(t);
   return !KEYWORD_START.test(t) && /^[A-Za-z_$][\w$]*(\??\.[A-Za-z_$][\w$]*|\[[^\]]*\])*\s*([+\-*\/%]|\?\?)?=(?![=>])/.test(m)
-    && !/^(this|self)\./.test(m) && balanced(t) && !/[{(\[]\s*$/.test(m);
+    && !/^(this|self)\./.test(m) && !/^self\s*=/.test(m) && balanced(t) && !/[{(\[]\s*$/.test(m);
 }
 
 /** A member assignment statement on one line: `this.total = a + b;`, `self.state = .idle`. */
@@ -250,13 +286,16 @@ function isMemberAssignment(t: string): boolean {
 // Includes project wrappers named like loggers (LogUtils.d, AppLogger.info, this.logger.warn, TLog.e) —
 // a capital "Log" suffix, so Catalog/Dialog are not matched.
 const LOG_CALL = new RegExp([
-  String.raw`^(await\s+)?((this|self)\.)?(console|hilog|Log|Logger|logger|log|Timber|print|println|debugPrint|NSLog|os_log)\b\s*[.(]`,
+  String.raw`^(await\s+)?((this|self)\.)?(console|hilog|Log|Logger|logger|log|Timber|print|println|debugPrint|NSLog|os_log|DDLog\w*)\b\s*[.(]`,
   // Wrappers must call a logging method: `auditLog.record(x)` / `changeLog.push(x)` are domain code.
   String.raw`^(await\s+)?((this|self)\.)?(?:[A-Za-z_$][\w$]*?)?(Log|Logger|LogUtils?|Logging)\s*\.\s*(v|d|i|w|e|f|debug|info|warn|warning|error|fatal|trace|verbose|log)\s*\(`,
 ].join("|"));
 
-/** `literalNarrowing`: the compiler narrows `x === 64` to the literal type (strict TS/ArkTS under hvigor). */
-export interface MutantOptions { literalNarrowing?: boolean }
+/**
+ * `literalNarrowing`: the compiler narrows `x === 64` to the literal type (strict TS/ArkTS under hvigor).
+ * `objc`: the source is Objective-C (YES/NO literals, message sends, `@"..."` strings, pointer declarations).
+ */
+export interface MutantOptions { literalNarrowing?: boolean; objc?: boolean }
 
 export function mutantsFor(text: string, lines: number[], opts: MutantOptions = {}): Mutant[] {
   const out = mutantsForLines(text, lines, opts);
@@ -340,12 +379,13 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
     const original = src[ln - 1];
     if (original === undefined) continue;
     const t = original.trim();
-    if (!t || t.startsWith("//") || t.startsWith("*") || t.startsWith("/*") || t.startsWith("import ") || t.startsWith("@") || /^(case|default)\b.*:$/.test(t)) continue;
+    if (!t || t.startsWith("//") || t.startsWith("*") || t.startsWith("/*") || t.startsWith("import ") || t.startsWith("@") || t.startsWith("#") || /^(case|default)\b.*:$/.test(t)) continue;
     if (LOG_CALL.test(t)) continue;
+    if (inDestructor(src, ln, !!opts.objc)) continue;
     let masked = maskStrings(original.replace(/\/\/.*$/, (c) => " ".repeat(c.length)));
     // On a declaration line only the body is code: `static func + (l, r) -> T {` has none,
     // `fun answer() = 1` has `1`. Blank the signature so its operators are never mutated.
-    if (DECLARATION.test(original)) {
+    if (DECLARATION.test(original) || (opts.objc && OBJC_METHOD.test(original))) {
       const open = masked.indexOf("(");
       let depth = 0, close = -1;
       for (let i = Math.max(0, open); open >= 0 && i < masked.length; i++) {
@@ -364,8 +404,14 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
       if (opts.literalNarrowing && /^(=== -> !==|!== -> ===|== -> !=|!= -> ==|\|\| -> &&|&& -> \|\|)$/.test(op) && literalChain(src, ln, m.index, m[0])) continue;
       // `"0" + s` is a concatenation: `"0" - s` never compiles.
       if (op === "+ -> -" && (masked[m.index - 1] === "\u0000" || masked[m.index + m[0].length] === "\u0000")) continue;
+      // Objective-C `NSString * name` / `(const char * )`: a pointer declaration, not a multiplication.
+      if (op === "* -> /" && opts.objc && /(\b[A-Z]\w*|\b(const|void|char|int|short|long|unsigned|signed|float|double|id|instancetype)|[(<,])\s*$/.test(masked.slice(0, m.index))) continue;
       const mutated = original.slice(0, m.index) + rep + original.slice(m.index + m[0].length);
       out.push({ line: ln, op, original, mutated });
+    }
+    if (opts.objc) {
+      const yn = /\b(YES|NO)\b/.exec(masked);
+      if (yn) out.push({ line: ln, op: `${yn[1]} -> ${yn[1] === "YES" ? "NO" : "YES"}`, original, mutated: original.slice(0, yn.index) + (yn[1] === "YES" ? "NO" : "YES") + original.slice(yn.index + yn[1].length) });
     }
     // `a ?? fallback` -> `fallback`: does any test see the value when it is present?
     const nc = /(?<![\w$.)\]])([A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*|\([^()]*\)|\[[^\]]*\])*)\s*\?\?(?!=)\s*/.exec(masked);
@@ -374,9 +420,15 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
     }
     // Negate a simple condition: if (flag) / if (a.b) / if (list.isEmpty()) -> if (!(...)).
     const cond = /\bif\s*\(\s*(!?[A-Za-z_$][\w$.]*(?:\(\))?)\s*\)/.exec(masked);
+    // Objective-C: a message send as the whole condition, `if ([s hasPrefix:@"x"])` / `if (![list count])`.
+    const send = opts.objc && !cond ? /\bif\s*\(\s*(!?)\s*(\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\])\s*\)/.exec(masked) : null;
     if (cond) {
       const inner = original.slice(cond.index, cond.index + cond[0].length).replace(/\(\s*(!?[A-Za-z_$][\w$.]*(?:\(\))?)\s*\)/, (_, x: string) => (x.startsWith("!") ? `(${x.slice(1)})` : `(!${x})`));
       out.push({ line: ln, op: "negate condition", original, mutated: original.slice(0, cond.index) + inner + original.slice(cond.index + cond[0].length) });
+    } else if (send) {
+      const at = send.index + send[0].indexOf(send[1] + send[2], send[0].indexOf("("));
+      const mutated = send[1] ? original.slice(0, at) + original.slice(at + 1) : `${original.slice(0, at)}!${original.slice(at)}`;
+      out.push({ line: ln, op: "negate condition", original, mutated });
     } else {
       // Swift/Kotlin-style without parentheses: `if flag {`, `guard isReady else {`, `while hasMore {`.
       const bare = /\b(if|guard|while)\s+(!?)([A-Za-z_$][\w$.]*(?:\([^()]*\))?)\s*(\{|else\b)/.exec(masked);
@@ -406,7 +458,7 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
     // Returned string literals (messages, keys, formats): does a test look at the text at all?
     // `masked` has comments blanked already; find the comment in the string-masked original.
     const comment = maskStrings(original).indexOf("//");
-    const ret = /\breturn\s+("(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+')/.exec(comment >= 0 ? original.slice(0, comment) : original);
+    const ret = /\breturn\s+@?("(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+')/.exec(comment >= 0 ? original.slice(0, comment) : original);
     if (ret && !/\\\(|\$\{/.test(ret[1])) {
       const at = ret.index + ret[0].length - ret[1].length;
       const q = ret[1][0];
@@ -434,7 +486,28 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
     const prev = [...src.slice(0, ln - 1)].reverse().find((l) => l.trim() && !/^\s*\/\//.test(l))?.replace(/\/\/.*$/, "").trimEnd() ?? "";
     const partOfLonger = /^(\?\.|\.|[+\-*/%]|&&|\|\||\?\?|\?|:|\)|\]|,)/.test(next) || /([=(\[,.+\-*/%&|:]|=>|\s\?)$/.test(prev);
     // A delegating initializer must call `self.init`: deleting it never compiles.
-    if (partOfLonger || /^self\.init\b/.test(t)) { /* no deletion mutant */ } else if (isCallStatement(t)) {
+    // Objective-C reference counting (`[x release];`, `FMDBRetain(x);`-style compatibility macros that
+    // expand to nothing under ARC): deleting it is invisible to a test, or only leaks.
+    const refCounting = opts.objc && /^\[\s*[\w.>-]+\s+(retain|release|autorelease)\s*\]\s*;$|^\w*(Retain|Release|Autorelease)(d|s)?\s*\(/.test(t);
+    // Assertion macros abort the process when they fail: no unit test can observe their removal.
+    const assertion = opts.objc && /^(NSC?(Parameter)?Assert\d?|assert|NSAssertionHandler)\b\s*\(/.test(t);
+    if (partOfLonger || refCounting || assertion || /^self\.init\b/.test(t)) { /* no deletion mutant */ } else if (opts.objc && isMessageSend(t)) {
+      out.push({ line: ln, op: "delete statement", original, mutated: original.replace(t, "/* unitgen: statement deleted */") });
+    } else if (opts.objc && /^\[(?!\s*super\b)/.test(t) && !/;\s*$/.test(t)) {
+      // A message send spread over lines (`[self.delegate parser:self` / `didFail:error];`).
+      let depth = 0, end = -1;
+      for (let j = ln - 1; j < src.length && j < ln + 30; j++) {
+        for (const c of maskStrings(src[j].replace(/\/\/.*$/, ""))) {
+          if ("[({".includes(c)) depth++;
+          if ("])}".includes(c)) depth--;
+        }
+        if (depth <= 0) { end = j + 1; break; }
+      }
+      if (end > ln && /\]\s*;\s*$/.test(src[end - 1]) && isMessageSend(src.slice(ln - 1, end).map((l) => l.trim()).join(" "))) {
+        const indent = original.slice(0, original.length - original.trimStart().length);
+        out.push({ line: ln, endLine: end, op: "delete statement", original: src.slice(ln - 1, end).join("\n"), mutated: `${indent}/* unitgen: statement deleted */` });
+      }
+    } else if (isCallStatement(t)) {
       out.push({ line: ln, op: "delete statement", original, mutated: original.replace(t, "/* unitgen: statement deleted */") });
     } else if (isMemberAssignment(t)) {
       const field = /^(?:this|self)\.([A-Za-z_$][\w$]*)\s*=/.exec(t)?.[1];
@@ -523,7 +596,7 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   const lines = Object.entries(cov[absTarget] ?? {}).filter(([, h]) => h > 0).map(([l]) => Number(l));
   if (!lines.length) throw new Error(`${relTest} covers no line of ${relPath(absTarget, adapter.root)}`);
   const original = readFile(absTarget);
-  const generated = mutantsFor(original, lines, { literalNarrowing: /^hvigor/.test(adapter.runnerName ?? "") });
+  const generated = mutantsFor(original, lines, { literalNarrowing: /^hvigor/.test(adapter.runnerName ?? ""), objc: isObjC(absTarget) });
   // The original text is part of the key: deletions share their `mutated` placeholder, and a changed
   // source line must not inherit an outcome measured on different code.
   const key = (mu: Mutant) => `${mu.line}|${mu.op}|${mu.original}|${mu.mutated}`;
@@ -616,7 +689,9 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
         else if (!r.ok || r.tests.some((t) => t.status === "failed")) {
           // Killed by a crash (ReferenceError/TypeError, index out of range, a process that died) rather than
           // by an assertion: still a detected change, but flag it.
-          const asserted = r.tests.some((t) => t.status === "failed" && /assert|expect|Expectation|AssertionError|expected|XCTAssert|#require/i.test(t.message ?? ""));
+          // Objective-C XCTest words its failures `((a) equal to (b)) failed: ...` / `((x) is true) failed` / `failed - msg` (XCTFail);
+          // an uncaught exception (`failed: caught "NSRangeException"`) is a crash.
+          const asserted = r.tests.some((t) => t.status === "failed" && /assert|expect|Expectation|AssertionError|expected|XCTAssert|#require|\(\(.*\)\)\s+failed|is not equal to|^failed - /im.test(t.message ?? ""));
           outcome = asserted ? "killed" : "killed-crash";
         }
         else outcome = r.tests.length ? "survived" : "error";

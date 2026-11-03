@@ -2,7 +2,7 @@
 
 中文 · [English](README.en.md)
 
-unitgen 用来给 iOS（Swift）、Android（Kotlin/Java）和鸿蒙（ArkTS）工程补单元测试。它是一个命令行工具，另外带一份 Skill，可以直接在 Claude Code 或 TRAE 里用。
+unitgen 用来给 iOS（Swift、Objective-C）、Android（Kotlin/Java）和鸿蒙（ArkTS）工程补单元测试。它是一个命令行工具，另外带一份 Skill，可以直接在 Claude Code 或 TRAE 里用。
 
 测试由 AI 来写，unitgen 负责挑目标和把关：先按未覆盖的逻辑代码给源文件排序，并为每个文件整理出写测试要用的上下文；测试写好后，只有能编译、全部通过、重跑结果不变、有断言、并且带来新覆盖的才会保留。最后用变异测试看断言能不能发现代码被改坏。
 
@@ -21,7 +21,7 @@ report    生成 .unitgen/REPORT.md
 
 ## 验证
 
-在 20 个开源项目上用真实工具链（DevEco Studio 26、Xcode 16.4、Android SDK + Gradle）跑过完整流程。部分结果：
+在 23 个开源项目上用真实工具链（DevEco Studio 26、Xcode 16.4、Android SDK + Gradle）跑过完整流程。部分结果：
 
 | 项目 | 平台 | 目标文件 | 覆盖率 | 变异得分 |
 |---|---|---|---|---|
@@ -29,13 +29,15 @@ report    生成 .unitgen/REPORT.md
 | [Kingfisher](https://github.com/onevcat/Kingfisher) 24.4k★ | iOS · Xcode + 模拟器 | `ImageFormat.swift` | 44% → 98% | 100% |
 | [SwiftDate](https://github.com/malcommac/SwiftDate) 7.7k★ | iOS · SwiftPM | `DateComponents+Extras.swift` | 61% → 100% | 100% |
 | [ObjectMapper](https://github.com/tristanhimmelman/ObjectMapper) 9.1k★ | iOS · Xcode + 模拟器 | `Map.swift` | 75% → 98% | 100% |
+| [fmdb](https://github.com/ccgus/fmdb) 13.8k★ | iOS · Objective-C · Xcode（macOS） | `FMDatabaseQueue.m` | 78% → 100% | 96% |
+| [MJExtension](https://github.com/CoderMJLee/MJExtension) 8.5k★ | iOS · Objective-C · Xcode + 模拟器 | `NSString+MJExtension.m` | 35% → 100% | 90% |
 | [architecture-samples](https://github.com/android/architecture-samples) 45.9k★ | Android · Gradle | `TaskNetworkDataSource.kt` | 0% → 100% | 100% |
 | [Pokedex](https://github.com/skydoves/Pokedex) 8.4k★ | Android · Gradle（多模块） | `DetailRepositoryImpl.kt` | 89% → 100% | 100% |
 | [harmony-utils](https://github.com/787107497/harmony-utils) 122★ | 鸿蒙 · hvigor | `DateHelper.ets` | 0% → 98% | 100% |
 | [LinysBrowser_NEXT](https://github.com/awaLiny2333/LinysBrowser_NEXT) 292★ | 鸿蒙 · hvigor | `url-ext.ets` | 0% → 100% | 97% |
 | [DSBridge-HarmonyOS](https://github.com/751496032/DSBridge-HarmonyOS) 182★ | 鸿蒙 · hvigor | `BaseBridge.ts` | 0% → 94% | 88% |
 
-全部 35 个目标文件的数据、验证方法、在这些项目里发现的疑似 bug，见 [docs/VALIDATION.md](docs/VALIDATION.md)。
+全部 40 个目标文件的数据、验证方法、在这些项目里发现的疑似 bug，见 [docs/VALIDATION.md](docs/VALIDATION.md)。
 
 ## 安装
 
@@ -45,7 +47,7 @@ report    生成 .unitgen/REPORT.md
 |---|---|
 | 所有平台 | Node.js ≥ 22.18。PATH 里没有合适的 Node 时，会用 DevEco Studio 自带的 Node |
 | 鸿蒙 | 建议安装 [DevEco Studio](https://developer.huawei.com/consumer/cn/deveco-studio/)，unitgen 会自动找到它，用 hvigor 和 ArkTS 编译器在 Previewer 里跑本地单测，不需要模拟器或真机。工程的 devDependencies 里要有 `@ohos/hypium`（1.0.19 及以上才能拿到覆盖率），并且已经执行过 `ohpm install`。没装 DevEco 时会改用内置的 Node shim，只适合纯逻辑代码 |
-| iOS | Xcode。SwiftPM 包用 `swift test` 跑，`.xcodeproj` 工程在 iOS 模拟器上跑。只有 Command Line Tools 时，只能跑 Swift Package 里的 Swift Testing 测试 |
+| iOS | Xcode。SwiftPM 包用 `swift test` 跑，`.xcodeproj` 工程在 iOS 模拟器上跑（macOS target 直接在本机跑）。只有 Command Line Tools 时，只能跑 Swift Package 里的 Swift Testing 测试；Objective-C 的测试要用 XCTest，必须装 Xcode |
 | Android | JDK 17+（`JAVA_HOME`）和 Android SDK（`ANDROID_HOME` 或工程里的 `local.properties`）。Apple 芯片的 Mac 用 arm64 的 JDK，例如 `brew install openjdk@17`，x86_64 的 JDK 在 Rosetta 下构建很慢 |
 
 安装 unitgen：
@@ -185,6 +187,9 @@ iOS
 
 - 只有 `Package.swift` 时用 SwiftPM，只有 `.xcodeproj` / `.xcworkspace` 时用 Xcode + iOS 模拟器。两者都有时默认 SwiftPM；要用模拟器（比如测 UIKit 代码），每条命令加 `--adapter xcode`。
 - 用哪个测试框架以 brief 为准。`swift-tools-version` 低于 6.0 的包用 XCTest，因为它们 CI 里普通的 `swift test` 不跑 Swift Testing；部署目标低于 iOS 13 / macOS 10.15 的 Xcode 工程也用 XCTest。其他情况用 Swift Testing。
+- Objective-C：`.m` / `.mm` 文件的测试用 Objective-C 写（XCTest），文件名是 `<文件名>UnitGenTests.m`，分类文件 `NSString+Foo.m` 对应 `NSString_FooUnitGenTests.m`。brief 会附上同名头文件的全文，测试只能调用头文件里声明的方法。Swift 和 Objective-C 混编的 target 里，两种文件各按自己的语言写测试。
+- Objective-C 的 SwiftPM target：生成的测试 target 也是 Objective-C 的（SwiftPM 不允许一个 target 混用两种语言），unitgen 会把被测 target 所有头文件所在的目录加进它的 `headerSearchPath`，内部头文件也能 `#import`。覆盖率需要给 clang 加插桩参数，unitgen 运行时会自动加。
+- 工程没有共享 scheme 时（scheme 在 `xcuserdata` 里，通常没提交），Xcode 自动生成的 scheme 可能跑不了测试。这时 unitgen 每次运行前在 `xcuserdata` 里临时写一个只含测试 target 的 scheme，跑完删掉。
 - Xcode 的构建产物放在 `.unitgen/DerivedData`，不影响你打开的 Xcode。unitgen 运行 xcodebuild 时会打开 `ENABLE_TESTABILITY`（`@testable import` 需要），并关掉老的 gcov 覆盖率开关（它们会让 llvm 覆盖率全为 0）。这些设置只对这次运行有效，不会改工程。
 
 Android
@@ -200,7 +205,7 @@ Android
 | 所有平台 | `.unitgen/`（状态、日志、REPORT.md，自带 `.gitignore`），建议加进工程的 `.gitignore` | — |
 | 鸿蒙 | `<模块>/src/test/<文件>.unitgen.test.ets`；hvigor 生成的 `<模块>/.test/`（多数工程已经忽略 `**/.test`） | `<模块>/src/test/List.test.ets`，登记生成的测试，DevEco 里也能跑到 |
 | iOS SwiftPM | `Tests/<Target>UnitGenTests/` | `Package.swift` 末尾加一段 `// unitgen:begin … // unitgen:end`（独立的测试 target） |
-| iOS Xcode | 现有测试 target 里的 `<类>UnitGenTests.swift` | 需要时登记到 `project.pbxproj`（原文件备份在 `.unitgen/`） |
+| iOS Xcode | 现有测试 target 里的 `<类>UnitGenTests.swift` / `.m` | 需要时登记到 `project.pbxproj`（原文件备份在 `.unitgen/`） |
 | Android | `src/test/<kotlin\|java>/<包路径>/<类>UnitGenTest.kt` | — |
 
 生产代码、已有测试和构建配置不会被改。`mutate` 运行时会临时改动被测文件，结束后会还原；如果进程被强杀，下一条 unitgen 命令会负责还原。

@@ -115,18 +115,50 @@ export function parseLlvmCovJson(json: any, keep: (file: string) => boolean = ()
         }
         if (starts.length) wrapped = starts[starts.length - 1];
       }
-      // A region spans blank lines, comments and #if/#else/#endif, which llvm-cov reports with the
-      // region's count (0 when it never ran). They hold no code: drop them, whatever the count, so
-      // before/after totals stay comparable.
-      let src: string[] = [];
-      try { src = fs.readFileSync(file, "utf8").split("\n"); } catch { /* not readable */ }
-      for (const ln of Object.keys(lines).map(Number)) {
-        const t = src[ln - 1]?.trim();
-        if (t !== undefined && (t === "" || t.startsWith("//") || /^#(if|elseif|else|endif)\b/.test(t))) delete lines[ln];
-      }
-      out[file] = lines;
+      out[file] = dropNonCode(file, lines);
     }
   }
+  return out;
+}
+
+/**
+ * A region spans blank lines, comments and #if/#else/#endif, which llvm-cov and xccov report with the
+ * region's count (0 when it never ran). They hold no code: drop them, whatever the count, so
+ * before/after totals stay comparable.
+ */
+function dropNonCode(file: string, lines: Record<number, number>): Record<number, number> {
+  let src: string[] = [];
+  try { src = fs.readFileSync(file, "utf8").split("\n"); } catch { return lines; }
+  const inComment = blockCommentLines(src);
+  for (const ln of Object.keys(lines).map(Number)) {
+    const t = src[ln - 1]?.trim();
+    if (t !== undefined && (t === "" || t.startsWith("//") || inComment.has(ln) || /^#\s*(if|ifdef|ifndef|elseif|elif|else|endif|pragma|define|undef|import|include)\b/.test(t))) delete lines[ln];
+  }
+  return lines;
+}
+
+/** 1-based numbers of lines that hold nothing but (part of) a block comment. */
+function blockCommentLines(src: string[]): Set<number> {
+  const out = new Set<number>();
+  let open = false;
+  src.forEach((raw, i) => {
+    const code = raw.replace(/"(?:\\.|[^"\\])*"/g, "\"\"");
+    let rest = "", j = 0;
+    while (j < code.length) {
+      if (open) {
+        const end = code.indexOf("*/", j);
+        if (end < 0) { j = code.length; break; }
+        open = false; j = end + 2;
+      } else {
+        const start = code.indexOf("/*", j);
+        const line = code.indexOf("//", j);
+        if (line >= 0 && (start < 0 || line < start)) { rest += code.slice(j, line); break; }
+        if (start < 0) { rest += code.slice(j); break; }
+        rest += code.slice(j, start); open = true; j = start + 2;
+      }
+    }
+    if (!rest.trim() && raw.trim()) out.add(i + 1);
+  });
   return out;
 }
 
@@ -190,7 +222,7 @@ export function parseXccovArchiveJson(json: any, keep: (file: string) => boolean
     if (!keep(file) || !Array.isArray(lines)) continue;
     const dst: Record<number, number> = {};
     for (const l of lines) if (l.isExecutable) dst[l.line] = l.executionCount ?? 0;
-    out[file] = dst;
+    out[file] = dropNonCode(file, dst);
   }
   return out;
 }

@@ -87,8 +87,8 @@ export interface Adapter {
   sourceFiles(m: Module): string[];
   classify(file: string, text: string): FileKind;
   placement(source: string, m: Module): TestPlacement;
-  /** Prompt text describing framework, conventions and available test libraries for a module. */
-  conventions(m: Module): string;
+  /** Prompt text describing framework, conventions and available test libraries for a module (and the source under test, when the module mixes languages). */
+  conventions(m: Module, source?: string): string;
   /** Existing tests to show the model as a style reference (absolute paths); the source's own test first. */
   exampleTests(m: Module, source?: string): string[];
   /** Called before a new test file is verified (e.g. register a SwiftPM test target). */
@@ -101,6 +101,8 @@ export interface Adapter {
   readonly platformLinesNote?: string;
   /** Source text used to estimate executable lines of a never-loaded file (e.g. without UI DSL blocks). */
   estimateText?(text: string): string;
+  /** The header declaring a source's interface (Objective-C), shown in full in the brief. */
+  headerFor?(source: string): string | undefined;
   /** Warnings to put at the top of a brief (missing packages, stubbed APIs, ...). */
   briefWarnings?(source: string): string[];
   /** Undo temporary project edits a killed run left behind (parked files, swapped test lists). Runs under the project lock. */
@@ -111,6 +113,8 @@ export interface Adapter {
   /** Language-level hints: does the test file contain at least one real assertion? */
   countAssertions(text: string): number;
   readonly testFileSuffix: string;
+  /** Every suffix of generated test files when there are several languages (default: [testFileSuffix]). */
+  readonly testFileSuffixes?: string[];
   /** Which runner measures coverage (when an adapter has several, e.g. hvigor vs the Node shim). */
   readonly runnerName?: string;
 }
