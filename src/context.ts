@@ -1,6 +1,7 @@
 // Build the generation brief: everything a model needs to write one good test file.
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { definedTypes, isObjC, objcDeclarationLines, quotedImports } from "./adapters/objc.ts";
 import type { Adapter, Module } from "./adapters/types.ts";
 import { ranges } from "./coverage.ts";
 import type { State } from "./state.ts";
@@ -26,6 +27,7 @@ const RULES = `Rules (a test that breaks any of these is rejected):
 7. Only use test libraries named in the Conventions section or imported by the existing tests below. Do not add dependencies.`;
 
 export function declarationLines(text: string, file = ""): string[] {
+  if (/\.(mm?|h)$/.test(file)) return objcDeclarationLines(text);
   // A keyword followed by a name (`type Foo`, `object Bar`), not a field called `type:` / `object:`.
   const re = /^\s*(public |open |internal |private |fileprivate |protected |export |static |final |abstract |override |data |sealed |inline |suspend |async |mutating |@\w+\s+)*((func|fun|class|struct|enum|protocol|interface|object|typealias|val|var|let|const|case|function|type)\s+[A-Za-z_$`]|(init|constructor)\b)/;
   // TypeScript/ArkTS methods have no keyword: `sendMessage(x: string): Promise<void> {`.
@@ -56,10 +58,12 @@ export function declarationLines(text: string, file = ""): string[] {
 /** Signatures of other module files whose type names the target references. */
 function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: string, budget: number): string {
   const idents = new Set(text.match(/\b[A-Z][A-Za-z0-9_]{2,}\b/g) ?? []);
-  const own = new Set((text.match(/\b(class|struct|enum|protocol|interface|object)\s+([A-Z]\w*)/g) ?? []).map((s) => s.split(/\s+/)[1]));
+  const ownHeader = adapter.headerFor?.(source);
+  const own = new Set(definedTypes(text + (ownHeader ? `\n${readFile(ownHeader)}` : "")));
   const parts: string[] = [];
   let used = 0;
-  const files = adapter.sourceFiles(m).filter((f) => f !== source);
+  // Objective-C: other classes are known through their headers, not their implementations.
+  const files = adapter.sourceFiles(m).filter((f) => f !== source).map((f) => (isObjC(f) ? adapter.headerFor?.(f) ?? f : f)).filter((f) => f !== ownHeader);
   // Types imported from other modules (DAO interfaces, entities, models): resolve `import a.b.Foo` by file name.
   const imported = new Set([...text.matchAll(/^import\s+(?:class\s+)?[\w.]*\.([A-Z]\w*)\s*$/gm)].map((m) => m[1]));
   if (imported.size) {
@@ -79,10 +83,19 @@ function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: 
     const hit = [base, `${base}.ets`, `${base}.ts`, path.join(base, "index.ets"), path.join(base, "index.ts")].find((f) => exists(f) && fs.statSync(f).isFile());
     if (hit && hit !== source) relImports.add(hit);
   }
+  // Objective-C `#import "Bar.h"`: the headers of the module that the code includes.
+  if (isObjC(source)) {
+    const byName = new Map<string, string>();
+    for (const r of m.sourceRoots) for (const h of walkFiles(r, [".h"])) if (!byName.has(path.basename(h))) byName.set(path.basename(h), h);
+    for (const im of quotedImports(text)) {
+      const hit = exists(path.resolve(path.dirname(source), im)) ? path.resolve(path.dirname(source), im) : byName.get(path.basename(im));
+      if (hit && hit !== ownHeader) relImports.add(hit);
+    }
+  }
   for (const f of relImports) if (!files.includes(f)) files.push(f);
   const scored = files.map((f) => {
     const t = readFile(f);
-    const defs = (t.match(/\b(class|struct|enum|protocol|interface|object|typealias)\s+([A-Z]\w*)/g) ?? []).map((s) => s.split(/\s+/)[1]);
+    const defs = definedTypes(t);
     const hits = defs.filter((d) => idents.has(d) && !own.has(d)).length + (relImports.has(f) ? 1000 : 0);
     return { f, t, hits };
   }).filter((x) => x.hits > 0).sort((a, b) => b.hits - a.hits);
@@ -101,9 +114,22 @@ function relatedDeclarations(adapter: Adapter, m: Module, source: string, text: 
 const GENERIC_SUPERTYPES = new Set(["Error", "Exception", "RuntimeException", "Throwable", "Object", "Any", "NSObject", "Equatable", "Hashable", "Codable", "Serializable", "Comparable", "Sendable"]);
 
 /** The source of the named type declarations only (from the declaration to its closing brace). */
-function declarationsOf(text: string, names: string[]): string {
+function declarationsOf(text: string, names: string[], file = ""): string {
   const lines = text.split("\n");
   const out: string[] = [];
+  if (/\.(mm?|h)$/.test(file)) {
+    // Objective-C: `@interface Name ...` / `@implementation Name` through their `@end`.
+    for (const name of names) {
+      for (let i = 0; i < lines.length; i++) {
+        if (!new RegExp(`^\\s*@(interface|implementation)\\s+${name}\\b`).test(lines[i])) continue;
+        for (let j = i; j < lines.length; j++) {
+          out.push(lines[j]);
+          if (/^\s*@end\b/.test(lines[j])) { i = j; break; }
+        }
+      }
+    }
+    return out.join("\n");
+  }
   for (const name of names) {
     const start = lines.findIndex((l) => new RegExp(`\\b(class|object|struct|enum|actor)\\s+${name}\\b`).test(l));
     if (start < 0) continue;
@@ -127,8 +153,10 @@ function testDoubles(adapter: Adapter, m: Module, text: string, budget: number):
   // Production sources are not test doubles unless they say so by name (FakeX, MockX, InMemoryX, ...).
   const prodRoots = adapter.modules().flatMap((mm) => mm.sourceRoots.map((r) => r + path.sep));
   const doubleName = /(Fake|Mock|Stub|InMemory|Dummy|Spy|Test)/;
+  // Objective-C tests sometimes re-declare a production class to reach its private API: that is no double.
+  const prodTypes = new Set(adapter.modules().flatMap((mm) => adapter.sourceFiles(mm).filter(isObjC).flatMap((f) => definedTypes(readFile(f)))));
   const roots = [...new Set([path.dirname(m.testRoot), m.testRoot, ...(adapter.testSupportDirs?.(m) ?? [])])].filter(exists);
-  const exts = [".kt", ".java", ".swift", ".ets", ".ts"];
+  const exts = [".kt", ".java", ".swift", ".ets", ".ts", ".m", ".mm", ".h"];
   const parts: string[] = [];
   let used = 0;
   const seen = new Set<string>();
@@ -139,12 +167,13 @@ function testDoubles(adapter: Adapter, m: Module, text: string, budget: number):
       if (prodRoots.some((r) => f.startsWith(r)) && !doubleName.test(path.basename(f))) continue;
       const t = readFile(f);
       if (/XCTestCase|@Test\b|@Suite\b|\bdescribe\(|@org\.junit|import org\.junit|import kotlin\.test/.test(t) && !/\b(Fake|Test|Stub|Mock|InMemory)\w*\s*[:(<{]/.test(t.replace(/class\s+\w+Tests?\b/g, ""))) continue;
-      const impl = [...t.matchAll(/\b(?:class|object|struct)\s+(\w+)[^{\n]*?(?::|implements|extends)\s*([^{\n]+)/g)]
-        .filter((mm) => (mm[2].match(/\b[A-Z]\w+/g) ?? []).some((x) => idents.has(x)));
+      const impl = [...t.matchAll(/\b(?:class|object|struct)\s+(\w+)[^{\n]*?(?::|implements|extends)\s*([^{\n]+)|@interface\s+(\w+)\s*:\s*([^\n{]+)/g)].map((mm) => [mm[0], mm[1] ?? mm[3], mm[2] ?? mm[4]] as const)
+        .filter((mm) => (mm[2].match(/\b[A-Z]\w+/g) ?? []).some((x) => idents.has(x)))
+        .filter((mm) => !(/\.(mm?|h)$/.test(f) && prodTypes.has(mm[1])));
       if (!impl.length) continue;
       // In a test file only the doubles themselves are useful, not every test method around them.
       const isTestFile = /XCTestCase|@Test\b|@Suite\b|\bdescribe\(|@org\.junit|import org\.junit|import kotlin\.test/.test(t);
-      const body = isTestFile ? declarationsOf(t, impl.map((mm) => mm[1]).filter((n) => /Fake|Stub|Mock|InMemory|Dummy|Spy|Test\w+Repository/.test(n) || !/Tests?$/.test(n))) : t;
+      const body = isTestFile ? declarationsOf(t, impl.map((mm) => mm[1]).filter((n) => /Fake|Stub|Mock|InMemory|Dummy|Spy|Test\w+Repository/.test(n) || !/Tests?$/.test(n)), f) : t;
       if (!body.trim()) continue;
       const chunk = `// ${relPath(f, adapter.root)}\n${declarationLines(body, f).join("\n")}`;
       if (used + chunk.length > budget) return parts.join("\n\n");
@@ -207,7 +236,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     // Large file: keep declarations plus a window around uncovered lines.
     const declSet = new Set<number>();
     text.split("\n").forEach((l, i) => {
-      if (declarationLines(l).length) declSet.add(i + 1);
+      if (declarationLines(l, abs).length) declSet.add(i + 1);
     });
     src = numbered(text, unc, exec, (ln) => declSet.has(ln) || uncovered.some((u) => Math.abs(u - ln) <= 4), platform);
   }
@@ -219,6 +248,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
   });
 
   const existingGenerated = exists(place.path) ? readFile(place.path) : "";
+  const header = adapter.headerFor?.(abs);
   const related = relatedDeclarations(adapter, m, abs, text, 12000);
   const doubles = testDoubles(adapter, m, text, 8000);
   const sections: string[] = [
@@ -233,7 +263,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
       .concat(adapter.briefWarnings?.(abs) ?? []).map((w) => `- ⚠️ ${w}`),
     "",
     "## Conventions",
-    adapter.conventions(m),
+    adapter.conventions(m, abs),
     "",
     "## " + (examples.length ? RULES : RULES.replace("named in the Conventions section or imported by the existing tests below", "named in the Conventions section (this module has no existing tests to copy from, apart from IDE templates)")),
     "",
@@ -242,6 +272,10 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
     src,
     "```",
   ];
+  if (header) {
+    const h = stripLicense(readFile(header));
+    sections.push("", `## Interface: ${relPath(header, adapter.root)} (what the test can call; methods missing here are private)`, "```", h.length > 20000 ? `${h.slice(0, 20000)}\n… (truncated)` : h, "```");
+  }
   if (related) sections.push("", "## Related declarations (this module, and types it imports from other modules)", "```", related, "```");
   if (doubles) sections.push("", "## Existing test doubles for types used by the target (prefer these over mocks)", "```", doubles, "```");
   if (examples.length) sections.push("", "## Existing tests in this module (follow their style, imports and fakes/helpers; the framework rules above win if they differ)", "```", examples.join("\n\n"), "```");

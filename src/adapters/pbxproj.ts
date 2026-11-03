@@ -2,6 +2,7 @@
 // they compile, their test targets, and to register a new test file in a test target.
 import { randomBytes } from "node:crypto";
 import * as path from "node:path";
+import { pbxFileType } from "./objc.ts";
 
 export interface PbxObject {
   id: string;
@@ -19,6 +20,8 @@ export interface PbxTarget {
   dependsOn: string[];
   /** Absolute paths of the source files in its Sources build phase. */
   files: string[];
+  /** File name of its product (`FooTests.xctest`, `libFoo.a`). */
+  product?: string;
 }
 
 export class Pbxproj {
@@ -100,6 +103,7 @@ export class Pbxproj {
         id: o.id,
         name: (this.attr(o.body, "name") ?? "").replace(/^"|"$/g, ""),
         productType: (this.attr(o.body, "productType") ?? "").replace(/^"|"$/g, ""),
+        product: this.attr(this.objects.get(this.attr(o.body, "productReference")?.split(" ")[0] ?? "")?.body ?? "", "path"),
         sourcesPhase, syncedDirs, files,
         dependsOn: this.list(o.body, "dependencies").map((d) => this.attr(this.objects.get(d)?.body ?? "", "target")?.split(" ")[0]).filter((x): x is string => !!x),
       });
@@ -140,7 +144,7 @@ export class Pbxproj {
     const fileRef = this.newId();
     const buildFile = this.newId();
     const quoted = /^[\w./-]+$/.test(refPath) ? refPath : `"${refPath}"`;
-    const fr = `\t\t${fileRef} /* ${name} */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ${quoted}; sourceTree = "<group>"; };\n`;
+    const fr = `\t\t${fileRef} /* ${name} */ = {isa = PBXFileReference; lastKnownFileType = ${pbxFileType(file)}; path = ${quoted}; sourceTree = "<group>"; };\n`;
     const bf = `\t\t${buildFile} /* ${name} in Sources */ = {isa = PBXBuildFile; fileRef = ${fileRef} /* ${name} */; };\n`;
     let t = this.text;
     t = t.replace("/* End PBXFileReference section */", `${fr.trimEnd()}\n/* End PBXFileReference section */`);

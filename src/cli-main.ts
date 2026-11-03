@@ -149,7 +149,7 @@ export async function main(argv: string[]): Promise<number> {
       log(`running existing tests with coverage (${adapter.id}) ...`);
       // Generated test files from earlier sessions must be registered so the real toolchain runs them too.
       if (adapter.platform === "harmony") for (const m of mods ?? adapter.modules()) {
-        for (const f of walkFiles(m.testRoot, [adapter.testFileSuffix])) adapter.prepareTestFile(f, m);
+        for (const f of walkFiles(m.testRoot, adapter.testFileSuffixes ?? [adapter.testFileSuffix])) adapter.prepareTestFile(f, m);
       }
       const r = await adapter.runTests({ coverage: true, label: "baseline", modules: mods, excludeGenerated: true });
       const failed = r.tests.filter((t) => t.status === "failed").length;
@@ -190,7 +190,9 @@ export async function main(argv: string[]): Promise<number> {
       }
       const s = summarize(cov);
       const unloaded = rankTargets(adapter, cov, { modules: mods, minUncovered: 1 }).filter((t) => !t.measured);
-      const why = !r.compiled ? `the build failed — the project or its existing tests do not compile with this toolchain: ${r.excerpt.split("\n").find((l) => l.trim()) ?? "see the log"}`
+      // The first line that names the problem, not build progress (`[7/9] Write Objects.LinkFileList`).
+      const firstError = r.excerpt.split("\n").find((l) => /error|undefined symbol|fatal|failed/i.test(l)) ?? r.excerpt.split("\n").find((l) => l.trim());
+      const why = !r.compiled ? `the build failed — the project or its existing tests do not compile with this toolchain: ${firstError?.trim() ?? "see the log"}`
         : r.infraError ? "environment problem"
         : !r.ok && !r.tests.length ? `the test run failed before any test ran: ${r.excerpt.split("\n").find((l) => l.trim()) ?? "see the log"}`
         : failed && !tolerated ? `${failed} existing tests fail; fix them, or re-run with --allow-failing to measure the passing ones`
@@ -295,7 +297,8 @@ export async function main(argv: string[]): Promise<number> {
     case "note": {
       const text = rest.join(" ").trim();
       if (!text) throw new Error("usage: unitgen note <text>");
-      const kind = /bug|suspect/i.test(text) ? "suspect" : "note";
+      // Whole words: "DEBUG", "debugger" or "bugfix" in an explanation do not make it a suspected bug.
+      const kind = /\b(bugs?|suspect(ed|s)?|UNITGEN-SUSPECT)\b/i.test(text) ? "suspect" : "note";
       state.data.notes.push({ at: state.stamp(), kind, text });
       state.save();
       print(`noted (${kind}); it will appear in the report`, { kind, text });

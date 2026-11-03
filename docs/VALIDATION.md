@@ -2,12 +2,77 @@
 
 unitgen 在真实开源项目上的验证过程、结果，以及验证中发现并修复的问题。使用说明见 [README](../README.md)。
 
+- [第五轮：Objective-C](#第五轮objective-c2026-11-03)：5 个 Objective-C 项目，Xcode（macOS、iOS 模拟器、命令行工具 target）和 SwiftPM，其中 2 个由只拿到 README 和 Skill 的子代理独立完成
 - [Windows（CI）](#windowsci)：GitHub Actions windows-latest 上的单测和端到端测试
 - [第四轮：从 main 开箱测试，含 Android](#第四轮从-main-开箱测试含-android2026-10-31)：Android SDK 装好后的 Android 工程，以及新的 Xcode / 鸿蒙工程
 - [第三轮：开箱测试](#第三轮开箱测试2026-10-31从-github-全新安装)：6 个项目，只给 README 和 Skill 的子代理从零开始使用
 - [第二轮：真实工具链](#第二轮验证2026-10-31deveco-studio-26--xcode-164真实工具链)：DevEco Studio 26 + Xcode 16.4，10 个项目
 - [发现并修复的 unitgen 问题](#发现并修复的-unitgen-问题)
 - [第一轮：只有 Command Line Tools](#第一轮验证结果2026-10-21本机macos--command-line-tools无-xcode--deveco)
+
+## 第五轮：Objective-C（2026-11-03）
+
+新增 Objective-C 支持后，在 3 个 Objective-C 项目和一个生成的 Objective-C++ 包上用 Xcode 16.4 跑完整流程。测试由我按 brief 手写（扮演写测试的 AI），每个都走完 verify 和 mutate；工具本身的问题当场修掉，再从头重跑。
+
+| 项目 | 平台 · 运行器 | 目标文件 | 目标文件覆盖率 | 新增测试 | 变异得分 |
+|---|---|---|---|---|---|
+| [fmdb](https://github.com/ccgus/fmdb) 13,820★ | iOS · Objective-C · Xcode（macOS 测试 target） | `FMDatabaseQueue.m` | 78% → **100%**（140 → 180 / 180 行） | 12 | 96%（24 杀死 / 1 存活，评估 28/29；5 个靠崩溃，3 个判为等价：只服务于 DEBUG 断言的队列标记、只在自定义 VFS 重开时才用到的 `_vfsName`、只打日志的分支） |
+| [MJExtension](https://github.com/CoderMJLee/MJExtension) 8,482★ | iOS · Objective-C · Xcode + iOS 模拟器 | `NSString+MJExtension.m`（分类） | 35% → **100%**（18 → 52 / 52 行） | 7 | 90%（9/10，评估 10/25；存活的是 `self.length >= 2` 改成 `> 2`，测试没有两个字符的输入） |
+| [MJExtension](https://github.com/CoderMJLee/MJExtension) 8,482★ | iOS · Objective-C · SwiftPM（同一个文件） | `NSString+MJExtension.m` | 0% → **65%**（0 → 34 / 52 行；包里没有测试 target，同一份测试没覆盖 `mj_underlineFromCamel`） | 7 | 85%（17 杀死 / 3 存活，评估 20/25） |
+| [CHCSVParser](https://github.com/davedelong/CHCSVParser) 1,271★ | iOS · Objective-C · Xcode（命令行工具 target，测试 target 直接编译源码；项目自带 1 个失败测试，`--allow-failing`；测试目录名带空格） | `CHCSVParser.m` | 61% → **65%**（439 → 463 / 714 行） | 6 | 48%（11 杀死 / 12 存活，评估 23 个）：测试只针对有序字典和 `CSVComponents`，变异却落在它顺带经过的解析器内部，那里它没有细查 |
+| 生成的 Objective-C++ 包（SwiftPM，`.mm` 里用 `std::istringstream`） | iOS · Objective-C++ · SwiftPM | `Words.mm` | 47% → **100%**（9 → 19 / 19 行） | 3 | 100%（3/3） |
+
+### 独立开箱测试
+
+修完上面这些之后，让一个子代理只读 README 和 Skill（不看源码），在没碰过的两个项目上从零走完整流程：
+
+| 项目 | 平台 · 运行器 | 目标文件 | 目标文件覆盖率 | 新增测试 | 变异得分 |
+|---|---|---|---|---|---|
+| [CocoaLumberjack](https://github.com/CocoaLumberjack/CocoaLumberjack) 13,320★ | iOS · Objective-C · SwiftPM（带 `Package@swift-6.1.swift` 等版本化清单） | `DDDispatchQueueLogFormatter.m` | 13% → **100%**（16 → 126 / 126 行） | 16 | 60% → 88%（28 杀死 / 4 存活，评估 32/32；2 个判为等价；存活的 4 个都是删掉 `pthread_mutex_lock`/`init`，只有并发才看得出来） |
+| [AFNetworking](https://github.com/AFNetworking/AFNetworking) 33,334★ | iOS · Objective-C · Xcode + iOS 模拟器（项目自带 15 个证书相关的失败测试，`--allow-failing`） | `AFURLRequestSerialization.m` | 69% → **93%**（569 → 770 / 824 行） | 28 | 50% → 90%（评估 10/303，抽样；1 个判为等价） |
+
+它发现的问题都已修复：
+
+| 问题 | 修复 |
+|---|---|
+| 有 `Package@swift-6.1.swift` 这类版本化清单时，SwiftPM 用的是它，unitgen 却只改 `Package.swift`：生成的测试从没被编译，verify 拿项目自己一个不稳定的测试失败当成这个文件的 TEST_FAILURES | 测试 target 和运行时补丁同时写进所有清单；doctor 列出清单并说明当前工具链用哪个 |
+| verify 在一个测试也对不上这个文件时，退回去用整次运行的所有测试来判定 | 改为 NO_TESTS，并列出实际跑了哪些测试 |
+| 输出到管道或文件时，brief 在 65,536 字节处被截断（AFNetworking 的 brief 有 100 KB），没有任何提示 | 等 stdout/stderr 写完再退出（工作进程和监督进程都改了） |
+| `XCTAssertTrue`/`XCTAssertNil` 这类断言的失败（`((x) is true) failed`、`((x) == nil) failed`）被算成「靠崩溃杀死」 | 识别这两种格式；未捕获的异常仍算崩溃 |
+| 删掉 `pthread_mutex_lock`/`init` 只有并发才看得出来，删掉 unlock 让测试卡到超时 | 不再对加锁、解锁、信号量这类调用生成删除变异 |
+| 改过测试后，上一轮的幸存者优先重跑，抽样得分（40%）远低于全量（88%）；报告里的初始得分也没说明是抽样 | 得分行写明「评估了几个、其中几个是重跑的幸存者，所以偏低」；报告标出抽样的初始得分 |
+| brief 把测试里重新声明的生产类（为了调私有 API）列成「优先使用的测试替身」，和约定矛盾 | 生产代码里定义的类不再当作替身 |
+| brief 的声明里没有 `@public` 实例变量（DDLogMessage 的 `_threadName` 等，被测代码直接读它们） | 保留 `@public` 段的实例变量 |
+| Package.swift 没有测试 target、测试都在 `.xcodeproj` 里时（AFNetworking），doctor 只说 OK | 提示加 `--adapter xcode` |
+| 运行 `swift test` 时旧工具链会改写 `Package.resolved` | 每次运行后还原 |
+
+没修的：CocoaLumberjack 的 `Tests/Tests.xcodeproj` 只有测试 target、被测代码在另一个工程里，unitgen 找不到模块（这种结构用 SwiftPM 那一套跑）；基线被拒后加 `--allow-failing` 要整个重跑；不加 `UNITGEN_QUIET` 时 xcodebuild 的原始输出很多。
+
+最后一轮回归（清空 scheme 缓存后重跑全部 9 个项目）里，MJExtension 有一次基线出现 2 个项目自带测试失败，立即重跑就没有了；那次的日志已被覆盖，没查到是哪两个，之前和之后的 4 次基线都是 0 失败。
+
+另外两个没跑起来：YYModel 的部署目标太老，Xcode 14.3 起不再带 `libarclite`，构建失败（unitgen 现在把它报成环境问题，并说明要提高部署目标）；libextobjc 缺子模块里的 xcconfig。
+
+CI 里加了 `scripts/e2e-objc.mjs`（macOS）：生成一个带 Objective-C target 的 SwiftPM 包和一个 Xcode 工程（静态库 + Objective-C 单测 bundle，没有共享 scheme），各跑一遍 doctor、baseline、targets、brief、verify、mutate、report。
+
+这一轮发现并修复的问题（前 5 个 Swift 工程同样会遇到）：
+
+| 问题 | 修复 |
+|---|---|
+| 同一份源码按多个平台各建一个 target（`FMDB-IOS` / `FMDB MacOS` …），unitgen 优先选了 iOS 版本，可测试 bundle 依赖的是 macOS 版本，测试被放到模拟器上跑 | 优先选测试 target 直接依赖的那个；运行目标按测试 target 支持的平台定 |
+| 选中的 scheme 没有测试动作（`Scheme FMDB MacOS is not currently configured for the test action`），还被当成「1 个测试失败」 | 读 `.xcscheme`（含 Xcode 的 test plan）找真正跑这个测试 target 的 scheme；这条错误归为环境问题 |
+| 没有共享 scheme 时，xcodebuild 自动生成的库 scheme 不能跑测试，测试 target 自己又没有 scheme | 每次运行前在 `xcuserdata` 里临时写一个只含测试 target 的 scheme，跑完删掉 |
+| `unitgen note` 按子串判断是不是疑似 bug，说明里出现「DEBUG」就被记成 bug | 只认整词 bug/suspect |
+| 一个测试 target 被两个模块共用（宿主 App 和被测 framework），verify 把覆盖率记到了 App 上，结果 NO_GAIN（MJExtension） | 按生成测试的路径找回它对应的源文件和模块 |
+| 命令行工具 target 被忽略，测试 bundle 直接编译源码的工程（CHCSVParser）找不到模块；没有模块时提示「没有 iOS 模拟器」 | 支持 tool target，并按测试 target 编译的源码配对；提示改成「没有带单测 target 的模块」 |
+| xccov 把 `#if` / `#endif`、块注释计为可执行行，brief 把它们标成未覆盖 | 和 llvm-cov 一样剔除，另外剔除 `#pragma`、`#import` 和块注释里的行 |
+| 包里没有任何测试 target 时，SwiftPM 基线报「测试跑了但没覆盖到代码」，无法开始 | 这种情况记为有效的 0% 基线 |
+| SwiftPM 只给 Swift 插桩，Objective-C 文件没有覆盖率；上一次运行留下的覆盖率 JSON 会被没写新 JSON 的运行（0 个测试）读到 | 运行 Objective-C target 时给 clang 加 `-fprofile-instr-generate -fcoverage-mapping`；每次运行前删掉旧 JSON |
+| Objective-C 的断言失败写成 `((a) equal to (b)) failed`，变异测试把所有杀死都算成「靠崩溃」 | 识别这种格式 |
+| 删掉 ARC 下为空的 `FMDBRetain(x)` 之类兼容宏、`[x release]`、`NSParameterAssert`，以及 `-dealloc` / `deinit` 里的语句，都是测试观察不到的等价变异 | 不再生成 |
+| 写 Objective-C 断言时，`XCTAssertFalse([d isEqual:@{@"a": @1, @"b": @2}])` 编译不过：宏参数里的逗号把字面量拆开了 | brief 的约定里写明要加括号 |
+| 支持命令行工具 target 后，fmdb 的 `fmdb` 工具和 `FMDB MacOS` 编译同一批文件，`targets` 里每个文件出现两次 | 一个文件只归排名靠前的模块（有测试 target、被测试 bundle 直接依赖）；工具只留下自己独有的文件（fmdb 的 FTS3 扩展因此也能测了） |
+| Objective-C++ 不启用 clang modules，`#import <XCTest/XCTest.h>` 不会自动链接，生成的测试 target 链接失败 | 被测 target 含 `.mm` 时，生成的测试 target 带上 `linkerSettings` 链接 XCTest 和 Foundation |
+| 基线构建失败时，提示里引用的是构建进度（`[7/9] Write Objects.LinkFileList`），不是错误本身 | 引用第一条错误行 |
 
 ## Windows（CI）
 
@@ -198,6 +263,7 @@ unitgen 在真实开源项目上的验证过程、结果，以及验证中发现
 | iOS SwiftPM | llvm-cov 把函数里的空行、注释、`#if/#else` 计为可执行行，brief 把空行标成未覆盖，前后分母也对不上（Splash：0/33 → 36/36） | 这些行一律不计 |
 | 变异测试 | 唯一能编译的变异被标成等价后，门禁报 FAILED「no mutant was evaluated」、报告写 0%（Splash 的 Font）；删掉「声明时没赋值的局部常量」的赋值注定编译不过；`var x: Int?` 行尾的 `?` 被当成三元表达式续行，下一行的删除变异全部丢失 | 门禁改为 NOT_APPLICABLE、报告写 n/a；跳过这类删除；修正续行判断 |
 | 运行 | 在工程子目录里执行命令报「No supported project」 | 像 git 一样向上查找工程根目录；鸿蒙模块目录继续向上找到应用根目录 |
+| iOS（第五轮） | Objective-C 相关的 25 个问题 | 见[第五轮](#第五轮objective-c2026-11-03) |
 | 鸿蒙 hvigor | 警告很多的模块（harmony-utils：151 条 ArkTS:WARN）里，COMPILE_ERROR 只给出 80 行警告、看不到真正的错误：hvigor 在 stdout 管道写完前就退出，超过约 64 KB 的部分丢失 | 输出不完整时改读 hvigor 自己的 `.hvigor/outputs/build-logs/build.log`；终端只显示 hvigor 进度和错误（基线的 stderr 从 10,751 行降到 336 行），完整输出照样写日志 |
 | 鸿蒙 brief/targets | import 解析跨到了下一条 import：项目自己的枚举 `DateType` 被当成系统 API，相关行标成 `!~`，文件被排成 platform | 一条 import 不再跨过另一条 import |
 | 变异测试 | hvigor 下枚举比较链（`type == DateType.YmdHms \|\| type == DateType.YmdHm`）、`if / else if` 链、字面量写在左边（`undefined !== a && null !== a`）里的取反仍然编译不过：DateHelper 56 个里 16 个 | 收窄判断覆盖这三种写法；对照实测结果，去掉的 16 个全是编译不过的，没有误伤 |

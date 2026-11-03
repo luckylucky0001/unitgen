@@ -34,6 +34,9 @@ jobs:
         shell: pwsh
       # End to end on a generated HarmonyOS project with the Node shim (no DevEco needed), every OS.
       - run: node scripts/e2e-harmony-shim.mjs
+      # End to end on generated Objective-C projects (SwiftPM package and Xcode project): macOS only, one Node version.
+      - run: node scripts/e2e-objc.mjs
+        if: runner.os == 'macOS' && matrix.node == '24'
       # End to end on a generated Gradle/Java project through the platform's launcher (one Node version).
       - uses: actions/setup-java@v4
         if: matrix.node == '24'

@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseLlvmCovJson } from "../coverage.ts";
 import { errorExcerpt, exists, preferOwnTest, readFile, relPath, run, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
+import { classifyObjC, headerFor, isObjC, objcConventions, SOURCE_EXTS, stem, testExt } from "./objc.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const BEGIN = "// unitgen:begin (generated test targets, managed by unitgen)";
@@ -27,7 +28,9 @@ export class SwiftPMAdapter implements Adapter {
   readonly id = "swiftpm";
   readonly platform = "ios" as const;
   readonly testFileSuffix = `${SUFFIX}.swift`;
+  readonly testFileSuffixes = SOURCE_EXTS.map((x) => `${SUFFIX}${x}`);
   private dump: any;
+  private mods?: { dump: any; modules: Module[] };
   private resolved: Record<string, string> = {};
   private toolchain?: { clt: boolean; xctest: boolean; frameworksDir?: string; libDir?: string; swiftTestingFlag: boolean };
 
@@ -45,6 +48,31 @@ export class SwiftPMAdapter implements Adapter {
 
   private manifestPath(): string {
     return path.join(this.root, "Package.swift");
+  }
+
+  /**
+   * Package.swift and its version-specific variants (`Package@swift-6.1.swift`). SwiftPM loads one of
+   * them depending on the toolchain, so unitgen applies every edit to all of them.
+   */
+  private manifests(): string[] {
+    const versioned = fs.readdirSync(this.root).filter((f) => /^Package@swift-\d+(\.\d+){0,2}\.swift$/.test(f)).sort();
+    return [this.manifestPath(), ...versioned.map((f) => path.join(this.root, f))];
+  }
+
+  /** The manifest this toolchain loads: the versioned one with the highest version not above it, else Package.swift. */
+  private activeManifest(): string {
+    const v = /Swift version (\d+)\.(\d+)(?:\.(\d+))?/.exec(run(["swift", "--version"]).out);
+    if (!v) return this.manifestPath();
+    const num = (a: number[]) => a[0] * 1e6 + (a[1] ?? 0) * 1e3 + (a[2] ?? 0);
+    const current = num([Number(v[1]), Number(v[2]), Number(v[3] ?? 0)]);
+    const picks = this.manifests().slice(1)
+      .map((f) => ({ f, v: num(/@swift-([\d.]+)\.swift$/.exec(f)![1].split(".").map(Number)) }))
+      .filter((x) => x.v <= current).sort((a, b) => b.v - a.v);
+    return picks[0]?.f ?? this.manifestPath();
+  }
+
+  private loadDumpSafe(): any {
+    try { return this.loadDump(); } catch { return undefined; }
   }
 
   private loadDump(): any {
@@ -91,7 +119,12 @@ export class SwiftPMAdapter implements Adapter {
     const t = this.tc();
     lines.push(t.clt ? "toolchain: Command Line Tools (no Xcode) -> Swift Testing only, XCTest targets skipped during runs" : "toolchain: Xcode");
     const xcodeproj = fs.readdirSync(this.root).find((f) => f.endsWith(".xcodeproj") || f.endsWith(".xcworkspace"));
+    const manifests = this.manifests();
+    if (manifests.length > 1) lines.push(`manifests: ${manifests.map((f) => path.basename(f)).join(", ")}; this toolchain loads ${path.basename(this.activeManifest())}. unitgen applies its edits to all of them.`);
     if (xcodeproj) lines.push(`note: ${xcodeproj} exists too; this run uses SwiftPM (macOS). Pass --adapter xcode on every command to run in the iOS Simulator instead (needed for UIKit code).`);
+    if (xcodeproj && !this.loadDumpSafe()?.targets?.some((x: DumpTarget) => x.type === "test" && !x.name.endsWith(SUFFIX))) {
+      lines.push(`note: Package.swift declares no test target, so the baseline starts at 0%. The project's existing tests are probably in ${xcodeproj}: pass --adapter xcode on every command to build on them.`);
+    }
     try {
       const d = this.loadDump();
       const ts: DumpTarget[] = d.targets;
@@ -99,7 +132,8 @@ export class SwiftPMAdapter implements Adapter {
       lines.push(`package: ${d.name} (${ts.filter((x) => x.type === "regular").length - implicit.length} library targets, ${ts.filter((x) => x.type === "executable").length + implicit.length} executable targets (not tested${implicit.length ? `; ${implicit.map((x) => x.name).join(", ")} declared as .target but has main.swift` : ""}), ${ts.filter((x) => x.type === "test").length} test targets)`);
       for (const m of this.modules()) {
         if (!exists(m.dir)) { ok = false; lines.push(`error: source directory of target ${m.name} not found: ${relPath(m.dir, this.root)}`); }
-        else if (!this.sourceFiles(m).length) lines.push(`warning: target ${m.name} has no .swift files in ${relPath(m.dir, this.root)}`);
+        else if (!this.sourceFiles(m).length) lines.push(`warning: target ${m.name} has no .swift, .m or .mm files in ${relPath(m.dir, this.root)}`);
+        else if (m.meta?.objc && !t.xctest) { ok = false; lines.push(`error: target ${m.name} is Objective-C: its tests need XCTest, which only Xcode has (install Xcode and run \`sudo xcode-select -s /Applications/Xcode.app/Contents/Developer\`)`); }
       }
       if (t.clt && ts.some((x) => x.type === "test")) {
         lines.push("note: existing XCTest suites cannot run without Xcode, so the baseline will be 0% here");
@@ -120,9 +154,9 @@ export class SwiftPMAdapter implements Adapter {
       let depth = 0;
       for (const l of readFile(f).split("\n")) {
         const t = l.trim();
-        if (t.startsWith("#if")) depth++;
-        else if (t.startsWith("#endif")) depth = Math.max(0, depth - 1);
-        else if (depth === 0 && /^import\s+UIKit\b/.test(t)) return true;
+        if (/^#\s*if/.test(t)) depth++;
+        else if (/^#\s*endif/.test(t)) depth = Math.max(0, depth - 1);
+        else if (depth === 0 && /^(import\s+UIKit\b|#\s*import\s+<UIKit\/|@import\s+UIKit\b)/.test(t)) return true;
       }
       return false;
     }));
@@ -143,6 +177,14 @@ export class SwiftPMAdapter implements Adapter {
 
   modules(): Module[] {
     const d = this.loadDump();
+    // Cached per manifest dump: ensureTarget() drops the dump when it changes Package.swift.
+    if (this.mods && this.mods.dump === d) return this.mods.modules;
+    const modules = this.readModules(d);
+    this.mods = { dump: d, modules };
+    return modules;
+  }
+
+  private readModules(d: any): Module[] {
     const targets: DumpTarget[] = d.targets;
     const testDirs = targets.filter((t) => t.type === "test").map((t) => this.targetDir(t));
     return targets
@@ -153,7 +195,9 @@ export class SwiftPMAdapter implements Adapter {
         // Never nest our target inside another test target's directory (sources would overlap).
         const overlaps = testDirs.some((td) => !td.endsWith(SUFFIX) && (conventional + path.sep).startsWith(td + path.sep));
         const testRoot = overlaps ? path.join(this.root, "UnitGenTests", t.name) : conventional;
-        return { name: t.name, dir, sourceRoots: [dir], testRoot, kind: "swiftpm-target", meta: { testTarget: `${t.name}${SUFFIX}` } };
+        // A SwiftPM target is one language: C-family targets hold .m/.mm (and .c) files.
+        const objc = walkFiles(dir, [".m", ".mm"]).length > 0 && !walkFiles(dir, [".swift"]).length;
+        return { name: t.name, dir, sourceRoots: [dir], testRoot, kind: objc ? "swiftpm-objc-target" : "swiftpm-target", meta: { testTarget: `${t.name}${SUFFIX}`, objc } };
       });
   }
 
@@ -163,10 +207,19 @@ export class SwiftPMAdapter implements Adapter {
   }
 
   sourceFiles(m: Module): string[] {
-    return walkFiles(m.dir, [".swift"]);
+    return walkFiles(m.dir, SOURCE_EXTS);
+  }
+
+  headerFor(source: string): string | undefined {
+    const m = this.moduleFor(source);
+    return headerFor(source, m ? [m.dir] : []);
   }
 
   classify(file: string, text: string): FileKind {
+    if (isObjC(file)) {
+      const h = this.headerFor(file);
+      return classifyObjC(file, text, h ? readFile(h) : "");
+    }
     if (/Generated|\.generated\./.test(file) || /^\/\/.*(generated|DO NOT EDIT)/im.test(text.slice(0, 400))) return "generated";
     if (/:\s*(some\s+)?View\b|:\s*(UI|NS)\w*(View|Cell|Controller|Control|Window|Button|Label)\b|UIViewController|NSViewController|UIView\b|@main\b/.test(text) && /import\s+(SwiftUI|UIKit|AppKit)/.test(text)) return "ui";
     const decls = (text.match(/\bfunc\s+\w+/g) ?? []).length + (text.match(/\b(init|subscript)\s*[(<]/g) ?? []).length + (text.match(/\b(get|set)\s*\{/g) ?? []).length;
@@ -175,21 +228,40 @@ export class SwiftPMAdapter implements Adapter {
   }
 
   placement(source: string, m: Module): TestPlacement {
-    const base = path.basename(source, ".swift").replace(/[^A-Za-z0-9_]/g, "_");
+    const base = stem(source).replace(/[^A-Za-z0-9_]/g, "_");
+    const header = this.headerFor(source);
     return {
-      path: path.join(m.testRoot, `${base}${SUFFIX}.swift`),
+      path: path.join(m.testRoot, `${base}${SUFFIX}${testExt(source)}`),
       suiteName: `${base}${SUFFIX}`,
-      importHint: `@testable import ${m.name}`,
+      importHint: isObjC(source) ? (header ? `#import "${path.basename(header)}"` : undefined) : `@testable import ${m.name}`,
     };
+  }
+
+  /** Directories of the target's headers, relative to the generated test target (its header search paths). */
+  private headerDirs(m: Module): string[] {
+    const dirs = [...new Set(walkFiles(m.dir, [".h"]).map((f) => path.dirname(f)))].sort();
+    return dirs.map((d) => path.relative(m.testRoot, d).split(path.sep).join("/") || ".");
   }
 
   /** Major version from `// swift-tools-version:X.Y` (0 when unknown). */
   private toolsMajor(): number {
-    const m = /^\/\/\s*swift-tools-version:\s*(\d+)/.exec(readFile(this.manifestPath()));
+    const m = /^\/\/\s*swift-tools-version:\s*(\d+)/.exec(readFile(this.activeManifest()));
     return m ? Number(m[1]) : 0;
   }
 
-  conventions(m: Module): string {
+  conventions(m: Module, source?: string): string {
+    if (m.meta?.objc || (source && isObjC(source))) {
+      const header = source ? this.headerFor(source) : undefined;
+      return objcConventions({
+        where: `Platform: Swift package, Objective-C target \`${m.name}\`. Tests compile into the dedicated Objective-C test target \`${m.meta?.testTarget}\` (directory ${relPath(m.testRoot, this.root)}); every file in it must be Objective-C (SwiftPM does not mix languages in a target). They run on macOS via \`swift test\`.`,
+        suite: source ? this.placement(source, m).suiteName : `<Name>${SUFFIX}`,
+        header: header ? path.basename(header) : undefined,
+        // SwiftPM compiles Objective-C with -fobjc-arc unless the target opts out with unsafeFlags.
+        arc: !/-fno-objc-arc/.test(readFile(this.manifestPath())),
+        examples: [],
+        publicOnly: `Every header of \`${m.name}\` is on the test target's header search path, so \`#import "Header.h"\` works for public and internal headers alike. No UIKit: the tests build for macOS.`,
+      });
+    }
     const t = this.tc();
     // Before tools-version 6.0 a plain `swift test` (what the project's CI runs) skips Swift Testing:
     // generated tests must be XCTest there to keep running after unitgen is gone.
@@ -215,7 +287,9 @@ export class SwiftPMAdapter implements Adapter {
   exampleTests(m: Module, source?: string): string[] {
     const d = this.loadDump();
     const tests = (d.targets as DumpTarget[]).filter((t) => t.type === "test" && (t.dependencies ?? []).some((dep) => JSON.stringify(dep).includes(`"${m.name}"`)));
-    const files = tests.flatMap((t) => walkFiles(this.targetDir(t), [".swift"]));
+    const lang = m.meta?.objc ? [".m", ".mm"] : [".swift"];
+    const all = tests.flatMap((t) => walkFiles(this.targetDir(t), SOURCE_EXTS));
+    const files = all.some((f) => lang.some((x) => f.endsWith(x))) ? all.filter((f) => lang.some((x) => f.endsWith(x))) : all;
     return preferOwnTest(files, source, files.sort((a, b) => fs.statSync(a).size - fs.statSync(b).size).filter((f) => fs.statSync(f).size > 300));
   }
 
@@ -224,24 +298,25 @@ export class SwiftPMAdapter implements Adapter {
     this.ensureTarget(m);
   }
 
-  /** Register `<Target>UnitGenTests` in Package.swift (idempotent). */
+  /** Register `<Target>UnitGenTests` in Package.swift and its versioned variants (idempotent). */
   ensureTarget(m: Module): void {
-    const manifest = readFile(this.manifestPath());
     const name = m.meta?.testTarget as string;
-    if (manifest.includes(`name: "${name}"`)) return;
-    const line = `package.targets.append(.testTarget(name: "${name}", dependencies: ["${m.name}"], path: "${relPath(m.testRoot, this.root)}"))`;
-    let next: string;
-    if (manifest.includes(BEGIN)) {
-      next = manifest.replace(END, `${line}\n${END}`);
-    } else {
-      next = `${manifest.trimEnd()}\n\n${BEGIN}\n${line}\n${END}\n`;
+    // Objective-C tests import the target's headers by name, internal ones included: put every header
+    // directory of the target on the test target's search path.
+    const cSettings = m.meta?.objc ? `, cSettings: [${this.headerDirs(m).map((d) => `.headerSearchPath("${d}")`).join(", ")}]` : "";
+    // Objective-C++ builds without clang modules, so nothing links XCTest and Foundation automatically.
+    const linker = m.meta?.objc && walkFiles(m.dir, [".mm"]).length ? `, linkerSettings: [.linkedFramework("XCTest"), .linkedFramework("Foundation")]` : "";
+    const line = `package.targets.append(.testTarget(name: "${name}", dependencies: ["${m.name}"], path: "${relPath(m.testRoot, this.root)}"${cSettings}${linker}))`;
+    for (const file of this.manifests()) {
+      const manifest = readFile(file);
+      if (manifest.includes(`name: "${name}"`)) continue;
+      writeFile(file, manifest.includes(BEGIN) ? manifest.replace(END, `${line}\n${END}`) : `${manifest.trimEnd()}\n\n${BEGIN}\n${line}\n${END}\n`);
+      this.dump = undefined;
     }
-    writeFile(this.manifestPath(), next);
-    this.dump = undefined;
   }
 
-  private backupPath(): string {
-    return path.join(this.stateDir, "Package.swift.orig");
+  private backupPath(manifest = this.manifestPath()): string {
+    return path.join(this.stateDir, `${path.basename(manifest)}.orig`);
   }
 
   recover(): void {
@@ -249,9 +324,10 @@ export class SwiftPMAdapter implements Adapter {
   }
 
   private restoreIfCrashed(): void {
-    if (exists(this.backupPath())) {
-      fs.copyFileSync(this.backupPath(), this.manifestPath());
-      fs.unlinkSync(this.backupPath());
+    for (const file of this.manifests()) {
+      if (!exists(this.backupPath(file))) continue;
+      fs.copyFileSync(this.backupPath(file), file);
+      fs.unlinkSync(this.backupPath(file));
     }
     this.unpark();
   }
@@ -269,8 +345,8 @@ export class SwiftPMAdapter implements Adapter {
     const moved: { from: string; to: string }[] = [];
     const dirs = new Set(keep.map((f) => path.dirname(path.resolve(f))));
     for (const d of dirs) {
-      for (const f of walkFiles(d, [".swift"])) {
-        if (keepSet.has(f) || !f.endsWith(`${SUFFIX}.swift`)) continue;
+      for (const f of walkFiles(d, SOURCE_EXTS)) {
+        if (keepSet.has(f) || !this.testFileSuffixes.some((x) => f.endsWith(x))) continue;
         moved.push({ from: f, to: path.join(this.stateDir, "swift-parked", relPath(f, this.root)) });
       }
     }
@@ -290,11 +366,16 @@ export class SwiftPMAdapter implements Adapter {
     if (exists(parked) && !walkFiles(parked, [""], new Set()).length) fs.rmSync(parked, { recursive: true, force: true });
   }
 
-  /** Temporarily rewrite Package.swift so the run works on this toolchain. Returns a restore fn. */
+  /** Temporarily rewrite the manifests so the run works on this toolchain. Returns a restore fn. */
   private applyRuntimeManifest(onlyOurs: boolean, withoutOurs = false): () => void {
+    const restores = this.manifests().map((f) => this.applyRuntimeManifestTo(f, onlyOurs, withoutOurs));
+    return () => { for (const r of restores) r(); };
+  }
+
+  private applyRuntimeManifestTo(file: string, onlyOurs: boolean, withoutOurs: boolean): () => void {
     const t = this.tc();
     const d = this.loadDump();
-    const original = readFile(this.manifestPath());
+    const original = readFile(file);
     const patches: string[] = [];
     let text = original;
     if (!t.xctest || onlyOurs) {
@@ -318,11 +399,11 @@ export class SwiftPMAdapter implements Adapter {
     }
     if (!patches.length && text === original) return () => {};
     fs.mkdirSync(this.stateDir, { recursive: true });
-    fs.copyFileSync(this.manifestPath(), this.backupPath());
-    writeFile(this.manifestPath(), `${text.trimEnd()}\n\n${RUNTIME}\n${patches.join("\n")}\n`);
+    fs.copyFileSync(file, this.backupPath(file));
+    writeFile(file, `${text.trimEnd()}\n\n${RUNTIME}\n${patches.join("\n")}\n`);
     return () => {
-      fs.copyFileSync(this.backupPath(), this.manifestPath());
-      fs.unlinkSync(this.backupPath());
+      fs.copyFileSync(this.backupPath(file), file);
+      fs.unlinkSync(this.backupPath(file));
     };
   }
 
@@ -350,14 +431,27 @@ export class SwiftPMAdapter implements Adapter {
     const t = this.tc();
     const logFile = path.join(this.stateDir, "logs", `${req.label}.log`);
     const mods = req.modules ?? this.modules();
+    if (req.testFiles?.some(isObjC) && !t.xctest) {
+      return { ok: false, compiled: false, tests: [], logFile, excerpt: "", seconds: 0, infraError: "Objective-C tests need XCTest, which only Xcode has: install Xcode and run `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`" };
+    }
     const ours = req.testFiles !== undefined;
-    const restore = this.applyRuntimeManifest(ours, !ours && !!req.excludeGenerated);
+    // Resolution with this toolchain may rewrite Package.resolved (an older Swift picks other versions):
+    // put the project's file back afterwards.
+    const resolvedFile = path.join(this.root, "Package.resolved");
+    const resolved = exists(resolvedFile) ? readFile(resolvedFile) : undefined;
+    const restoreManifests = this.applyRuntimeManifest(ours, !ours && !!req.excludeGenerated);
+    const restore = () => {
+      restoreManifests();
+      if (resolved !== undefined && exists(resolvedFile) && readFile(resolvedFile) !== resolved) writeFile(resolvedFile, resolved);
+    };
     if (ours) this.park(req.testFiles!);
     const start = Date.now();
     try {
       const args = ["swift", "test"];
       if (t.swiftTestingFlag) args.push("--enable-swift-testing");
       if (req.coverage) args.push("--enable-code-coverage");
+      // --enable-code-coverage instruments Swift only: Objective-C targets need clang's own flags.
+      if (req.coverage && mods.some((m) => m.meta?.objc)) args.push("-Xcc", "-fprofile-instr-generate", "-Xcc", "-fcoverage-mapping");
       if (t.clt && t.frameworksDir) {
         args.push("-Xswiftc", `-F${t.frameworksDir}`, "-Xlinker", `-F${t.frameworksDir}`,
           "-Xlinker", "-rpath", "-Xlinker", t.frameworksDir, "-Xlinker", "-rpath", "-Xlinker", t.libDir!);
@@ -367,7 +461,8 @@ export class SwiftPMAdapter implements Adapter {
       // and coverage gains are computed against baseline + accepted, so co-running accepted files is harmless.
       // Raw profiles of an earlier run must not leak into this one (see coverageFromProfraw).
       const codecovJson = req.coverage ? (await runAsync(["swift", "test", "--show-codecov-path"], { cwd: this.root })).out.trim().split("\n").pop()! : "";
-      if (codecovJson) for (const f of walkFiles(path.dirname(codecovJson), [".profraw"])) fs.rmSync(f, { force: true });
+      // Nor its JSON: a run that writes none (no tests, a failing test) must not read the last one.
+      if (codecovJson) for (const f of [codecovJson, ...walkFiles(path.dirname(codecovJson), [".profraw"])]) fs.rmSync(f, { force: true });
       const r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
       const out = stripAnsi(r.out);
       const tests = parseSwiftTestOutput(out);
@@ -376,14 +471,15 @@ export class SwiftPMAdapter implements Adapter {
       if (req.coverage && compiled) {
         const p = codecovJson;
         const dirs = mods.map((m) => m.dir + path.sep);
+        const inModule = (f: string) => dirs.some((d) => f.startsWith(d)) && SOURCE_EXTS.some((x) => f.endsWith(x));
         if (exists(p)) {
-          coverage = parseLlvmCovJson(JSON.parse(readFile(p)), (f) => dirs.some((d) => f.startsWith(d)));
+          coverage = parseLlvmCovJson(JSON.parse(readFile(p)), inModule);
           if (process.env.UNITGEN_KEEP_COV !== "1") fs.unlinkSync(p);
         } else {
           // SwiftPM writes the JSON only when every test passes; with failing tests (a baseline with
           // --allow-failing) the raw profiles are still there.
           const json = await this.coverageFromProfraw(p);
-          if (json) coverage = parseLlvmCovJson(json, (f) => dirs.some((d) => f.startsWith(d)));
+          if (json) coverage = parseLlvmCovJson(json, inModule);
         }
       }
       const infraError = r.timedOut ? "timeout" : undefined;
@@ -392,7 +488,10 @@ export class SwiftPMAdapter implements Adapter {
         writeFile(logFile + ".note", "xctest-skipped");
       }
       const noTests = /error: no tests found/.test(out);
+      // A package that declares no test target of its own really is at 0%: not a misconfigured run.
+      const noTestTargets = !(this.loadDump().targets as DumpTarget[]).some((x) => x.type === "test" && !x.name.endsWith(SUFFIX));
       return {
+        ...(noTests && !ours && noTestTargets ? { emptyCoverageOk: true } : {}),
         ok: r.ok || (noTests && !ours), compiled, tests, coverage, logFile, seconds: (Date.now() - start) / 1000,
         excerpt: r.ok || (noTests && !ours) ? "" : errorExcerpt(out), infraError,
         note: !ours && !t.xctest ? "existing XCTest suites skipped: XCTest needs Xcode (only the Command Line Tools are installed)" : undefined,

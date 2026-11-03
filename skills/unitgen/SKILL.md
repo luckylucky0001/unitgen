@@ -1,6 +1,6 @@
 ---
 name: unitgen
-description: Backfill unit tests for iOS (Swift/SwiftPM), Android (Kotlin/Java, Gradle) and HarmonyOS (ArkTS) projects, keeping only tests that compile, pass repeatedly, assert something and raise line coverage. Use when the user asks to add/补 unit tests, raise coverage, or "write tests for" files in a mobile codebase.
+description: Backfill unit tests for iOS (Swift and Objective-C; SwiftPM and Xcode), Android (Kotlin/Java, Gradle) and HarmonyOS (ArkTS) projects, keeping only tests that compile, pass repeatedly, assert something and raise line coverage. Use when the user asks to add/补 unit tests, raise coverage, or "write tests for" files in a mobile codebase.
 ---
 
 # unitgen: coverage-guided unit test backfilling
@@ -161,7 +161,7 @@ fixed multi-minute sleeps. Cancellation must stop the command, not only the agen
 
 Read the matching reference before writing the first test for a platform:
 
-- iOS / Swift: [references/ios.md](references/ios.md)
+- iOS / Swift / Objective-C: [references/ios.md](references/ios.md)
 - Android / Kotlin / Java: [references/android.md](references/android.md)
 - HarmonyOS / ArkTS: [references/harmony.md](references/harmony.md)
 

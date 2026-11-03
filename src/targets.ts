@@ -54,6 +54,11 @@ export function estimateExecutable(text: string): number[] {
       if (!l.includes("*/")) inBlock = true;
       return;
     }
+    // Objective-C: preprocessor lines and @interface/@property/@end are no code; @try, @synchronized and friends are.
+    if (/^#\s*(import|include|pragma|define|undef|if|ifdef|ifndef|elif|else|endif|warning|error)\b/.test(l)) return;
+    if (/^@(try|catch|finally|synchronized|autoreleasepool|throw)\b/.test(l)) { out.push(i + 1); return; }
+    // `*error = ...` (an NSError ** out-parameter) is code, not a comment line.
+    if (/^\*\s*\w+\s*=[^=]/.test(l)) { out.push(i + 1); return; }
     if (!l || l.startsWith("//") || l.startsWith("*") || l.startsWith("@") || l.startsWith("import ") || l.startsWith("package ")) return;
     if (/^[{}()\[\],;]+$/.test(l)) return;
     // Continuation lines of a data literal (`'com', 'net', 'org',` / `0x1F, 0x20,`) are one expression.

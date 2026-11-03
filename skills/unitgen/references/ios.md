@@ -1,4 +1,4 @@
-# iOS / Swift (SwiftPM and Xcode)
+# iOS / Swift and Objective-C (SwiftPM and Xcode)
 
 ## How unitgen runs it
 
@@ -11,6 +11,9 @@
   manifest that keeps only the generated targets (`--enable-swift-testing` matters: packages with
   `swift-tools-version` < 6.0 otherwise run 0 `@Test` functions). `Package.swift` is restored
   afterwards; after a crash or forced kill the next unitgen command restores it.
+- Version-specific manifests (`Package@swift-6.1.swift`): SwiftPM loads the one matching the
+  toolchain, so unitgen writes its block and its temporary patches into every manifest; `doctor`
+  names the one in use. `Package.resolved` is restored after each run.
 - The baseline runs the package's own tests only; generated targets are excluded.
 - A `.target` that contains `main.swift` builds as an executable: unitgen does not offer it
   (tests cannot import it).
@@ -91,3 +94,61 @@ import Testing
   Test them through the internal/public API that calls them.
 - Static caches and singletons persist across tests in the same process: use unique keys
   or reset them (`clearCache()`-style APIs) inside the test.
+
+## Objective-C
+
+A `.m` / `.mm` source gets an Objective-C test (XCTest), whatever else the target contains: the brief
+names the file (`Foo.m` -> `FooUnitGenTests.m`, `NSString+Foo.m` -> `NSString_FooUnitGenTests.m`,
+`.mm` -> `.mm`), the class and the header to import, and shows that header in full under
+"Interface". Only what the header declares is callable; a method missing there is private.
+
+```objc
+#import <XCTest/XCTest.h>
+#import "Parser.h"
+
+@interface ParserUnitGenTests : XCTestCase
+@end
+
+@implementation ParserUnitGenTests
+
+- (void)testEvaluatesTableOfInputs {
+    NSDictionary<NSString *, NSNumber *> *cases = @{@"1+2": @3, @"2*3": @6};
+    for (NSString *input in cases) {
+        NSError *error = nil;
+        XCTAssertEqualWithAccuracy([[Parser parserWithString:input] evaluate:&error], cases[input].doubleValue, 1e-9, @"%@", input);
+        XCTAssertNil(error, @"%@", input);
+    }
+}
+
+- (void)testEmptyInputFails {
+    NSError *error = nil;
+    XCTAssertEqual([[Parser parserWithString:@""] evaluate:&error], 0.0);
+    XCTAssertEqualObjects(error.domain, ParserErrorDomain);
+    XCTAssertEqual(error.code, ParserErrorEmpty);
+}
+
+@end
+```
+
+- `XCTAssertEqualObjects` for objects, `XCTAssertEqual` for scalars, `XCTAssertEqualWithAccuracy` for
+  floating point. Wrap literals that contain commas in parentheses inside an assertion
+  (`XCTAssertEqualObjects(list, (@[@1, @2]))`): XCTAssert* are macros.
+- `NSError **` APIs: pass `&error`, assert on the return value and on `error.domain` / `error.code`.
+  `XCTAssertThrowsSpecificNamed` for APIs that raise NSException.
+- Messages to nil return nil/0/NO, so a test that "does not crash" proves nothing: assert values.
+- Test doubles: subclass the class (override the method you observe) or implement the delegate
+  protocol in the test file; FMDatabaseQueue-style `+databaseClass` hooks are public API. No OCMock
+  unless the existing tests already import it.
+- The brief says whether the test target uses ARC; without ARC, balance alloc/copy with release.
+- Xcode: the file goes into the existing unit-test target and is registered in `project.pbxproj`
+  (`sourcecode.c.objc`); headers of the same project are found by name (`#import "Foo.h"`), or import
+  them the way the existing tests do (`#import <Foo/Foo.h>`, `@import Foo;`).
+- SwiftPM: Objective-C targets get their own Objective-C test target `<Target>UnitGenTests`; every
+  header directory of the target is on its header search path. Needs Xcode (XCTest), not just the
+  Command Line Tools. Tests run on macOS: no UIKit.
+- Mutation testing also flips `YES`/`NO`, deletes message sends (`[self.items addObject:x];`, also
+  over several lines) and negates conditions such as `if ([s hasPrefix:@"x"])`. It leaves `-dealloc`,
+  `[super init]` chains and retain/release (or `FooRetain(x)`-style macros that are empty under ARC)
+  alone, because no test can observe them.
+- Projects whose old deployment target links `libarclite` (removed in Xcode 14.3) do not build on
+  current Xcode; unitgen reports it as an environment problem. Raise the deployment target first.

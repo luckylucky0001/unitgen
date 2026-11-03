@@ -29,13 +29,14 @@ unitgen 采用的就是调研结论推荐的路线：平台无关的 LLM 闭环 
 | | 识别 | 运行与覆盖率 | 生成测试位置 |
 |---|---|---|---|
 | iOS（SwiftPM） | `Package.swift` | `swift test --enable-swift-testing --enable-code-coverage`，解析 llvm-cov 导出（与 `llvm-cov export -format=lcov` 逐行一致） | 独立 test target `<Target>UnitGenTests`（Package.swift 末尾带标记的块） |
-| iOS（Xcode） | `.xcodeproj` / `.xcworkspace`（两者并存时 `--adapter xcode`） | `xcodebuild test` + iOS 模拟器，`-only-testing` 隔离，`xccov` 读覆盖率 | 现有测试 target 里的 `<类>UnitGenTests.swift`，需要时登记到 project.pbxproj |
+| iOS（Xcode） | `.xcodeproj` / `.xcworkspace`（两者并存时 `--adapter xcode`） | `xcodebuild test` + iOS 模拟器（macOS 测试 target 在本机），`-only-testing` 隔离，`xccov` 读覆盖率；按 `.xcscheme` / test plan 选 scheme，没有可用 scheme 时临时写一个 | 现有测试 target 里的 `<类>UnitGenTests.swift` / `.m`，需要时登记到 project.pbxproj |
+| iOS（Objective-C） | target 里的 `.m` / `.mm`（Xcode 和 SwiftPM 都支持） | 同上；SwiftPM 运行时给 clang 加覆盖率插桩参数 | Objective-C 的 XCTest 文件，brief 附上同名头文件；SwiftPM 里是单独的 Objective-C 测试 target，头文件目录都加进 `headerSearchPath` |
 | Android | `settings.gradle(.kts)` | 自动发现每个模块的单测任务（含 flavor），`-I` 注入 JaCoCo init script，**不改任何构建文件**；兼容 configuration cache / isolated projects | `src/test/<kotlin|java>/<包路径>/<类>UnitGenTest.kt`，`--tests` 只跑这一个类，`--rerun` 防缓存 |
 | 鸿蒙 | `build-profile.json5`（或 git 忽略了它时的 `build-profile.template.json5`） | 默认 hvigor：自动发现 DevEco，按 DevEco 本地测试流程（`isLocalTest`/`unitTestMode`/`buildRoot=.test`）在 Previewer 里跑，真实 ArkTS 编译器；verify/mutate 时把 `List.test.ets` 临时指向被测文件，别处编译不过的旧测试不影响；读 `coverageReport.json`。备选 Node shim：TS 转译 .ets、ArkUI struct/@Builder 挖空、hypium 兼容实现、按 source map 逐段映射 V8 覆盖率、ArkTS 限制 lint | `<module>/src/test/<文件>.unitgen.test.ets`，自动登记到 `List.test.ets` |
 
 ## 安全性：被改动的文件总能还原
 
-`mutate` 临时改被测源码，并写日志 `.unitgen/mutation-in-progress.json`；鸿蒙 hvigor 运行时临时替换 `List.test.ets`（`.unitgen/harmony-list.json`）；iOS 隔离验证时临时挪开同 target 的其他生成测试、改写 `Package.swift`。任何 unitgen 命令启动和退出时都会在持有锁的前提下还原它们。
+`mutate` 临时改被测源码，并写日志 `.unitgen/mutation-in-progress.json`；鸿蒙 hvigor 运行时临时替换 `List.test.ets`（`.unitgen/harmony-list.json`）；iOS 隔离验证时临时挪开同 target 的其他生成测试、改写 `Package.swift`，Xcode 没有可用 scheme 时在 `xcuserdata` 里临时写一个 scheme。任何 unitgen 命令启动和退出时都会在持有锁的前提下还原它们。
 
 锁文件 `.unitgen/run.lock` 记录监督进程、worker 和所有后代进程（PID + 启动时间）。被强杀（SIGKILL、关掉终端、Agent 会话中断）后，下一条命令会确认这些进程都已退出，停掉能确认身份的残留进程，接管锁并还原上面这些文件。超时和取消会终止测试的整棵进程树，包括自己另开进程组的测试助手（如 `swiftpm-testing-helper`）；鸿蒙 hvigor 守护进程和它启动的 Previewer 不在这棵树里，unitgen 单独停掉本项目的守护进程和 Previewer。
 

@@ -2,7 +2,7 @@
 
 [中文](README.md) · English
 
-unitgen adds unit tests to iOS (Swift), Android (Kotlin/Java) and HarmonyOS (ArkTS) projects. It is
+unitgen adds unit tests to iOS (Swift, Objective-C), Android (Kotlin/Java) and HarmonyOS (ArkTS) projects. It is
 a command-line tool with a Skill for Claude Code and TRAE.
 
 An AI writes the tests; unitgen picks the targets and checks the results. It ranks source files by
@@ -26,7 +26,7 @@ comparison with similar tools are in [docs/DESIGN.md](docs/DESIGN.md) (Chinese).
 
 ## Validation
 
-The full workflow has been run on 20 open-source projects with real toolchains (DevEco Studio 26,
+The full workflow has been run on 25 open-source projects with real toolchains (DevEco Studio 26,
 Xcode 16.4, Android SDK + Gradle). Some results:
 
 | Project | Platform | Target file | Coverage | Mutation score |
@@ -40,8 +40,11 @@ Xcode 16.4, Android SDK + Gradle). Some results:
 | [architecture-samples](https://github.com/android/architecture-samples) 45.9k★ | Android · Gradle | `TaskNetworkDataSource.kt` | 0% → 100% | 100% |
 | [Pokedex](https://github.com/skydoves/Pokedex) 8.4k★ | Android · Gradle (multi-module) | `DetailRepositoryImpl.kt` | 89% → 100% | 100% |
 | [ObjectMapper](https://github.com/tristanhimmelman/ObjectMapper) 9.1k★ | iOS · Xcode + Simulator | `Map.swift` | 75% → 98% | 100% |
+| [fmdb](https://github.com/ccgus/fmdb) 13.8k★ | iOS · Objective-C · Xcode (macOS) | `FMDatabaseQueue.m` | 78% → 100% | 96% |
+| [MJExtension](https://github.com/CoderMJLee/MJExtension) 8.5k★ | iOS · Objective-C · Xcode + Simulator | `NSString+MJExtension.m` | 35% → 100% | 90% |
+| [CocoaLumberjack](https://github.com/CocoaLumberjack/CocoaLumberjack) 13.3k★ | iOS · Objective-C · SwiftPM | `DDDispatchQueueLogFormatter.m` | 13% → 100% | 88% |
 
-Numbers for all 35 target files, how they were measured, and suspected bugs found in these
+Numbers for all 42 target files, how they were measured, and suspected bugs found in these
 projects: [docs/VALIDATION.md](docs/VALIDATION.md) (Chinese).
 
 ## Install
@@ -52,7 +55,7 @@ Set up the platforms you need:
 |---|---|
 | all | Node.js ≥ 22.18 (`node -v`). Without one on PATH, the Node bundled with DevEco Studio is used |
 | HarmonyOS | Recommended: [DevEco Studio](https://developer.huawei.com/consumer/cn/deveco-studio/), found automatically. unitgen then runs local unit tests with the real hvigor, ArkTS compiler and Previewer runtime; no emulator or device needed. The project must declare `@ohos/hypium` in devDependencies (≥ 1.0.19 for coverage) and have run `ohpm install`. Without DevEco, a built-in Node shim runs pure-logic code only |
-| iOS | Xcode. SwiftPM packages run with `swift test`; `.xcodeproj` projects on an iOS Simulator. With only the Command Line Tools, only Swift Testing tests in Swift packages run |
+| iOS | Xcode. SwiftPM packages run with `swift test`; `.xcodeproj` projects on an iOS Simulator (macOS targets on this Mac). With only the Command Line Tools, only Swift Testing tests in Swift packages run; Objective-C tests use XCTest and need Xcode |
 | Android | JDK 17+ (`JAVA_HOME`) and the Android SDK (`ANDROID_HOME`, or the project's `local.properties`). On Apple silicon use an arm64 JDK (e.g. `brew install openjdk@17`): an x86_64 JDK under Rosetta builds slowly |
 
 Install unitgen:
@@ -227,6 +230,16 @@ how long the finished mutants took, at least 20 s), so loop-heavy code makes a r
 - The brief names the test framework. Packages with `swift-tools-version` < 6.0 need XCTest: a
   plain `swift test` in their CI never runs Swift Testing. The same applies to Xcode targets older
   than iOS 13 / macOS 10.15. Otherwise Swift Testing is used.
+- Objective-C: tests of `.m` / `.mm` files are written in Objective-C (XCTest) as `<File>UnitGenTests.m`; a
+  category file `NSString+Foo.m` maps to `NSString_FooUnitGenTests.m`. The brief includes the matching
+  header in full, and tests may only call what it declares. In mixed Swift/Objective-C targets each file
+  is tested in its own language.
+- Objective-C SwiftPM targets get an Objective-C test target (SwiftPM does not mix languages in one
+  target). unitgen puts every header directory of the target under test on its `headerSearchPath`, so
+  internal headers can be imported too, and adds the clang coverage flags SwiftPM leaves out.
+- Projects without shared schemes (schemes live in the usually uncommitted `xcuserdata`): the scheme
+  Xcode generates may be unable to run tests. unitgen then writes a scheme with just the test target to
+  `xcuserdata` before each run and deletes it afterwards.
 - Xcode builds go to `.unitgen/DerivedData`, so an open Xcode is not disturbed. unitgen's own
   xcodebuild runs turn on `ENABLE_TESTABILITY` (needed for `@testable import`) and turn off legacy
   gcov coverage settings (they zero llvm coverage). This applies to those runs only; the project is
@@ -247,8 +260,8 @@ how long the finished mutants took, at least 20 s), so loop-heavy code makes a r
 |---|---|---|
 | all | `.unitgen/` (state, logs, REPORT.md; it has its own `.gitignore`); add it to the project's `.gitignore` | — |
 | HarmonyOS | `<module>/src/test/<File>.unitgen.test.ets`; hvigor's own `<module>/.test/` output (most projects already ignore `**/.test`) | `<module>/src/test/List.test.ets`, which registers generated tests so DevEco runs them too |
-| iOS SwiftPM | `Tests/<Target>UnitGenTests/` | a marked block `// unitgen:begin … // unitgen:end` at the end of `Package.swift` (a separate test target) |
-| iOS Xcode | `<Class>UnitGenTests.swift` in the existing test target | registration in `project.pbxproj` when needed (original kept in `.unitgen/`) |
+| iOS SwiftPM | `Tests/<Target>UnitGenTests/` | a marked block `// unitgen:begin … // unitgen:end` at the end of `Package.swift` (a separate test target), and of every `Package@swift-*.swift` |
+| iOS Xcode | `<Class>UnitGenTests.swift` / `.m` in the existing test target | registration in `project.pbxproj` when needed (original kept in `.unitgen/`) |
 | Android | `src/test/<kotlin\|java>/<package>/<Class>UnitGenTest.kt` | — |
 
 Production code, existing tests and build configuration are never changed. During `mutate` the

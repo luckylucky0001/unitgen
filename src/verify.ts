@@ -54,7 +54,9 @@ function suiteTests(run: TestRun, adapter: Adapter, testFile: string): TestCase[
     const fn = /([A-Za-z_]\w*)\s*\(/.exec(t.name)?.[1] ?? t.name.split(/[.>\s]+/).pop() ?? "";
     return fn && new RegExp(`\\bfunc\\s+${fn}\\b|\\bfun\\s+\`?${fn}\\b|it\\(\\s*['"]${fn}['"]`).test(text);
   });
-  return declared.length ? declared : run.tests;
+  // Nothing that ran belongs to this file (it was not built into the run, or another target's tests
+  // ran instead): never judge the file by other tests' results.
+  return declared;
 }
 
 /** "// UNITGEN-SUSPECT: ..." plus any directly following comment lines. */
@@ -113,7 +115,8 @@ export async function verify(adapter: Adapter, state: State, testFile: string, o
   }
   const tests = suiteTests(run, adapter, abs);
   if (!tests.length) {
-    return res("no_tests", { feedback: `No tests from this file were executed.\n${run.excerpt}`, logFile: run.logFile, suspects });
+    const others = run.tests.length ? ` ${run.tests.length} other test(s) ran instead (e.g. ${run.tests.slice(0, 3).map((t) => t.name).join(", ")}): check that the file declares the suite/class named in the brief and that the run picks it up.` : "";
+    return res("no_tests", { feedback: `No tests from this file were executed.${others}\n${run.excerpt}`, logFile: run.logFile, suspects });
   }
   const failed = tests.filter((t) => t.status === "failed");
   if (failed.length || !run.ok) {
