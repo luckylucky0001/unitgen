@@ -31,6 +31,8 @@ static NSString * const kKey = @"grade";
     NSString * name = nil;
     NSLog(@"score %ld", (long)score);
     NSParameterAssert(name);
+    pthread_mutex_lock(&_lock);
+    [self.cacheLock unlock];
     FMDBRelease(name);
     [name release];
     return score * 2 > LIMIT ? @"B" : @"C";
@@ -116,6 +118,10 @@ NS_ASSUME_NONNULL_END`;
   ]);
   const impl = objcDeclarationLines(IMPL);
   assert.deepEqual(impl, ["@implementation Grade", "- (NSString *)gradeFor:(NSInteger)score", "- (instancetype)init", "- (void)dealloc", "@end"]);
+  // `@public` instance variables are API (read as `msg->_threadName`); the others are not.
+  assert.deepEqual(objcDeclarationLines("@interface Msg : NSObject\n{\n  @public\n    NSString *_threadName;\n    int _qos;\n  @private\n    int _secret;\n}\n@property NSString *text;\n@end"),
+    ["@interface Msg : NSObject", "  @public", "    NSString *_threadName;", "    int _qos;", "}", "@property NSString *text;", "@end"]);
+  assert.deepEqual(objcDeclarationLines("@interface P : NSObject {\n  int _hidden;\n}\n@end"), ["@interface P : NSObject", "@end"]);
   // The brief's generic entry point routes .m/.h to the Objective-C reader.
   assert.deepEqual(declarationLines(IMPL, "/p/Grade.m"), impl);
   assert.deepEqual(definedTypes(header).sort(), ["Grade", "GradeDelegate", "GradeKind"]);
@@ -147,6 +153,8 @@ test("objc mutants: YES/NO, message sends (one and several lines), @\"\" strings
   assert.deepEqual(at("self = [super init];"), []);
   assert.deepEqual(at("FMDBRelease(name);"), []);
   assert.deepEqual(at("NSParameterAssert(name);"), []);
+  assert.deepEqual(at("pthread_mutex_lock(&_lock);"), []);
+  assert.deepEqual(at("[self.cacheLock unlock];"), []);
   assert.deepEqual(at("[name release];"), []);
   assert.deepEqual(at("NSLog("), []);
   assert.deepEqual(at("#define LIMIT"), []);

@@ -50,6 +50,31 @@ export class SwiftPMAdapter implements Adapter {
     return path.join(this.root, "Package.swift");
   }
 
+  /**
+   * Package.swift and its version-specific variants (`Package@swift-6.1.swift`). SwiftPM loads one of
+   * them depending on the toolchain, so unitgen applies every edit to all of them.
+   */
+  private manifests(): string[] {
+    const versioned = fs.readdirSync(this.root).filter((f) => /^Package@swift-\d+(\.\d+){0,2}\.swift$/.test(f)).sort();
+    return [this.manifestPath(), ...versioned.map((f) => path.join(this.root, f))];
+  }
+
+  /** The manifest this toolchain loads: the versioned one with the highest version not above it, else Package.swift. */
+  private activeManifest(): string {
+    const v = /Swift version (\d+)\.(\d+)(?:\.(\d+))?/.exec(run(["swift", "--version"]).out);
+    if (!v) return this.manifestPath();
+    const num = (a: number[]) => a[0] * 1e6 + (a[1] ?? 0) * 1e3 + (a[2] ?? 0);
+    const current = num([Number(v[1]), Number(v[2]), Number(v[3] ?? 0)]);
+    const picks = this.manifests().slice(1)
+      .map((f) => ({ f, v: num(/@swift-([\d.]+)\.swift$/.exec(f)![1].split(".").map(Number)) }))
+      .filter((x) => x.v <= current).sort((a, b) => b.v - a.v);
+    return picks[0]?.f ?? this.manifestPath();
+  }
+
+  private loadDumpSafe(): any {
+    try { return this.loadDump(); } catch { return undefined; }
+  }
+
   private loadDump(): any {
     if (this.dump) return this.dump;
     this.restoreIfCrashed();
@@ -94,7 +119,12 @@ export class SwiftPMAdapter implements Adapter {
     const t = this.tc();
     lines.push(t.clt ? "toolchain: Command Line Tools (no Xcode) -> Swift Testing only, XCTest targets skipped during runs" : "toolchain: Xcode");
     const xcodeproj = fs.readdirSync(this.root).find((f) => f.endsWith(".xcodeproj") || f.endsWith(".xcworkspace"));
+    const manifests = this.manifests();
+    if (manifests.length > 1) lines.push(`manifests: ${manifests.map((f) => path.basename(f)).join(", ")}; this toolchain loads ${path.basename(this.activeManifest())}. unitgen applies its edits to all of them.`);
     if (xcodeproj) lines.push(`note: ${xcodeproj} exists too; this run uses SwiftPM (macOS). Pass --adapter xcode on every command to run in the iOS Simulator instead (needed for UIKit code).`);
+    if (xcodeproj && !this.loadDumpSafe()?.targets?.some((x: DumpTarget) => x.type === "test" && !x.name.endsWith(SUFFIX))) {
+      lines.push(`note: Package.swift declares no test target, so the baseline starts at 0%. The project's existing tests are probably in ${xcodeproj}: pass --adapter xcode on every command to build on them.`);
+    }
     try {
       const d = this.loadDump();
       const ts: DumpTarget[] = d.targets;
@@ -215,7 +245,7 @@ export class SwiftPMAdapter implements Adapter {
 
   /** Major version from `// swift-tools-version:X.Y` (0 when unknown). */
   private toolsMajor(): number {
-    const m = /^\/\/\s*swift-tools-version:\s*(\d+)/.exec(readFile(this.manifestPath()));
+    const m = /^\/\/\s*swift-tools-version:\s*(\d+)/.exec(readFile(this.activeManifest()));
     return m ? Number(m[1]) : 0;
   }
 
@@ -268,29 +298,25 @@ export class SwiftPMAdapter implements Adapter {
     this.ensureTarget(m);
   }
 
-  /** Register `<Target>UnitGenTests` in Package.swift (idempotent). */
+  /** Register `<Target>UnitGenTests` in Package.swift and its versioned variants (idempotent). */
   ensureTarget(m: Module): void {
-    const manifest = readFile(this.manifestPath());
     const name = m.meta?.testTarget as string;
-    if (manifest.includes(`name: "${name}"`)) return;
     // Objective-C tests import the target's headers by name, internal ones included: put every header
     // directory of the target on the test target's search path.
     const cSettings = m.meta?.objc ? `, cSettings: [${this.headerDirs(m).map((d) => `.headerSearchPath("${d}")`).join(", ")}]` : "";
     // Objective-C++ builds without clang modules, so nothing links XCTest and Foundation automatically.
     const linker = m.meta?.objc && walkFiles(m.dir, [".mm"]).length ? `, linkerSettings: [.linkedFramework("XCTest"), .linkedFramework("Foundation")]` : "";
     const line = `package.targets.append(.testTarget(name: "${name}", dependencies: ["${m.name}"], path: "${relPath(m.testRoot, this.root)}"${cSettings}${linker}))`;
-    let next: string;
-    if (manifest.includes(BEGIN)) {
-      next = manifest.replace(END, `${line}\n${END}`);
-    } else {
-      next = `${manifest.trimEnd()}\n\n${BEGIN}\n${line}\n${END}\n`;
+    for (const file of this.manifests()) {
+      const manifest = readFile(file);
+      if (manifest.includes(`name: "${name}"`)) continue;
+      writeFile(file, manifest.includes(BEGIN) ? manifest.replace(END, `${line}\n${END}`) : `${manifest.trimEnd()}\n\n${BEGIN}\n${line}\n${END}\n`);
+      this.dump = undefined;
     }
-    writeFile(this.manifestPath(), next);
-    this.dump = undefined;
   }
 
-  private backupPath(): string {
-    return path.join(this.stateDir, "Package.swift.orig");
+  private backupPath(manifest = this.manifestPath()): string {
+    return path.join(this.stateDir, `${path.basename(manifest)}.orig`);
   }
 
   recover(): void {
@@ -298,9 +324,10 @@ export class SwiftPMAdapter implements Adapter {
   }
 
   private restoreIfCrashed(): void {
-    if (exists(this.backupPath())) {
-      fs.copyFileSync(this.backupPath(), this.manifestPath());
-      fs.unlinkSync(this.backupPath());
+    for (const file of this.manifests()) {
+      if (!exists(this.backupPath(file))) continue;
+      fs.copyFileSync(this.backupPath(file), file);
+      fs.unlinkSync(this.backupPath(file));
     }
     this.unpark();
   }
@@ -339,11 +366,16 @@ export class SwiftPMAdapter implements Adapter {
     if (exists(parked) && !walkFiles(parked, [""], new Set()).length) fs.rmSync(parked, { recursive: true, force: true });
   }
 
-  /** Temporarily rewrite Package.swift so the run works on this toolchain. Returns a restore fn. */
+  /** Temporarily rewrite the manifests so the run works on this toolchain. Returns a restore fn. */
   private applyRuntimeManifest(onlyOurs: boolean, withoutOurs = false): () => void {
+    const restores = this.manifests().map((f) => this.applyRuntimeManifestTo(f, onlyOurs, withoutOurs));
+    return () => { for (const r of restores) r(); };
+  }
+
+  private applyRuntimeManifestTo(file: string, onlyOurs: boolean, withoutOurs: boolean): () => void {
     const t = this.tc();
     const d = this.loadDump();
-    const original = readFile(this.manifestPath());
+    const original = readFile(file);
     const patches: string[] = [];
     let text = original;
     if (!t.xctest || onlyOurs) {
@@ -367,11 +399,11 @@ export class SwiftPMAdapter implements Adapter {
     }
     if (!patches.length && text === original) return () => {};
     fs.mkdirSync(this.stateDir, { recursive: true });
-    fs.copyFileSync(this.manifestPath(), this.backupPath());
-    writeFile(this.manifestPath(), `${text.trimEnd()}\n\n${RUNTIME}\n${patches.join("\n")}\n`);
+    fs.copyFileSync(file, this.backupPath(file));
+    writeFile(file, `${text.trimEnd()}\n\n${RUNTIME}\n${patches.join("\n")}\n`);
     return () => {
-      fs.copyFileSync(this.backupPath(), this.manifestPath());
-      fs.unlinkSync(this.backupPath());
+      fs.copyFileSync(this.backupPath(file), file);
+      fs.unlinkSync(this.backupPath(file));
     };
   }
 
@@ -403,7 +435,15 @@ export class SwiftPMAdapter implements Adapter {
       return { ok: false, compiled: false, tests: [], logFile, excerpt: "", seconds: 0, infraError: "Objective-C tests need XCTest, which only Xcode has: install Xcode and run `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`" };
     }
     const ours = req.testFiles !== undefined;
-    const restore = this.applyRuntimeManifest(ours, !ours && !!req.excludeGenerated);
+    // Resolution with this toolchain may rewrite Package.resolved (an older Swift picks other versions):
+    // put the project's file back afterwards.
+    const resolvedFile = path.join(this.root, "Package.resolved");
+    const resolved = exists(resolvedFile) ? readFile(resolvedFile) : undefined;
+    const restoreManifests = this.applyRuntimeManifest(ours, !ours && !!req.excludeGenerated);
+    const restore = () => {
+      restoreManifests();
+      if (resolved !== undefined && exists(resolvedFile) && readFile(resolvedFile) !== resolved) writeFile(resolvedFile, resolved);
+    };
     if (ours) this.park(req.testFiles!);
     const start = Date.now();
     try {

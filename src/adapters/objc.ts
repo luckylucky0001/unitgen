@@ -65,16 +65,28 @@ const NOT_A_FUNCTION = /^\s*(return|if|else|for|while|switch|do|case|goto|sizeof
 /**
  * Declarations of an Objective-C header or implementation: @interface/@protocol/@implementation
  * lines, properties, method signatures (multi-line ones joined), C functions and NS_ENUM members.
- * Method bodies and instance-variable blocks are left out.
+ * Method bodies and private instance variables are left out; `@public` ones are kept (callers read them).
  */
 export function objcDeclarationLines(text: string): string[] {
   const out: string[] = [];
   let depth = 0;
   let continuing = false;
   let enumBlock = -1;
+  // Instance-variable block of an @interface: its visibility section (`@public` ivars are API).
+  let ivars = false;
+  let afterInterface = false;
+  let visibility = "";
+  let publicIvars = false;
   for (const raw of stripComments(text).split("\n")) {
     const l = raw.replace(/\s+$/, "");
     const t = l.trim();
+    if (ivars && depth === 1) {
+      const v = /^@(public|protected|private|package)\b/.exec(t);
+      if (v) {
+        visibility = v[1];
+        if (visibility === "public") out.push(l);
+      } else if (visibility === "public" && /;$/.test(t)) { out.push(l); publicIvars = true; }
+    }
     if (continuing) {
       out[out.length - 1] += ` ${t.replace(/\{$/, "").trim()}`;
       continuing = !/[;{]$/.test(t) && t !== "";
@@ -85,10 +97,17 @@ export function objcDeclarationLines(text: string): string[] {
       out.push(l);
     }
     if (depth === 0 && /\b(NS_ENUM|NS_OPTIONS|NS_CLOSED_ENUM|NS_ERROR_ENUM|enum)\b/.test(t) && t.includes("{")) enumBlock = 0;
+    // `@interface Foo : NSObject {`, or the `{` alone on the next line.
+    if (depth === 0 && (/^\s*@interface\b/.test(l) || (afterInterface && /^\s*\{/.test(l))) && l.includes("{")) { ivars = true; visibility = "protected"; publicIvars = false; }
+    if (t) afterInterface = depth === 0 && /^\s*@interface\b/.test(l) && !l.includes("{");
     for (const c of l.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, "")) {
       if (c === "{") depth++;
       else if (c === "}") {
         depth = Math.max(0, depth - 1);
+        if (depth === 0 && ivars) {
+          if (publicIvars) out.push(l.trim());
+          ivars = false;
+        }
         if (depth === 0 && enumBlock >= 0) {
           out.push(l.trim());
           enumBlock = -1;

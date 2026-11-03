@@ -153,6 +153,8 @@ function testDoubles(adapter: Adapter, m: Module, text: string, budget: number):
   // Production sources are not test doubles unless they say so by name (FakeX, MockX, InMemoryX, ...).
   const prodRoots = adapter.modules().flatMap((mm) => mm.sourceRoots.map((r) => r + path.sep));
   const doubleName = /(Fake|Mock|Stub|InMemory|Dummy|Spy|Test)/;
+  // Objective-C tests sometimes re-declare a production class to reach its private API: that is no double.
+  const prodTypes = new Set(adapter.modules().flatMap((mm) => adapter.sourceFiles(mm).filter(isObjC).flatMap((f) => definedTypes(readFile(f)))));
   const roots = [...new Set([path.dirname(m.testRoot), m.testRoot, ...(adapter.testSupportDirs?.(m) ?? [])])].filter(exists);
   const exts = [".kt", ".java", ".swift", ".ets", ".ts", ".m", ".mm", ".h"];
   const parts: string[] = [];
@@ -166,7 +168,8 @@ function testDoubles(adapter: Adapter, m: Module, text: string, budget: number):
       const t = readFile(f);
       if (/XCTestCase|@Test\b|@Suite\b|\bdescribe\(|@org\.junit|import org\.junit|import kotlin\.test/.test(t) && !/\b(Fake|Test|Stub|Mock|InMemory)\w*\s*[:(<{]/.test(t.replace(/class\s+\w+Tests?\b/g, ""))) continue;
       const impl = [...t.matchAll(/\b(?:class|object|struct)\s+(\w+)[^{\n]*?(?::|implements|extends)\s*([^{\n]+)|@interface\s+(\w+)\s*:\s*([^\n{]+)/g)].map((mm) => [mm[0], mm[1] ?? mm[3], mm[2] ?? mm[4]] as const)
-        .filter((mm) => (mm[2].match(/\b[A-Z]\w+/g) ?? []).some((x) => idents.has(x)));
+        .filter((mm) => (mm[2].match(/\b[A-Z]\w+/g) ?? []).some((x) => idents.has(x)))
+        .filter((mm) => !(/\.(mm?|h)$/.test(f) && prodTypes.has(mm[1])));
       if (!impl.length) continue;
       // In a test file only the doubles themselves are useful, not every test method around them.
       const isTestFile = /XCTestCase|@Test\b|@Suite\b|\bdescribe\(|@org\.junit|import org\.junit|import kotlin\.test/.test(t);

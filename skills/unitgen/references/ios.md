@@ -11,6 +11,9 @@
   manifest that keeps only the generated targets (`--enable-swift-testing` matters: packages with
   `swift-tools-version` < 6.0 otherwise run 0 `@Test` functions). `Package.swift` is restored
   afterwards; after a crash or forced kill the next unitgen command restores it.
+- Version-specific manifests (`Package@swift-6.1.swift`): SwiftPM loads the one matching the
+  toolchain, so unitgen writes its block and its temporary patches into every manifest; `doctor`
+  names the one in use. `Package.resolved` is restored after each run.
 - The baseline runs the package's own tests only; generated targets are excluded.
 - A `.target` that contains `main.swift` builds as an executable: unitgen does not offer it
   (tests cannot import it).

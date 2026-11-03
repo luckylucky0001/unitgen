@@ -2,7 +2,7 @@
 
 unitgen 在真实开源项目上的验证过程、结果，以及验证中发现并修复的问题。使用说明见 [README](../README.md)。
 
-- [第五轮：Objective-C](#第五轮objective-c2026-11-03)：3 个 Objective-C 项目，Xcode（macOS、iOS 模拟器、命令行工具 target）和 SwiftPM
+- [第五轮：Objective-C](#第五轮objective-c2026-11-03)：5 个 Objective-C 项目，Xcode（macOS、iOS 模拟器、命令行工具 target）和 SwiftPM，其中 2 个由只拿到 README 和 Skill 的子代理独立完成
 - [Windows（CI）](#windowsci)：GitHub Actions windows-latest 上的单测和端到端测试
 - [第四轮：从 main 开箱测试，含 Android](#第四轮从-main-开箱测试含-android2026-10-31)：Android SDK 装好后的 Android 工程，以及新的 Xcode / 鸿蒙工程
 - [第三轮：开箱测试](#第三轮开箱测试2026-10-31从-github-全新安装)：6 个项目，只给 README 和 Skill 的子代理从零开始使用
@@ -21,6 +21,34 @@ unitgen 在真实开源项目上的验证过程、结果，以及验证中发现
 | [MJExtension](https://github.com/CoderMJLee/MJExtension) 8,482★ | iOS · Objective-C · SwiftPM（同一个文件） | `NSString+MJExtension.m` | 0% → **65%**（0 → 34 / 52 行；包里没有测试 target，同一份测试没覆盖 `mj_underlineFromCamel`） | 7 | 85%（17 杀死 / 3 存活，评估 20/25） |
 | [CHCSVParser](https://github.com/davedelong/CHCSVParser) 1,271★ | iOS · Objective-C · Xcode（命令行工具 target，测试 target 直接编译源码；项目自带 1 个失败测试，`--allow-failing`；测试目录名带空格） | `CHCSVParser.m` | 61% → **65%**（439 → 463 / 714 行） | 6 | 48%（11 杀死 / 12 存活，评估 23 个）：测试只针对有序字典和 `CSVComponents`，变异却落在它顺带经过的解析器内部，那里它没有细查 |
 | 生成的 Objective-C++ 包（SwiftPM，`.mm` 里用 `std::istringstream`） | iOS · Objective-C++ · SwiftPM | `Words.mm` | 47% → **100%**（9 → 19 / 19 行） | 3 | 100%（3/3） |
+
+### 独立开箱测试
+
+修完上面这些之后，让一个子代理只读 README 和 Skill（不看源码），在没碰过的两个项目上从零走完整流程：
+
+| 项目 | 平台 · 运行器 | 目标文件 | 目标文件覆盖率 | 新增测试 | 变异得分 |
+|---|---|---|---|---|---|
+| [CocoaLumberjack](https://github.com/CocoaLumberjack/CocoaLumberjack) 13,320★ | iOS · Objective-C · SwiftPM（带 `Package@swift-6.1.swift` 等版本化清单） | `DDDispatchQueueLogFormatter.m` | 13% → **100%**（16 → 126 / 126 行） | 16 | 60% → 88%（28 杀死 / 4 存活，评估 32/32；2 个判为等价；存活的 4 个都是删掉 `pthread_mutex_lock`/`init`，只有并发才看得出来） |
+| [AFNetworking](https://github.com/AFNetworking/AFNetworking) 33,334★ | iOS · Objective-C · Xcode + iOS 模拟器（项目自带 15 个证书相关的失败测试，`--allow-failing`） | `AFURLRequestSerialization.m` | 69% → **93%**（569 → 770 / 824 行） | 28 | 50% → 90%（评估 10/303，抽样；1 个判为等价） |
+
+它发现的问题都已修复：
+
+| 问题 | 修复 |
+|---|---|
+| 有 `Package@swift-6.1.swift` 这类版本化清单时，SwiftPM 用的是它，unitgen 却只改 `Package.swift`：生成的测试从没被编译，verify 拿项目自己一个不稳定的测试失败当成这个文件的 TEST_FAILURES | 测试 target 和运行时补丁同时写进所有清单；doctor 列出清单并说明当前工具链用哪个 |
+| verify 在一个测试也对不上这个文件时，退回去用整次运行的所有测试来判定 | 改为 NO_TESTS，并列出实际跑了哪些测试 |
+| 输出到管道或文件时，brief 在 65,536 字节处被截断（AFNetworking 的 brief 有 100 KB），没有任何提示 | 等 stdout/stderr 写完再退出（工作进程和监督进程都改了） |
+| `XCTAssertTrue`/`XCTAssertNil` 这类断言的失败（`((x) is true) failed`、`((x) == nil) failed`）被算成「靠崩溃杀死」 | 识别这两种格式；未捕获的异常仍算崩溃 |
+| 删掉 `pthread_mutex_lock`/`init` 只有并发才看得出来，删掉 unlock 让测试卡到超时 | 不再对加锁、解锁、信号量这类调用生成删除变异 |
+| 改过测试后，上一轮的幸存者优先重跑，抽样得分（40%）远低于全量（88%）；报告里的初始得分也没说明是抽样 | 得分行写明「评估了几个、其中几个是重跑的幸存者，所以偏低」；报告标出抽样的初始得分 |
+| brief 把测试里重新声明的生产类（为了调私有 API）列成「优先使用的测试替身」，和约定矛盾 | 生产代码里定义的类不再当作替身 |
+| brief 的声明里没有 `@public` 实例变量（DDLogMessage 的 `_threadName` 等，被测代码直接读它们） | 保留 `@public` 段的实例变量 |
+| Package.swift 没有测试 target、测试都在 `.xcodeproj` 里时（AFNetworking），doctor 只说 OK | 提示加 `--adapter xcode` |
+| 运行 `swift test` 时旧工具链会改写 `Package.resolved` | 每次运行后还原 |
+
+没修的：CocoaLumberjack 的 `Tests/Tests.xcodeproj` 只有测试 target、被测代码在另一个工程里，unitgen 找不到模块（这种结构用 SwiftPM 那一套跑）；基线被拒后加 `--allow-failing` 要整个重跑；不加 `UNITGEN_QUIET` 时 xcodebuild 的原始输出很多。
+
+最后一轮回归（清空 scheme 缓存后重跑全部 9 个项目）里，MJExtension 有一次基线出现 2 个项目自带测试失败，立即重跑就没有了；那次的日志已被覆盖，没查到是哪两个，之前和之后的 4 次基线都是 0 失败。
 
 另外两个没跑起来：YYModel 的部署目标太老，Xcode 14.3 起不再带 `libarclite`，构建失败（unitgen 现在把它报成环境问题，并说明要提高部署目标）；libextobjc 缺子模块里的 xcconfig。
 
@@ -235,7 +263,7 @@ CI 里加了 `scripts/e2e-objc.mjs`（macOS）：生成一个带 Objective-C tar
 | iOS SwiftPM | llvm-cov 把函数里的空行、注释、`#if/#else` 计为可执行行，brief 把空行标成未覆盖，前后分母也对不上（Splash：0/33 → 36/36） | 这些行一律不计 |
 | 变异测试 | 唯一能编译的变异被标成等价后，门禁报 FAILED「no mutant was evaluated」、报告写 0%（Splash 的 Font）；删掉「声明时没赋值的局部常量」的赋值注定编译不过；`var x: Int?` 行尾的 `?` 被当成三元表达式续行，下一行的删除变异全部丢失 | 门禁改为 NOT_APPLICABLE、报告写 n/a；跳过这类删除；修正续行判断 |
 | 运行 | 在工程子目录里执行命令报「No supported project」 | 像 git 一样向上查找工程根目录；鸿蒙模块目录继续向上找到应用根目录 |
-| iOS（第五轮） | Objective-C 相关的 15 个问题 | 见[第五轮](#第五轮objective-c2026-11-03) |
+| iOS（第五轮） | Objective-C 相关的 25 个问题 | 见[第五轮](#第五轮objective-c2026-11-03) |
 | 鸿蒙 hvigor | 警告很多的模块（harmony-utils：151 条 ArkTS:WARN）里，COMPILE_ERROR 只给出 80 行警告、看不到真正的错误：hvigor 在 stdout 管道写完前就退出，超过约 64 KB 的部分丢失 | 输出不完整时改读 hvigor 自己的 `.hvigor/outputs/build-logs/build.log`；终端只显示 hvigor 进度和错误（基线的 stderr 从 10,751 行降到 336 行），完整输出照样写日志 |
 | 鸿蒙 brief/targets | import 解析跨到了下一条 import：项目自己的枚举 `DateType` 被当成系统 API，相关行标成 `!~`，文件被排成 platform | 一条 import 不再跨过另一条 import |
 | 变异测试 | hvigor 下枚举比较链（`type == DateType.YmdHms \|\| type == DateType.YmdHm`）、`if / else if` 链、字面量写在左边（`undefined !== a && null !== a`）里的取反仍然编译不过：DateHelper 56 个里 16 个 | 收窄判断覆盖这三种写法；对照实测结果，去掉的 16 个全是编译不过的，没有误伤 |

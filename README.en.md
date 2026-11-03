@@ -26,7 +26,7 @@ comparison with similar tools are in [docs/DESIGN.md](docs/DESIGN.md) (Chinese).
 
 ## Validation
 
-The full workflow has been run on 23 open-source projects with real toolchains (DevEco Studio 26,
+The full workflow has been run on 25 open-source projects with real toolchains (DevEco Studio 26,
 Xcode 16.4, Android SDK + Gradle). Some results:
 
 | Project | Platform | Target file | Coverage | Mutation score |
@@ -42,8 +42,9 @@ Xcode 16.4, Android SDK + Gradle). Some results:
 | [ObjectMapper](https://github.com/tristanhimmelman/ObjectMapper) 9.1k★ | iOS · Xcode + Simulator | `Map.swift` | 75% → 98% | 100% |
 | [fmdb](https://github.com/ccgus/fmdb) 13.8k★ | iOS · Objective-C · Xcode (macOS) | `FMDatabaseQueue.m` | 78% → 100% | 96% |
 | [MJExtension](https://github.com/CoderMJLee/MJExtension) 8.5k★ | iOS · Objective-C · Xcode + Simulator | `NSString+MJExtension.m` | 35% → 100% | 90% |
+| [CocoaLumberjack](https://github.com/CocoaLumberjack/CocoaLumberjack) 13.3k★ | iOS · Objective-C · SwiftPM | `DDDispatchQueueLogFormatter.m` | 13% → 100% | 88% |
 
-Numbers for all 40 target files, how they were measured, and suspected bugs found in these
+Numbers for all 42 target files, how they were measured, and suspected bugs found in these
 projects: [docs/VALIDATION.md](docs/VALIDATION.md) (Chinese).
 
 ## Install
@@ -259,7 +260,7 @@ how long the finished mutants took, at least 20 s), so loop-heavy code makes a r
 |---|---|---|
 | all | `.unitgen/` (state, logs, REPORT.md; it has its own `.gitignore`); add it to the project's `.gitignore` | — |
 | HarmonyOS | `<module>/src/test/<File>.unitgen.test.ets`; hvigor's own `<module>/.test/` output (most projects already ignore `**/.test`) | `<module>/src/test/List.test.ets`, which registers generated tests so DevEco runs them too |
-| iOS SwiftPM | `Tests/<Target>UnitGenTests/` | a marked block `// unitgen:begin … // unitgen:end` at the end of `Package.swift` (a separate test target) |
+| iOS SwiftPM | `Tests/<Target>UnitGenTests/` | a marked block `// unitgen:begin … // unitgen:end` at the end of `Package.swift` (a separate test target), and of every `Package@swift-*.swift` |
 | iOS Xcode | `<Class>UnitGenTests.swift` / `.m` in the existing test target | registration in `project.pbxproj` when needed (original kept in `.unitgen/`) |
 | Android | `src/test/<kotlin\|java>/<package>/<Class>UnitGenTest.kt` | — |
 

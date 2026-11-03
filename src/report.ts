@@ -52,7 +52,7 @@ export function buildReport(adapter: Adapter, state: State): string {
     for (const x of d.accepted) {
       const m = x.mutation;
       const ms = m?.none ? "n/a (nothing mutable)" : m && m.killed + m.survived === 0 ? "n/a (no mutant compiled)" : m
-        ? `${m.first !== undefined && m.first !== m.score ? `${Math.round(m.first * 100)}% → ` : ""}${Math.round(m.score * 100)}%${m.stale ? " (stale: test changed since)" : ""}`
+        ? `${m.first !== undefined && m.first !== m.score ? `${Math.round(m.first * 100)}%${m.firstOf ? ` (sample ${m.firstOf})` : ""} → ` : ""}${Math.round(m.score * 100)}%${m.stale ? " (stale: test changed since)" : ""}`
         : "—";
       const sample = m?.candidates !== undefined && (m.evaluated ?? 0) < m.candidates;
       const last = sample && m?.complete

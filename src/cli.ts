@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { acquireProjectLock } from "./lock.ts";
-import { canonical, type ProcInfo, processTree, signalAll } from "./util.ts";
+import { canonical, exitAfterFlush, type ProcInfo, processTree, signalAll } from "./util.ts";
 import { detectAdapter, findProjectRoot } from "./adapters/index.ts";
 import { State } from "./state.ts";
 import { recover } from "./mutate.ts";
@@ -105,7 +105,7 @@ async function supervise(): Promise<number> {
   } finally { release(); }
 }
 
-supervise().then((code) => process.exit(code), (e) => {
+supervise().then((code) => exitAfterFlush(code), (e) => {
   console.error(`[unitgen] error: ${(e as Error).message}`);
-  process.exit(1);
+  exitAfterFlush(1);
 });

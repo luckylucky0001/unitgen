@@ -21,7 +21,7 @@ report    生成 .unitgen/REPORT.md
 
 ## 验证
 
-在 23 个开源项目上用真实工具链（DevEco Studio 26、Xcode 16.4、Android SDK + Gradle）跑过完整流程。部分结果：
+在 25 个开源项目上用真实工具链（DevEco Studio 26、Xcode 16.4、Android SDK + Gradle）跑过完整流程。部分结果：
 
 | 项目 | 平台 | 目标文件 | 覆盖率 | 变异得分 |
 |---|---|---|---|---|
@@ -31,13 +31,14 @@ report    生成 .unitgen/REPORT.md
 | [ObjectMapper](https://github.com/tristanhimmelman/ObjectMapper) 9.1k★ | iOS · Xcode + 模拟器 | `Map.swift` | 75% → 98% | 100% |
 | [fmdb](https://github.com/ccgus/fmdb) 13.8k★ | iOS · Objective-C · Xcode（macOS） | `FMDatabaseQueue.m` | 78% → 100% | 96% |
 | [MJExtension](https://github.com/CoderMJLee/MJExtension) 8.5k★ | iOS · Objective-C · Xcode + 模拟器 | `NSString+MJExtension.m` | 35% → 100% | 90% |
+| [CocoaLumberjack](https://github.com/CocoaLumberjack/CocoaLumberjack) 13.3k★ | iOS · Objective-C · SwiftPM | `DDDispatchQueueLogFormatter.m` | 13% → 100% | 88% |
 | [architecture-samples](https://github.com/android/architecture-samples) 45.9k★ | Android · Gradle | `TaskNetworkDataSource.kt` | 0% → 100% | 100% |
 | [Pokedex](https://github.com/skydoves/Pokedex) 8.4k★ | Android · Gradle（多模块） | `DetailRepositoryImpl.kt` | 89% → 100% | 100% |
 | [harmony-utils](https://github.com/787107497/harmony-utils) 122★ | 鸿蒙 · hvigor | `DateHelper.ets` | 0% → 98% | 100% |
 | [LinysBrowser_NEXT](https://github.com/awaLiny2333/LinysBrowser_NEXT) 292★ | 鸿蒙 · hvigor | `url-ext.ets` | 0% → 100% | 97% |
 | [DSBridge-HarmonyOS](https://github.com/751496032/DSBridge-HarmonyOS) 182★ | 鸿蒙 · hvigor | `BaseBridge.ts` | 0% → 94% | 88% |
 
-全部 40 个目标文件的数据、验证方法、在这些项目里发现的疑似 bug，见 [docs/VALIDATION.md](docs/VALIDATION.md)。
+全部 42 个目标文件的数据、验证方法、在这些项目里发现的疑似 bug，见 [docs/VALIDATION.md](docs/VALIDATION.md)。
 
 ## 安装
 
@@ -204,7 +205,7 @@ Android
 |---|---|---|
 | 所有平台 | `.unitgen/`（状态、日志、REPORT.md，自带 `.gitignore`），建议加进工程的 `.gitignore` | — |
 | 鸿蒙 | `<模块>/src/test/<文件>.unitgen.test.ets`；hvigor 生成的 `<模块>/.test/`（多数工程已经忽略 `**/.test`） | `<模块>/src/test/List.test.ets`，登记生成的测试，DevEco 里也能跑到 |
-| iOS SwiftPM | `Tests/<Target>UnitGenTests/` | `Package.swift` 末尾加一段 `// unitgen:begin … // unitgen:end`（独立的测试 target） |
+| iOS SwiftPM | `Tests/<Target>UnitGenTests/` | `Package.swift` 末尾加一段 `// unitgen:begin … // unitgen:end`（独立的测试 target）；有 `Package@swift-*.swift` 时每个清单都加 |
 | iOS Xcode | 现有测试 target 里的 `<类>UnitGenTests.swift` / `.m` | 需要时登记到 `project.pbxproj`（原文件备份在 `.unitgen/`） |
 | Android | `src/test/<kotlin\|java>/<包路径>/<类>UnitGenTest.kt` | — |
 

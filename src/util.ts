@@ -5,6 +5,20 @@ import * as path from "node:path";
 
 export const VERBOSE = process.env.UNITGEN_VERBOSE === "1";
 
+/**
+ * Exit once stdout and stderr have drained. Writes to a pipe are asynchronous: `process.exit()` right
+ * after a large write (a 100 KB brief) drops whatever is still queued beyond the 64 KB pipe buffer.
+ */
+export function exitAfterFlush(code: number): void {
+  // A reader that went away (`| head`) never drains: do not wait for it forever.
+  setTimeout(() => process.exit(code), 5000);
+  try {
+    process.stdout.write("", () => process.stderr.write("", () => process.exit(code)));
+  } catch {
+    process.exit(code);
+  }
+}
+
 export function log(msg: string): void {
   process.stderr.write(`[unitgen] ${msg}\n`);
 }

@@ -50,6 +50,8 @@ export interface MutationReport {
   history?: MutantResult[];
   /** Mutant runs of this invocation that produced no test results. */
   errors?: number;
+  /** Mutants run now that survived an earlier version of the test (they go first, so a partial run leans to survivors). */
+  rechecked?: number;
   /** Glob of the per-mutant logs. */
   logs?: string;
 }
@@ -491,7 +493,9 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
     const refCounting = opts.objc && /^\[\s*[\w.>-]+\s+(retain|release|autorelease)\s*\]\s*;$|^\w*(Retain|Release|Autorelease)(d|s)?\s*\(/.test(t);
     // Assertion macros abort the process when they fail: no unit test can observe their removal.
     const assertion = opts.objc && /^(NSC?(Parameter)?Assert\d?|assert|NSAssertionHandler)\b\s*\(/.test(t);
-    if (partOfLonger || refCounting || assertion || /^self\.init\b/.test(t)) { /* no deletion mutant */ } else if (opts.objc && isMessageSend(t)) {
+    // Locks: without the lock only a race shows a difference, without the unlock the test hangs (a timeout each).
+    const locking = /^(pthread_(mutex|rwlock)_\w+|pthread_cond_(wait|signal|broadcast)|os_unfair_lock_(lock|unlock|trylock)|dispatch_semaphore_(wait|signal)|dispatch_group_(enter|leave|wait)|OSSpinLock(Lock|Unlock))\s*\(|^\[\s*[\w.>-]+\s+(lock|unlock|lockWhenCondition:[^\]]*|unlockWithCondition:[^\]]*|wait|signal|broadcast)\s*\]\s*;$|^[\w.]+\.(lock|unlock)\(\)\s*;?$/.test(t);
+    if (partOfLonger || refCounting || assertion || locking || /^self\.init\b/.test(t)) { /* no deletion mutant */ } else if (opts.objc && isMessageSend(t)) {
       out.push({ line: ln, op: "delete statement", original, mutated: original.replace(t, "/* unitgen: statement deleted */") });
     } else if (opts.objc && /^\[(?!\s*super\b)/.test(t) && !/;\s*$/.test(t)) {
       // A message send spread over lines (`[self.delegate parser:self` / `didFail:error];`).
@@ -691,7 +695,7 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
           // by an assertion: still a detected change, but flag it.
           // Objective-C XCTest words its failures `((a) equal to (b)) failed: ...` / `((x) is true) failed` / `failed - msg` (XCTFail);
           // an uncaught exception (`failed: caught "NSRangeException"`) is a crash.
-          const asserted = r.tests.some((t) => t.status === "failed" && /assert|expect|Expectation|AssertionError|expected|XCTAssert|#require|\(\(.*\)\)\s+failed|is not equal to|^failed - /im.test(t.message ?? ""));
+          const asserted = r.tests.some((t) => t.status === "failed" && /assert|expect|Expectation|AssertionError|expected|XCTAssert|#require|\(\(.*\)\s+failed\b|is not equal to|^failed - /im.test(t.message ?? ""));
           outcome = asserted ? "killed" : "killed-crash";
         }
         else outcome = r.tests.length ? "survived" : "error";
@@ -726,15 +730,17 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   const report: MutationReport = { testFile: relTest, target: relPath(absTarget, adapter.root), killed, crashes, survived, stillborn, score, results, feedback, candidates: all.length,
     logs: state.file("logs", `mutant-${path.basename(absTest).replace(/\W+/g, "_")}-*.log`),
     excluded: excluded.length, triedTotal: current.length, history: [...latest.values()],
-    errors: results.filter((r) => r.outcome === "error").length };
+    errors: results.filter((r) => r.outcome === "error").length,
+    rechecked: results.filter((r) => prevBy.get(key(r))?.outcome === "survived").length };
   const acc = state.data.accepted.find((a) => a.testFile === relTest);
   if (acc) {
     const first = acc.mutation?.first ?? Math.round(score * 100) / 100;
+    const firstOf = acc.mutation?.first !== undefined ? acc.mutation.firstOf : current.length < all.length ? `${current.length}/${all.length}` : undefined;
     const hash = fileHash(absTest);
     const complete = current.length >= all.length && all.length > 0
       ? { score: Math.round(score * 100) / 100, evaluated: current.length, testHash: hash, at: state.stamp() }
       : acc.mutation?.complete;
-    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first, crashes, equivalent: excluded.length, testHash: hash, evaluated: current.length, candidates: all.length, ...(complete ? { complete } : {}) };
+    acc.mutation = { killed, survived, stillborn, score: Math.round(score * 100) / 100, first, ...(firstOf ? { firstOf } : {}), crashes, equivalent: excluded.length, testHash: hash, evaluated: current.length, candidates: all.length, ...(complete ? { complete } : {}) };
     state.save();
   }
   writeFile(prevFile, JSON.stringify({ ...report, results: report.history }, null, 2));
@@ -745,7 +751,10 @@ export function formatMutation(r: MutationReport): string {
   if (!r.candidates) return `mutation: NOT_APPLICABLE — ${r.feedback || "every mutant is excluded as equivalent"}`;
   const ran = r.results.length;
   const tried = r.triedTotal ?? ran;
-  const head = `mutation score: ${(r.score * 100).toFixed(0)}%  (killed ${r.killed}${r.crashes ? `, of which ${r.crashes} only by a crash, not an assertion` : ""}, survived ${r.survived}, did not compile ${r.stillborn})  ${r.testFile} -> ${r.target}`;
+  const partial = tried < r.candidates;
+  // After the test changed, earlier survivors run first: a partial run then shows mostly those.
+  const lean = partial && r.rechecked ? `; ${r.rechecked} of the ${ran} run now survived the previous version of the test and were re-checked first, so this partial score leans low` : "";
+  const head = `mutation score: ${(r.score * 100).toFixed(0)}%${partial ? ` on ${tried} of ${r.candidates} candidates${lean}` : ""}  (killed ${r.killed}${r.crashes ? `, of which ${r.crashes} only by a crash, not an assertion` : ""}, survived ${r.survived}, did not compile ${r.stillborn})  ${r.testFile} -> ${r.target}`;
   const scope = tried >= r.candidates
     ? `all ${r.candidates} candidate mutants evaluated with the current test file (${ran ? `${ran} run now` : "nothing new to run; result from earlier runs"})`
     : `${tried} of ${r.candidates} candidate mutants evaluated with the current test file (${ran} run now); re-run to evaluate the rest, or use --max ${r.candidates}`;
