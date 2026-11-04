@@ -8,7 +8,7 @@ import { runAsync } from "../util.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseLlvmCovJson } from "../coverage.ts";
-import { errorExcerpt, exists, preferOwnTest, readFile, relPath, run, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
+import { canonical, errorExcerpt, exists, preferOwnTest, readFile, relPath, run, stripAnsi, walkFiles, which, writeFile } from "../util.ts";
 import { classifyObjC, headerFor, isObjC, objcConventions, SOURCE_EXTS, stem, testExt } from "./objc.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
@@ -17,7 +17,7 @@ const END = "// unitgen:end";
 const RUNTIME = "// unitgen:runtime (temporary, restored after the run)";
 const SUFFIX = "UnitGenTests";
 
-interface DumpTarget {
+export interface DumpTarget {
   name: string;
   type: string;
   path?: string | null;
@@ -31,6 +31,7 @@ export class SwiftPMAdapter implements Adapter {
   readonly testFileSuffixes = SOURCE_EXTS.map((x) => `${SUFFIX}${x}`);
   private dump: any;
   private mods?: { dump: any; modules: Module[] };
+  private sources = new Map<string, string[]>();
   private resolved: Record<string, string> = {};
   private toolchain?: { clt: boolean; xctest: boolean; frameworksDir?: string; libDir?: string; swiftTestingFlag: boolean };
 
@@ -130,6 +131,8 @@ export class SwiftPMAdapter implements Adapter {
       const ts: DumpTarget[] = d.targets;
       const implicit = ts.filter((x) => x.type === "regular" && this.isImplicitExecutable(x));
       lines.push(`package: ${d.name} (${ts.filter((x) => x.type === "regular").length - implicit.length} library targets, ${ts.filter((x) => x.type === "executable").length + implicit.length} executable targets (not tested${implicit.length ? `; ${implicit.map((x) => x.name).join(", ")} declared as .target but has main.swift` : ""}), ${ts.filter((x) => x.type === "test").length} test targets)`);
+      const skipped = this.skippedTargets();
+      if (skipped.length) lines.push(`note: ${skipped.join(", ")}: no Swift or Objective-C sources (C/C++ or headers only), so no tests are generated there`);
       for (const m of this.modules()) {
         if (!exists(m.dir)) { ok = false; lines.push(`error: source directory of target ${m.name} not found: ${relPath(m.dir, this.root)}`); }
         else if (!this.sourceFiles(m).length) lines.push(`warning: target ${m.name} has no .swift, .m or .mm files in ${relPath(m.dir, this.root)}`);
@@ -198,16 +201,33 @@ export class SwiftPMAdapter implements Adapter {
         // A SwiftPM target is one language: C-family targets hold .m/.mm (and .c) files.
         const objc = walkFiles(dir, [".m", ".mm"]).length > 0 && !walkFiles(dir, [".swift"]).length;
         return { name: t.name, dir, sourceRoots: [dir], testRoot, kind: objc ? "swiftpm-objc-target" : "swiftpm-target", meta: { testTarget: `${t.name}${SUFFIX}`, objc } };
-      });
+      })
+      // C/C++-only and header-only targets (a shim with an empty.c): nothing unitgen can write tests for.
+      .filter((m) => !exists(m.dir) || walkFiles(m.dir, SOURCE_EXTS).length > 0);
+  }
+
+  /** Library targets left out because they hold no Swift or Objective-C source. */
+  private skippedTargets(): string[] {
+    const d = this.loadDump();
+    const kept = new Set(this.modules().map((m) => m.name));
+    return (d.targets as DumpTarget[]).filter((t) => t.type === "regular" && !t.name.endsWith(SUFFIX) && !this.isImplicitExecutable(t) && !kept.has(t.name)).map((t) => t.name);
   }
 
   moduleFor(file: string): Module | undefined {
     const abs = path.resolve(file);
-    return this.modules().find((m) => abs.startsWith(m.dir + path.sep) || abs.startsWith(m.testRoot + path.sep));
+    const real = canonical(abs);
+    return this.modules().find((m) => this.sourceFiles(m).includes(real))
+      ?? this.modules().find((m) => abs.startsWith(m.dir + path.sep) || abs.startsWith(m.testRoot + path.sep));
   }
 
+  /** The target's sources by their real paths: SwiftPM follows symlinks (IGListKit's spm/ tree links into Source/). */
   sourceFiles(m: Module): string[] {
-    return walkFiles(m.dir, SOURCE_EXTS);
+    let files = this.sources.get(m.dir);
+    if (!files) {
+      files = [...new Set(walkFiles(m.dir, SOURCE_EXTS).map(canonical))];
+      this.sources.set(m.dir, files);
+    }
+    return files;
   }
 
   headerFor(source: string): string | undefined {
@@ -382,6 +402,15 @@ export class SwiftPMAdapter implements Adapter {
       patches.push(`package.targets.removeAll { $0.type == .test && !$0.name.hasSuffix("${SUFFIX}") }`);
     }
     if (withoutOurs) patches.push(`package.targets.removeAll { $0.type == .test && $0.name.hasSuffix("${SUFFIX}") }`);
+    // Build only what the remaining test targets need: a UIKit target elsewhere in the package (which
+    // cannot build on macOS) must not fail the run of a Foundation-only target's tests.
+    const keep = runClosure(d.targets as DumpTarget[], (x) => x.type === "test" && (x.name.endsWith(SUFFIX) ? !withoutOurs : t.xctest && !onlyOurs));
+    const unused = (d.targets as DumpTarget[]).filter((x) => (x.type === "regular" || x.type === "executable") && !keep.has(x.name));
+    if (unused.length) {
+      patches.push(`let unitgenKeep: Set<String> = [${[...keep].map((n) => JSON.stringify(n)).join(", ")}]`,
+        `package.targets.removeAll { ($0.type == .regular || $0.type == .executable) && !unitgenKeep.contains($0.name) }`,
+        `package.products.removeAll()`);
+    }
     const hasOurTargets = original.includes(BEGIN);
     // Swift Testing needs macOS 10.15+ and tools-version >= 5.9 semantics.
     const mac = (d.platforms ?? []).find((p: any) => p.platformName === "macos");
@@ -435,6 +464,12 @@ export class SwiftPMAdapter implements Adapter {
       return { ok: false, compiled: false, tests: [], logFile, excerpt: "", seconds: 0, infraError: "Objective-C tests need XCTest, which only Xcode has: install Xcode and run `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`" };
     }
     const ours = req.testFiles !== undefined;
+    // A baseline of a package with no test target to run: 0% without building anything (SwiftPM refuses
+    // a run once every target is trimmed away).
+    const willRun = (this.loadDump().targets as DumpTarget[]).some((x) => x.type === "test" && (x.name.endsWith(SUFFIX) ? !req.excludeGenerated : t.xctest));
+    if (!ours && !willRun) {
+      return { ok: true, compiled: true, tests: [], coverage: {}, logFile, excerpt: "", seconds: 0, emptyCoverageOk: true, note: "the package has no test target to run" };
+    }
     // Resolution with this toolchain may rewrite Package.resolved (an older Swift picks other versions):
     // put the project's file back afterwards.
     const resolvedFile = path.join(this.root, "Package.resolved");
@@ -463,7 +498,7 @@ export class SwiftPMAdapter implements Adapter {
       const codecovJson = req.coverage ? (await runAsync(["swift", "test", "--show-codecov-path"], { cwd: this.root })).out.trim().split("\n").pop()! : "";
       // Nor its JSON: a run that writes none (no tests, a failing test) must not read the last one.
       if (codecovJson) for (const f of [codecovJson, ...walkFiles(path.dirname(codecovJson), [".profraw"])]) fs.rmSync(f, { force: true });
-      const r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
+      const r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile, streamLine: swiftTestLine });
       const out = stripAnsi(r.out);
       const tests = parseSwiftTestOutput(out);
       const compiled = !/error: (emit-module|compile|link)|error: fatalError|: error: /.test(out) || tests.length > 0;
@@ -471,7 +506,8 @@ export class SwiftPMAdapter implements Adapter {
       if (req.coverage && compiled) {
         const p = codecovJson;
         const dirs = mods.map((m) => m.dir + path.sep);
-        const inModule = (f: string) => dirs.some((d) => f.startsWith(d)) && SOURCE_EXTS.some((x) => f.endsWith(x));
+        const own = new Set(mods.flatMap((m) => this.sourceFiles(m)));
+        const inModule = (f: string) => own.has(f) || (dirs.some((d) => f.startsWith(d)) && SOURCE_EXTS.some((x) => f.endsWith(x)));
         if (exists(p)) {
           coverage = parseLlvmCovJson(JSON.parse(readFile(p)), inModule);
           if (process.env.UNITGEN_KEEP_COV !== "1") fs.unlinkSync(p);
@@ -505,6 +541,28 @@ export class SwiftPMAdapter implements Adapter {
   countAssertions(text: string): number {
     return (text.match(/#expect\s*\(|#require\s*\(|XCTAssert\w*\s*\(|XCTFail\s*\(|#expect\(throws/g) ?? []).length;
   }
+}
+
+/** `swift test` output worth showing live (the full output is in the log): errors, failures, the outcome. */
+export function swiftTestLine(l: string): boolean {
+  return /(^|\s)error:|^\s*[✘􀢄]|Test Case '.*' failed|Executed \d+ tests?|Test run with \d+ tests?|Build complete!|fatal error/.test(l);
+}
+
+/** Names of the package targets that the selected test targets depend on, directly or not (plugins included). */
+export function runClosure(targets: DumpTarget[], selected: (t: DumpTarget) => boolean): Set<string> {
+  const byName = new Map(targets.map((t) => [t.name, t]));
+  const out = new Set<string>();
+  const visit = (name: string) => {
+    if (out.has(name) || !byName.has(name)) return;
+    out.add(name);
+    const t = byName.get(name)! as DumpTarget & { pluginUsages?: any[] };
+    for (const dep of [...(t.dependencies ?? []), ...(t.pluginUsages ?? [])]) {
+      const ref = dep.byName ?? dep.target ?? dep.plugin;
+      if (Array.isArray(ref) && typeof ref[0] === "string") visit(ref[0]);
+    }
+  };
+  for (const t of targets) if (selected(t)) visit(t.name);
+  return out;
 }
 
 /** Parse both Swift Testing (✔/✘ lines) and XCTest ("Test Case '-[A b]' passed") output. */

@@ -134,17 +134,19 @@ function flow(dir, adapterArgs, test, extra = () => {}) {
   });
 }
 
-// 2. Xcode project: static library `Calc` + unit-test bundle `CalcTests` (macOS), no scheme files.
+// 2. Xcode project: static library `Calc` + unit-test bundle `CalcTests` (macOS), no scheme files. The
+// source is Objective-C++ (`Grade.mm` uses std::string), so the generated test is a .mm file too.
 {
   const { dir, write } = project("objc xcode");
   write("Calc/Grade.h", GRADE_H);
-  write("Calc/Grade.m", GRADE_M);
+  write("Calc/Grade.mm", GRADE_M.replace("#import \"Grade.h\"", "#import \"Grade.h\"\n#include <string>").replace("        return @\"A\";", "        std::string a(\"A\");\n        return [NSString stringWithUTF8String:a.c_str()];"));
   write("CalcTests/AddTests.m", testFile("AddTests", ADD_TEST));
   const id = (n) => `A0000000000000000000${String(n).padStart(4, "0")}`;
   const settings = (extra) => ["SDKROOT = macosx;", "MACOSX_DEPLOYMENT_TARGET = 12.0;", "CLANG_ENABLE_OBJC_ARC = YES;", "PRODUCT_NAME = \"$(TARGET_NAME)\";", ...extra];
   const config = (n, name, s) => `\t\t${id(n)} /* ${name} */ = {\n\t\t\tisa = XCBuildConfiguration;\n\t\t\tbuildSettings = {\n${s.map((x) => `\t\t\t\t${x}`).join("\n")}\n\t\t\t};\n\t\t\tname = ${name};\n\t\t};`;
   const list = (n, a, b) => `\t\t${id(n)} = {\n\t\t\tisa = XCConfigurationList;\n\t\t\tbuildConfigurations = (\n\t\t\t\t${id(a)} /* Debug */,\n\t\t\t\t${id(b)} /* Release */,\n\t\t\t);\n\t\t\tdefaultConfigurationIsVisible = 0;\n\t\t\tdefaultConfigurationName = Debug;\n\t\t};`;
-  const testSettings = ["GENERATE_INFOPLIST_FILE = YES;", "PRODUCT_BUNDLE_IDENTIFIER = dev.unitgen.CalcTests;", "CODE_SIGNING_ALLOWED = NO;"];
+  // The library is C++ inside: like any such project, its test bundle links libc++.
+  const testSettings = ["OTHER_LDFLAGS = \"-lc++\";", "GENERATE_INFOPLIST_FILE = YES;", "PRODUCT_BUNDLE_IDENTIFIER = dev.unitgen.CalcTests;", "CODE_SIGNING_ALLOWED = NO;"];
   const pbx = `// !$*UTF8*$!
 {
 \tarchiveVersion = 1;
@@ -154,7 +156,7 @@ function flow(dir, adapterArgs, test, extra = () => {}) {
 \tobjects = {
 
 /* Begin PBXBuildFile section */
-\t\t${id(1)} /* Grade.m in Sources */ = {isa = PBXBuildFile; fileRef = ${id(11)} /* Grade.m */; };
+\t\t${id(1)} /* Grade.mm in Sources */ = {isa = PBXBuildFile; fileRef = ${id(11)} /* Grade.mm */; };
 \t\t${id(2)} /* AddTests.m in Sources */ = {isa = PBXBuildFile; fileRef = ${id(12)} /* AddTests.m */; };
 \t\t${id(3)} /* libCalc.a in Frameworks */ = {isa = PBXBuildFile; fileRef = ${id(13)} /* libCalc.a */; };
 /* End PBXBuildFile section */
@@ -171,7 +173,7 @@ function flow(dir, adapterArgs, test, extra = () => {}) {
 
 /* Begin PBXFileReference section */
 \t\t${id(10)} /* Grade.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Grade.h; sourceTree = "<group>"; };
-\t\t${id(11)} /* Grade.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Grade.m; sourceTree = "<group>"; };
+\t\t${id(11)} /* Grade.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Grade.mm; sourceTree = "<group>"; };
 \t\t${id(12)} /* AddTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AddTests.m; sourceTree = "<group>"; };
 \t\t${id(13)} /* libCalc.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCalc.a; sourceTree = BUILT_PRODUCTS_DIR; };
 \t\t${id(14)} /* CalcTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CalcTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -202,7 +204,7 @@ function flow(dir, adapterArgs, test, extra = () => {}) {
 \t\t\tisa = PBXGroup;
 \t\t\tchildren = (
 \t\t\t\t${id(10)} /* Grade.h */,
-\t\t\t\t${id(11)} /* Grade.m */,
+\t\t\t\t${id(11)} /* Grade.mm */,
 \t\t\t);
 \t\t\tpath = Calc;
 \t\t\tsourceTree = "<group>";
@@ -288,7 +290,7 @@ function flow(dir, adapterArgs, test, extra = () => {}) {
 \t\t\tisa = PBXSourcesBuildPhase;
 \t\t\tbuildActionMask = 2147483647;
 \t\t\tfiles = (
-\t\t\t\t${id(1)} /* Grade.m in Sources */,
+\t\t\t\t${id(1)} /* Grade.mm in Sources */,
 \t\t\t);
 \t\t\trunOnlyForDeploymentPostprocessing = 0;
 \t\t};
@@ -329,9 +331,9 @@ ${list(53, 64, 65)}
 }
 `;
   write("Calc.xcodeproj/project.pbxproj", pbx);
-  flow(dir, ["--adapter", "xcode"], { source: "Calc/Grade.m", rel: "CalcTests/GradeUnitGenTests.m" }, () => {
+  flow(dir, ["--adapter", "xcode"], { source: "Calc/Grade.mm", rel: "CalcTests/GradeUnitGenTests.mm" }, () => {
     const after = fs.readFileSync(path.join(dir, "Calc.xcodeproj", "project.pbxproj"), "utf8");
-    if (!/lastKnownFileType = sourcecode\.c\.objc; path = GradeUnitGenTests\.m;/.test(after)) { console.error("FAILED: the test file is not registered in project.pbxproj"); process.exit(1); }
+    if (!/lastKnownFileType = sourcecode\.cpp\.objcpp; path = GradeUnitGenTests\.mm;/.test(after)) { console.error("FAILED: the test file is not registered in project.pbxproj"); process.exit(1); }
   });
 }
 console.log("e2e objc OK");

@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseXccovArchiveJson } from "../coverage.ts";
-import { errorExcerpt, exists, preferOwnTest, readFile, readJson, relPath, run, stripAnsi, walkFiles, writeFile, writeJson } from "../util.ts";
+import { canonical, errorExcerpt, exists, preferOwnTest, readFile, readJson, relPath, run, stripAnsi, walkFiles, writeFile, writeJson } from "../util.ts";
 import { classifyObjC, headerFor, isObjC, objcConventions, quotedImports, SOURCE_EXTS, stem, testExt } from "./objc.ts";
 import { Pbxproj, type PbxTarget } from "./pbxproj.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
@@ -81,12 +81,22 @@ export class XcodeAdapter implements Adapter {
       return objc && swift ? " [Swift + Objective-C]" : objc ? " [Objective-C]" : "";
     };
     lines.push(`modules: ${mods.map((m) => `${m.name}${langs(m)} -> ${m.meta?.testTarget ?? "(no unit-test target)"}`).join(", ") || "none"}`);
-    if (!mods.some((m) => m.meta?.testTarget)) {
+    const testTargets = this.project().targets().filter((t) => t.productType.includes("unit-test"));
+    // A project of test bundles only, testing code that another (referenced) project builds.
+    const referenced = [...this.project().objects.values()]
+      .filter((o) => o.isa === "PBXFileReference" && /wrapper\.pb-project/.test(o.body))
+      .map((o) => relPath(this.project().fullPath(o.id), this.root));
+    if (!mods.some((m) => m.meta?.testTarget) && testTargets.length && !mods.length) {
+      ok = false;
+      lines.push(`error: ${testTargets.map((t) => t.name).join(", ")} test code that this project does not build${referenced.length ? ` (it comes from ${referenced.join(", ")})` : ""}. Run unitgen where that code is built: the directory of that project, or a workspace or Package.swift that contains both.`);
+    } else if (!mods.some((m) => m.meta?.testTarget)) {
       ok = false;
       lines.push("error: no unit-test target found; add one in Xcode (File > New > Target > Unit Testing Bundle)");
     }
     const sims = this.simulator();
-    lines.push(sims ? `ios simulator: ${sims.name}` : "ios simulator: none (iOS-only targets need one: `xcodebuild -downloadPlatform iOS`)");
+    lines.push(sims ? `ios simulator: ${sims.name}${process.env.UNITGEN_SIMULATOR ? " (UNITGEN_SIMULATOR)" : ""}`
+      : process.env.UNITGEN_SIMULATOR ? `ios simulator: none named ${process.env.UNITGEN_SIMULATOR} (UNITGEN_SIMULATOR); \`xcrun simctl list devices available\` lists them`
+      : "ios simulator: none (iOS-only targets need one: `xcodebuild -downloadPlatform iOS`)");
     return { ok, lines };
   }
 
@@ -102,7 +112,8 @@ export class XcodeAdapter implements Adapter {
     const code = ts.filter((t) => /application|framework|library|bundle$|\.tool$/.test(t.productType) && !t.productType.includes("test"));
     const out: Module[] = [];
     for (const t of code) {
-      const files = t.files.filter(isSource);
+      // Real paths: what the CLI arguments and the coverage report resolve to.
+      const files = [...new Set(t.files.filter(isSource).map(canonical))];
       const dirs = [...t.syncedDirs, ...commonDirs(files)];
       if (!dirs.length) continue;
       // A test file that `@testable import`s the module, or (Objective-C) imports one of its headers.
@@ -135,7 +146,9 @@ export class XcodeAdapter implements Adapter {
       const k = [...m.sourceRoots].sort().join("|");
       byRoots.set(k, [...(byRoots.get(k) ?? []), m]);
     }
-    const rank = (m: Module) => (m.meta?.testTarget ? 0 : 4) + (m.meta?.testedDirectly ? 0 : 2) + (/ios/i.test(m.name) ? 0 : 1);
+    // unitgen runs tests on the iOS Simulator and on macOS: tvOS/watchOS/visionOS variants come last.
+    const other = (m: Module) => /tvos|watchos|visionos|xros/i.test(`${m.name} ${m.meta?.testTarget ?? ""}`);
+    const rank = (m: Module) => (m.meta?.testTarget ? 0 : 8) + (other(m) ? 4 : 0) + (m.meta?.testedDirectly ? 0 : 2) + (/ios/i.test(m.name) ? 0 : 1);
     const kept = [...byRoots.values()].map((group) => [...group].sort((a, b) => rank(a) - rank(b))[0]);
     // Targets that compile some of the same files (a framework and a command-line tool built from its
     // sources): each file belongs to the best-ranked one; a target left with no file of its own goes.
@@ -290,6 +303,12 @@ export class XcodeAdapter implements Adapter {
     try {
       const j = JSON.parse(r.out);
       const all = Object.entries(j.devices as Record<string, any[]>).filter(([rt]) => /iOS/.test(rt)).flatMap(([, ds]) => ds);
+      // UNITGEN_SIMULATOR picks one by name or UDID (two projects tested at once, or a specific device).
+      const want = process.env.UNITGEN_SIMULATOR;
+      if (want) {
+        const hit = all.find((x) => x.udid === want) ?? all.find((x) => x.name === want && x.state === "Booted") ?? all.find((x) => x.name === want);
+        return hit ? { name: hit.name, udid: hit.udid } : undefined;
+      }
       const d = all.find((x) => x.state === "Booted" && /iPhone/.test(x.name)) ?? all.find((x) => /iPhone/.test(x.name));
       return d ? { name: d.name, udid: d.udid } : undefined;
     } catch {
@@ -447,7 +466,7 @@ export class XcodeAdapter implements Adapter {
     const removeScheme = scheme.startsWith(OWN_SCHEME) ? this.writeOwnScheme(scheme) : () => {};
     let r;
     try {
-      r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile });
+      r = await runAsync(args, { cwd: this.root, timeoutSec: req.timeoutSec ?? 3600, logFile, streamLine: xcodebuildLine });
     } finally {
       removeScheme();
     }
@@ -485,6 +504,11 @@ export class XcodeAdapter implements Adapter {
   countAssertions(text: string): number {
     return (text.match(/#expect\s*\(|#require\s*\(|XCTAssert\w*\s*\(|XCTFail\s*\(|XCTUnwrap\s*\(/g) ?? []).length;
   }
+}
+
+/** xcodebuild output worth showing live (the full output is in the log): errors, failures, the outcome. */
+export function xcodebuildLine(l: string): boolean {
+  return !/IDETestOperationsObserverDebug/.test(l) && /(^|\s)error:|\*\* [A-Z ]+ (FAILED|SUCCEEDED) \*\*|Test Case '.*' failed|Executed \d+ tests?|^Testing started|Testing failed|Unable to find a destination/.test(l);
 }
 
 /** Scheme name -> .xcscheme XML, from the project's and workspace's shared and per-user schemes. */

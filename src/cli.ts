@@ -1,5 +1,6 @@
 // Keep supervision responsive even while a platform's metadata discovery uses spawnSync.
 import { fork, spawnSync } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -102,7 +103,14 @@ async function supervise(): Promise<number> {
         } catch (e) { reject(e); }
       });
     });
-  } finally { release(); }
+  } finally {
+    release();
+    // A command that stored nothing (a doctor that found no usable project): leave no `.unitgen/` behind.
+    if (root) {
+      const dir = path.join(root, ".unitgen");
+      try { if (fs.readdirSync(dir).every((f) => f === ".gitignore")) fs.rmSync(dir, { recursive: true, force: true }); } catch { /* none */ }
+    }
+  }
 }
 
 supervise().then((code) => exitAfterFlush(code), (e) => {

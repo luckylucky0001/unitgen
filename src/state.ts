@@ -56,7 +56,7 @@ export class State {
     this.dir = path.join(root, ".unitgen");
     this.data = readJson<StateData>(this.file("state.json"), { version: 1, accepted: [], rejected: [], notes: [] });
     if (!exists(this.file(".gitignore"))) {
-      writeFile(this.file(".gitignore"), "# unitgen working files\nlogs/\nruns/\nbriefs/\nrejected/\nmutation/\n*.cov.json\nharmony-shim/\nswift-parked/\nmutation.backup\n");
+      writeFile(this.file(".gitignore"), "# unitgen working files\nlogs/\nruns/\nbriefs/\nrejected/\nmutation/\n*.cov.json\nharmony-shim/\nswift-parked/\nmutation.backup\nDerivedData/\n*.orig\nxcode-*.json\nrun.lock\nmerged.profdata\n");
     }
   }
 

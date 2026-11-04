@@ -13,6 +13,7 @@ import { canonical, exists, log, relPath, walkFiles, writeFile } from "./util.ts
 import { formatVerify, quarantine, verify } from "./verify.ts";
 import { formatMutation, mutate, mutationGate, recover } from "./mutate.ts";
 import * as fs from "node:fs";
+import { createHash } from "node:crypto";
 
 const HELP = `unitgen — backfill unit tests, keep only the ones that pass and add coverage
 
@@ -151,7 +152,14 @@ export async function main(argv: string[]): Promise<number> {
       if (adapter.platform === "harmony") for (const m of mods ?? adapter.modules()) {
         for (const f of walkFiles(m.testRoot, adapter.testFileSuffixes ?? [adapter.testFileSuffix])) adapter.prepareTestFile(f, m);
       }
-      const r = await adapter.runTests({ coverage: true, label: "baseline", modules: mods, excludeGenerated: true });
+      // A baseline refused only because existing tests failed, with nothing changed since: `--allow-failing`
+      // accepts that run instead of repeating it (an Xcode baseline takes minutes).
+      const refusedFile = state.file("refused-baseline.json");
+      const scope = `${adapter.id}|${adapter.runnerName ?? ""}|${(mods ?? []).map((m) => m.name).join(",")}`;
+      const refused = o["allow-failing"] && exists(refusedFile) ? (JSON.parse(fs.readFileSync(refusedFile, "utf8")) as { scope: string; fingerprint: string; at: number; run: Awaited<ReturnType<typeof adapter.runTests>> }) : undefined;
+      const reuse = refused && refused.scope === scope && refused.fingerprint === projectFingerprint(root) && Date.now() - refused.at < 6 * 3600_000;
+      if (reuse) log(`reusing the refused baseline run from ${Math.round((Date.now() - refused.at) / 60000)} min ago (no project file changed since)`);
+      const r = reuse ? refused.run : await adapter.runTests({ coverage: true, label: "baseline", modules: mods, excludeGenerated: true });
       const failed = r.tests.filter((t) => t.status === "failed").length;
       const cov = r.coverage ?? {};
       if (mods) {
@@ -177,6 +185,9 @@ export async function main(argv: string[]): Promise<number> {
         : empty ? "no existing test covers project code: every file starts at 0%" : undefined].filter(Boolean).join("; ") || undefined;
       const baseline = { at: state.stamp(), ok: measured, tests: r.tests.length, failed, note, seconds: r.seconds, runner: adapter.runnerName };
       const otherRunner = state.data.accepted.filter((a) => a.runner && adapter.runnerName && a.runner !== adapter.runnerName);
+      if (!measured && failed > 0 && r.compiled && !r.infraError && !tolerated) {
+        writeFile(refusedFile, JSON.stringify({ scope, fingerprint: projectFingerprint(root), at: Date.now(), run: r }));
+      } else fs.rmSync(refusedFile, { force: true });
       if (measured) {
         state.data.unbuildable = r.unbuildable;
         state.baselineCoverage = cov;
@@ -195,7 +206,7 @@ export async function main(argv: string[]): Promise<number> {
       const why = !r.compiled ? `the build failed — the project or its existing tests do not compile with this toolchain: ${firstError?.trim() ?? "see the log"}`
         : r.infraError ? "environment problem"
         : !r.ok && !r.tests.length ? `the test run failed before any test ran: ${r.excerpt.split("\n").find((l) => l.trim()) ?? "see the log"}`
-        : failed && !tolerated ? `${failed} existing tests fail; fix them, or re-run with --allow-failing to measure the passing ones`
+        : failed && !tolerated ? `${failed} existing tests fail; fix them, or re-run with --allow-failing to measure the passing ones (it reuses this run while no project file changes)`
         : r.coverageProblem ? r.coverageProblem
         : failed ? `${failed} existing tests fail and no coverage was recorded for the passing ones`
         : !hasCoverage ? "the existing tests ran but covered no project code (the coverage tool may not be attached)"
@@ -318,6 +329,15 @@ export async function main(argv: string[]): Promise<number> {
       process.stderr.write(`unknown command: ${cmd}\n\n${HELP}`);
       return 64;
   }
+}
+
+/** Size and modification time of every project file (build output and unitgen's own files excluded). */
+function projectFingerprint(root: string): string {
+  const h = createHash("sha1");
+  for (const f of walkFiles(root, [""])) {
+    try { const st = fs.statSync(f); h.update(`${f}\0${st.size}\0${st.mtimeMs}\n`); } catch { /* vanished */ }
+  }
+  return h.digest("hex");
 }
 
 /** FooUnitGenTests.swift / FooUnitGenTest.kt / Foo.unitgen.test.ets -> the source the placement maps to. */

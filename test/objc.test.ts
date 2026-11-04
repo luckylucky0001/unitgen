@@ -226,7 +226,8 @@ test("pbxproj: an Objective-C test file is registered with its file type", async
 
 test("xcode modules: Objective-C sources, a tool sharing a framework's files keeps only its own, the variant the tests depend on wins", async () => {
   const { XcodeAdapter } = await import("../src/adapters/xcode.ts");
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "unitgen-xcmods-"));
+  // Real path: modules list sources resolved (macOS temp dirs live behind the /var -> /private/var link).
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "unitgen-xcmods-")));
   for (const f of ["Lib/A.m", "Lib/A.h", "Lib/B.m", "Tool/main.m", "Tool/Extra.m", "Tests/ATests.m"]) {
     fs.mkdirSync(path.join(dir, path.dirname(f)), { recursive: true });
     fs.writeFileSync(path.join(dir, f), f === "Tests/ATests.m" ? "#import \"A.h\"\n" : "");
@@ -262,4 +263,30 @@ test("xcode modules: Objective-C sources, a tool sharing a framework's files kee
   assert.equal(place.suiteName, "AUnitGenTests");
   assert.equal(place.importHint, "#import \"A.h\"");
   assert.equal(a.moduleFor(place.path)?.name, "Lib");
+});
+
+test("live output filters keep errors, failures and outcomes, not per-test noise", async () => {
+  const { xcodebuildLine } = await import("../src/adapters/xcode.ts");
+  const { swiftTestLine } = await import("../src/adapters/swiftpm.ts");
+  for (const l of ["/p/A.m:3: error: -[ATests testX] : ((a) equal to (b)) failed", "Test Case '-[ATests testX]' failed (0.1 seconds).", "\t Executed 4 tests, with 1 failure", "** TEST FAILED **", "Testing started"]) assert.ok(xcodebuildLine(l), l);
+  for (const l of ["Test Case '-[ATests testX]' passed (0.1 seconds).", "CompileC /p/A.o /p/A.m normal arm64", "2026-11-04 xcodebuild[1:2] [MT] IDETestOperationsObserverDebug: 7.0 elapsed -- Testing started completed."]) assert.ok(!xcodebuildLine(l), l);
+  for (const l of ["/p/A.swift:3:5: error: cannot find 'x'", "✘ Test foo() recorded an issue at A.swift:3:5", "Test run with 3 tests passed after 0.1 seconds.", "Build complete! (2.1s)"]) assert.ok(swiftTestLine(l), l);
+  for (const l of ["[3/9] Compiling Calc Grade.m", "✔ Test foo() passed after 0.001 seconds."]) assert.ok(!swiftTestLine(l), l);
+});
+
+test("swiftpm runs build only what the selected test targets depend on (plugins included)", async () => {
+  const { runClosure } = await import("../src/adapters/swiftpm.ts");
+  const targets = [
+    { name: "DiffKit", type: "regular", dependencies: [] },
+    { name: "ListKit", type: "regular", dependencies: [{ byName: ["DiffKit", null] }] },
+    { name: "SwiftKit", type: "regular", dependencies: [{ target: ["ListKit", null] }] },
+    { name: "Gen", type: "plugin", dependencies: [{ byName: ["GenTool", null] }] },
+    { name: "GenTool", type: "executable", dependencies: [] },
+    { name: "Models", type: "regular", dependencies: [{ product: ["Collections", "swift-collections", null, null] }], pluginUsages: [{ plugin: ["Gen", null] }] },
+    { name: "DiffKitUnitGenTests", type: "test", dependencies: [{ byName: ["DiffKit", null] }] },
+    { name: "ModelsTests", type: "test", dependencies: ["Models"].map((n) => ({ byName: [n, null] })) },
+  ];
+  assert.deepEqual([...runClosure(targets, (t) => t.name === "DiffKitUnitGenTests")].sort(), ["DiffKit", "DiffKitUnitGenTests"]);
+  assert.deepEqual([...runClosure(targets, (t) => t.name === "ModelsTests")].sort(), ["Gen", "GenTool", "Models", "ModelsTests"]);
+  assert.deepEqual([...runClosure(targets, () => false)], []);
 });
