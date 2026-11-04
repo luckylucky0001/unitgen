@@ -117,7 +117,10 @@ NS_ASSUME_NONNULL_END`;
     "CGFloat GradeClamp(CGFloat v);",
   ]);
   const impl = objcDeclarationLines(IMPL);
-  assert.deepEqual(impl, ["@implementation Grade", "- (NSString *)gradeFor:(NSInteger)score", "- (instancetype)init", "- (void)dealloc", "@end"]);
+  // Constants the code uses are declarations too; function-like macros are not.
+  assert.deepEqual(impl, ["#define LIMIT 10", "static NSString * const kKey = @\"grade\";", "@implementation Grade", "- (NSString *)gradeFor:(NSInteger)score", "- (instancetype)init", "- (void)dealloc", "@end"]);
+  assert.deepEqual(objcDeclarationLines("#define kSDUTTypeHEIC ((__bridge CFStringRef)@\"public.heic\")\n#define SD_MAX(a, b) ((a) > (b) ? (a) : (b))\nFOUNDATION_EXPORT NSString * const SDErrorDomain;"),
+    ["#define kSDUTTypeHEIC ((__bridge CFStringRef)@\"public.heic\")", "FOUNDATION_EXPORT NSString * const SDErrorDomain;"]);
   // `@public` instance variables are API (read as `msg->_threadName`); the others are not.
   assert.deepEqual(objcDeclarationLines("@interface Msg : NSObject\n{\n  @public\n    NSString *_threadName;\n    int _qos;\n  @private\n    int _secret;\n}\n@property NSString *text;\n@end"),
     ["@interface Msg : NSObject", "  @public", "    NSString *_threadName;", "    int _qos;", "}", "@property NSString *text;", "@end"]);
@@ -289,4 +292,11 @@ test("swiftpm runs build only what the selected test targets depend on (plugins 
   assert.deepEqual([...runClosure(targets, (t) => t.name === "DiffKitUnitGenTests")].sort(), ["DiffKit", "DiffKitUnitGenTests"]);
   assert.deepEqual([...runClosure(targets, (t) => t.name === "ModelsTests")].sort(), ["Gen", "GenTool", "Models", "ModelsTests"]);
   assert.deepEqual([...runClosure(targets, () => false)], []);
+});
+
+test("size hints get no arithmetic or constant mutants; other operators on the line still do", () => {
+  const src = "NSMutableArray *a = [[NSMutableArray alloc] initWithCapacity:count * 2];\nvar b = [Int](); b.reserveCapacity(n + 8)\nif (count > 2) { total = count * 2; }";
+  const ms = mutantsFor(src, [1, 2, 3], { objc: true });
+  assert.deepEqual(ms.filter((m) => m.line < 3), []);
+  assert.ok(ms.some((m) => m.line === 3 && m.op === "* -> /"));
 });

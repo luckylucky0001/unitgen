@@ -11,6 +11,7 @@ import { parseXccovArchiveJson } from "../coverage.ts";
 import { canonical, errorExcerpt, exists, preferOwnTest, readFile, readJson, relPath, run, stripAnsi, walkFiles, writeFile, writeJson } from "../util.ts";
 import { classifyObjC, headerFor, isObjC, objcConventions, quotedImports, SOURCE_EXTS, stem, testExt } from "./objc.ts";
 import { Pbxproj, type PbxTarget } from "./pbxproj.ts";
+import { parseSwiftTestOutput } from "./swiftpm.ts";
 import type { Adapter, Doctor, FileKind, Module, RunRequest, TestCase, TestPlacement, TestRun } from "./types.ts";
 
 const SUFFIX = "UnitGenTests";
@@ -26,7 +27,7 @@ export class XcodeAdapter implements Adapter {
   readonly root: string;
   private readonly stateDir: string;
   private projectFile: string;
-  private pbx?: Pbxproj;
+  private pbxs = new Map<string, Pbxproj>();
   private mods?: Module[];
 
   constructor(root: string, stateDir: string) {
@@ -51,13 +52,45 @@ export class XcodeAdapter implements Adapter {
     return ws.length ? path.join(this.root, ws[0]) : undefined;
   }
 
-  private pbxPath(): string {
-    return path.join(this.projectFile, "project.pbxproj");
+  private pbxPath(project = this.projectFile): string {
+    return path.join(project, "project.pbxproj");
   }
 
-  private project(): Pbxproj {
-    if (!this.pbx) this.pbx = new Pbxproj(readFile(this.pbxPath()), this.root);
-    return this.pbx;
+  /** A project's parsed pbxproj (paths resolve against the directory holding the .xcodeproj). */
+  private project(project = this.projectFile): Pbxproj {
+    let p = this.pbxs.get(project);
+    if (!p) {
+      p = new Pbxproj(readFile(this.pbxPath(project)), path.dirname(project));
+      this.pbxs.set(project, p);
+    }
+    return p;
+  }
+
+  /**
+   * The main project plus every project the workspace lists: CocoaPods puts the tests in a project of
+   * their own (`Tests/Foo Tests.xcodeproj`) and builds the code in `Pods/Pods.xcodeproj`.
+   */
+  private projectFiles(): string[] {
+    const out = [this.projectFile];
+    const ws = this.workspace();
+    if (ws) {
+      try {
+        for (const m of readFile(path.join(ws, "contents.xcworkspacedata")).matchAll(/location\s*=\s*"(?:group|container|absolute):([^"]+\.xcodeproj)"/g)) {
+          const p = canonical(path.resolve(m[0].includes("absolute:") ? "/" : path.dirname(ws), m[1]));
+          if (exists(this.pbxPath(p)) && !out.some((o) => canonical(o) === p)) out.push(p);
+        }
+      } catch { /* no readable workspace */ }
+    }
+    return out;
+  }
+
+  /** Native targets of every project, each with the project it belongs to. */
+  private targets(): (PbxTarget & { project: string })[] {
+    return this.projectFiles().flatMap((p) => this.project(p).targets().map((t) => ({ ...t, project: p })));
+  }
+
+  private target(name: string | undefined): (PbxTarget & { project: string }) | undefined {
+    return name === undefined ? undefined : this.targets().find((t) => t.name === name);
   }
 
   private containerArgs(): string[] {
@@ -73,7 +106,8 @@ export class XcodeAdapter implements Adapter {
       return { ok: false, lines: ["xcodebuild unavailable: install Xcode and run `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`", v.out.trim()] };
     }
     lines.push(`xcode: ${v.out.split("\n")[0]}`);
-    lines.push(`project: ${relPath(this.projectFile, this.root)}${this.workspace() ? ` (workspace ${relPath(this.workspace()!, this.root)})` : ""}`);
+    const others = this.projectFiles().slice(1).map((p) => relPath(p, this.root));
+    lines.push(`project: ${relPath(this.projectFile, this.root)}${this.workspace() ? ` (workspace ${relPath(this.workspace()!, this.root)}${others.length ? `, also ${others.join(", ")}` : ""})` : ""}`);
     const mods = this.modules();
     const langs = (m: Module) => {
       const fs_ = m.meta?.files as string[];
@@ -81,11 +115,11 @@ export class XcodeAdapter implements Adapter {
       return objc && swift ? " [Swift + Objective-C]" : objc ? " [Objective-C]" : "";
     };
     lines.push(`modules: ${mods.map((m) => `${m.name}${langs(m)} -> ${m.meta?.testTarget ?? "(no unit-test target)"}`).join(", ") || "none"}`);
-    const testTargets = this.project().targets().filter((t) => t.productType.includes("unit-test"));
+    const testTargets = this.targets().filter((t) => t.productType.includes("unit-test") && !this.inPods(t.project));
     // A project of test bundles only, testing code that another (referenced) project builds.
-    const referenced = [...this.project().objects.values()]
+    const referenced = this.projectFiles().flatMap((p) => [...this.project(p).objects.values()]
       .filter((o) => o.isa === "PBXFileReference" && /wrapper\.pb-project/.test(o.body))
-      .map((o) => relPath(this.project().fullPath(o.id), this.root));
+      .map((o) => relPath(this.project(p).fullPath(o.id), this.root)));
     if (!mods.some((m) => m.meta?.testTarget) && testTargets.length && !mods.length) {
       ok = false;
       lines.push(`error: ${testTargets.map((t) => t.name).join(", ")} test code that this project does not build${referenced.length ? ` (it comes from ${referenced.join(", ")})` : ""}. Run unitgen where that code is built: the directory of that project, or a workspace or Package.swift that contains both.`);
@@ -105,11 +139,21 @@ export class XcodeAdapter implements Adapter {
     return this.mods;
   }
 
+  /** Pods/Pods.xcodeproj, or a file inside Pods/: third-party code CocoaPods manages. */
+  private inPods(file: string): boolean {
+    return canonical(file).startsWith(canonical(path.join(this.root, "Pods")) + path.sep);
+  }
+
   private readModules(): Module[] {
-    const ts = this.project().targets();
-    const tests = ts.filter((t) => t.productType.includes("unit-test"));
+    const ts = this.targets();
+    // Test bundles of pods (their test specs) are not the project's tests.
+    const tests = ts.filter((t) => t.productType.includes("unit-test") && !this.inPods(t.project))
+      // Several bundles test the same code (Tests iOS / Tests Mac / Tests TV): the runnable ones first.
+      .sort((a, b) => rankTest(a.name) - rankTest(b.name));
     // Command-line tools too: their tests compile the tool's sources into the test bundle itself.
-    const code = ts.filter((t) => /application|framework|library|bundle$|\.tool$/.test(t.productType) && !t.productType.includes("test"));
+    // Pods targets only for development pods (`:path => './'`), whose sources are the project's own.
+    const code = ts.filter((t) => /application|framework|library|bundle$|\.tool$/.test(t.productType) && !t.productType.includes("test")
+      && !(this.inPods(t.project) && t.files.every((f) => this.inPods(f))));
     const out: Module[] = [];
     for (const t of code) {
       // Real paths: what the CLI arguments and the coverage report resolve to.
@@ -118,9 +162,13 @@ export class XcodeAdapter implements Adapter {
       if (!dirs.length) continue;
       // A test file that `@testable import`s the module, or (Objective-C) imports one of its headers.
       const headers = new Set(files.filter(isObjC).map((f) => `${stem(f)}.h`));
+      const mod = productModule(t.name);
+      // Swift `@testable import Foo`; Objective-C `#import "Foo.h"` of one of its headers, or the framework
+      // (`#import <Foo/Foo.h>`, `@import Foo;`), as tests in another project of the workspace import it.
       const imports = (f: string) => exists(f) && (f.endsWith(".swift")
-        ? new RegExp(`@testable\\s+import\\s+${productModule(t.name)}\\b`).test(readFile(f))
-        : isObjC(f) && quotedImports(readFile(f)).some((h) => headers.has(path.basename(h))));
+        ? new RegExp(`@testable\\s+import\\s+${mod}\\b`).test(readFile(f))
+        : (isObjC(f) || f.endsWith(".h")) && (quotedImports(readFile(f)).some((h) => headers.has(path.basename(h)))
+          || new RegExp(`^\\s*(#\\s*import\\s+<${mod}/|@import\\s+${mod}\\s*;)`, "m").test(readFile(f))));
       // "SwiftDate-iOS Tests" tests "SwiftDate-iOS": compare without spaces, dashes and underscores.
       const norm = (n: string) => n.replace(/[\s_-]+/g, "").toLowerCase();
       const test = tests.find((x) => x.name === `${t.name}Tests`)
@@ -129,13 +177,13 @@ export class XcodeAdapter implements Adapter {
         ?? tests.find((x) => x.dependsOn.includes(t.id) && tests.filter((y) => y.dependsOn.includes(t.id)).length === 1)
         // The test bundle compiles some of the target's sources itself (tool and app sources added to the test target).
         ?? tests.find((x) => x.files.some((f) => files.includes(f) && !/main\.(m|mm|swift)$/.test(f)))
-        ?? tests.find((x) => [...x.files, ...x.syncedDirs.flatMap((d) => walkFiles(d, SOURCE_EXTS))].some(imports))
+        ?? tests.find((x) => [...x.files, ...x.syncedDirs.flatMap((d) => walkFiles(d, SOURCE_EXTS)), ...headersOf(x.files)].some(imports))
         ?? (tests.length === 1 && code.length === 1 ? tests[0] : undefined);
       const testDir = test ? (test.syncedDirs[0] ?? commonDirs(test.files.filter(isSource))[0]) : undefined;
       out.push({
         name: t.name, dir: dirs[0], sourceRoots: dirs, testRoot: testDir ?? path.join(this.root, `${t.name}Tests`),
         kind: t.productType.split(".").pop() ?? "target",
-        meta: { testTarget: test?.name, files, synced: !!test?.syncedDirs.length, testedDirectly: !!test?.dependsOn.includes(t.id) },
+        meta: { testTarget: test?.name, files, synced: !!test?.syncedDirs.length, testedDirectly: !!test?.dependsOn.includes(t.id), project: t.project, testProject: test?.project },
       });
     }
     // One framework built per platform from the same sources (Foo-iOS, Foo-tvOS, Foo-macOS) is one
@@ -235,7 +283,7 @@ export class XcodeAdapter implements Adapter {
         examples: [...styles].slice(0, 4),
       });
     }
-    const existing = this.exampleTests(m).filter((f) => f.endsWith(".swift")).concat((this.project().targets().find((t) => t.name === m.meta?.testTarget)?.syncedDirs ?? []).flatMap((d) => walkFiles(d, [".swift"])));
+    const existing = this.exampleTests(m).filter((f) => f.endsWith(".swift")).concat((this.target(m.meta?.testTarget)?.syncedDirs ?? []).flatMap((d) => walkFiles(d, [".swift"])));
     const usesXCTest = existing.some((f) => /import XCTest/.test(readFile(f)));
     const usesTesting = existing.some((f) => /import Testing\b/.test(readFile(f)));
     return [
@@ -254,12 +302,15 @@ export class XcodeAdapter implements Adapter {
   }
 
   exampleTests(m: Module, source?: string): string[] {
-    const t = this.project().targets().find((x) => x.name === m.meta?.testTarget);
+    const t = this.target(m.meta?.testTarget);
     const all = [...(t?.files ?? []), ...(t?.syncedDirs.flatMap((d) => walkFiles(d, SOURCE_EXTS)) ?? [])].filter((f) => isSource(f) && exists(f) && !f.includes(SUFFIX));
     // Examples in the language the new test is written in, when the target has any.
     const lang = (f: string) => (isObjC(f) ? "objc" : "swift");
     const same = all.filter((f) => lang(f) === lang(source ?? ".swift"));
-    const files = same.length ? same : all;
+    const pool = same.length ? same : all;
+    // Files that declare tests, not helpers compiled into the bundle (`ASDisplayNode+OCMock.mm`).
+    const declaring = pool.filter((f) => /XCTestCase|@Test\b|@Suite\b|-\s*\(void\)\s*test\w*|func\s+test\w*\s*\(|\bSpecBegin\(|\bQuickSpec\b/.test(readFile(f)));
+    const files = declaring.length ? declaring : pool;
     return preferOwnTest(files, source, files.filter((f) => fs.statSync(f).size > 300).sort((a, b) => fs.statSync(a).size - fs.statSync(b).size));
   }
 
@@ -270,19 +321,20 @@ export class XcodeAdapter implements Adapter {
   prepareTestFile(testFile: string, m: Module): void {
     fs.mkdirSync(path.dirname(testFile), { recursive: true });
     if (m.meta?.synced) return;
-    const target = this.project().targets().find((t) => t.name === m.meta?.testTarget);
+    const target = this.target(m.meta?.testTarget);
     if (!target) throw new Error(`module ${m.name} has no unit-test target`);
-    const backup = path.join(this.stateDir, "project.pbxproj.orig");
+    const project = target.project;
+    const backup = path.join(this.stateDir, project === this.projectFile ? "project.pbxproj.orig" : `${path.basename(project, ".xcodeproj")}.project.pbxproj.orig`);
     if (!exists(backup)) {
       fs.mkdirSync(this.stateDir, { recursive: true });
-      fs.copyFileSync(this.pbxPath(), backup);
+      fs.copyFileSync(this.pbxPath(project), backup);
     }
-    const ids = this.project().addSourceFile(target, path.resolve(testFile));
+    const ids = this.project(project).addSourceFile(target, path.resolve(testFile));
     if (!ids) return;
-    writeFile(this.pbxPath(), this.project().text);
+    writeFile(this.pbxPath(project), this.project(project).text);
     this.mods = undefined;
     const reg = readJson<Record<string, string[]>>(this.registryFile(), {});
-    reg[relPath(testFile, this.root)] = [ids.fileRef, ids.buildFile];
+    reg[relPath(testFile, this.root)] = [ids.fileRef, ids.buildFile, relPath(project, this.root)];
     writeJson(this.registryFile(), reg);
   }
 
@@ -290,8 +342,11 @@ export class XcodeAdapter implements Adapter {
     const reg = readJson<Record<string, string[]>>(this.registryFile(), {});
     const key = relPath(testFile, this.root);
     if (!reg[key]) return;
-    this.project().removeIds(reg[key]);
-    writeFile(this.pbxPath(), this.project().text);
+    // Entries written before multi-project support hold two ids and belong to the main project.
+    const [fileRef, buildFile, rel] = reg[key];
+    const project = rel ? path.resolve(this.root, rel) : this.projectFile;
+    this.project(project).removeIds([fileRef, buildFile]);
+    writeFile(this.pbxPath(project), this.project(project).text);
     this.mods = undefined;
     delete reg[key];
     writeJson(this.registryFile(), reg);
@@ -329,7 +384,7 @@ export class XcodeAdapter implements Adapter {
     } catch { /* fall through */ }
     // A scheme file says what its test action runs; schemes without one are generated by Xcode
     // (the scheme of a unit-test target tests that target).
-    const files = schemeFiles([this.projectFile, this.workspace()].filter((x): x is string => !!x));
+    const files = schemeFiles([...this.projectFiles(), this.workspace()].filter((x): x is string => !!x));
     const test = m.meta?.testTarget as string | undefined;
     const runs = (sch: string) => (files.has(sch) ? schemeTestTargets(files.get(sch)!, this.root).includes(test ?? "") : undefined);
     const order = [
@@ -338,24 +393,25 @@ export class XcodeAdapter implements Adapter {
     ].filter((x): x is string => !!x && schemes.includes(x));
     // No scheme tests it (schemes not shared, so Xcode generated one per target, and the library's has
     // no test action): runs use a scheme of unitgen's own, written for the run only.
-    const pick = order[0] ?? (test && this.project().targets().some((t) => t.name === test) ? `${OWN_SCHEME}${test}` : [m.name, ...schemes].find((x) => schemes.includes(x)));
+    const pick = order[0] ?? (test && this.target(test) ? `${OWN_SCHEME}${test}` : [m.name, ...schemes].find((x) => schemes.includes(x)));
     if (pick) writeJson(cache, { ...c, [m.name]: pick });
     return pick;
   }
 
-  private ownSchemeDir(): string {
-    return path.join(this.projectFile, "xcuserdata", `${os.userInfo().username}.xcuserdatad`, "xcschemes");
+  private ownSchemeDir(project = this.projectFile): string {
+    return path.join(project, "xcuserdata", `${os.userInfo().username}.xcuserdatad`, "xcschemes");
   }
 
   /** Write unitgen's scheme for a test target; returns a function that removes it again. */
   private writeOwnScheme(scheme: string): () => void {
-    const test = this.project().targets().find((t) => `${OWN_SCHEME}${t.name}` === scheme);
+    const test = this.targets().find((t) => `${OWN_SCHEME}${t.name}` === scheme);
     if (!test) return () => {};
-    const dir = this.ownSchemeDir();
-    const created = [path.join(this.projectFile, "xcuserdata"), path.dirname(dir), dir].filter((d) => !exists(d));
+    // In the test target's own project: `container:` names that project, relative to its directory.
+    const dir = this.ownSchemeDir(test.project);
+    const created = [path.join(test.project, "xcuserdata"), path.dirname(dir), dir].filter((d) => !exists(d));
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `${scheme}.xcscheme`);
-    const ref = `<BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "${test.id}" BuildableName = "${test.product ?? `${test.name}.xctest`}" BlueprintName = "${test.name}" ReferencedContainer = "container:${path.basename(this.projectFile)}"></BuildableReference>`;
+    const ref = `<BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "${test.id}" BuildableName = "${test.product ?? `${test.name}.xctest`}" BlueprintName = "${test.name}" ReferencedContainer = "container:${path.basename(test.project)}"></BuildableReference>`;
     writeFile(file, [
       `<?xml version="1.0" encoding="UTF-8"?>`,
       `<!-- Written by unitgen for one run; removed afterwards. -->`,
@@ -375,17 +431,19 @@ export class XcodeAdapter implements Adapter {
 
   recover(): void {
     // A run killed before it could remove its scheme.
-    for (const f of walkFiles(this.ownSchemeDir(), [".xcscheme"])) if (path.basename(f).startsWith(OWN_SCHEME)) fs.rmSync(f, { force: true });
+    for (const p of this.projectFiles()) for (const f of walkFiles(this.ownSchemeDir(p), [".xcscheme"])) if (path.basename(f).startsWith(OWN_SCHEME)) fs.rmSync(f, { force: true });
   }
 
   /** `xcodebuild -showBuildSettings` of a target, cached per pbxproj content. */
   private settings(target: string | undefined): Record<string, string> {
     if (!target) return {};
     const cache = path.join(this.stateDir, "xcode-settings.json");
-    const stamp = `${fs.statSync(this.pbxPath()).mtimeMs}`;
+    // The target's own project (a test bundle may live in another project of the workspace).
+    const project = this.target(target)?.project ?? this.projectFile;
+    const stamp = `${fs.statSync(this.pbxPath(project)).mtimeMs}`;
     const c = readJson<Record<string, { stamp: string; settings: Record<string, string> }>>(cache, {});
     if (c[target]?.stamp === stamp) return c[target].settings;
-    const r = run(["xcodebuild", "-showBuildSettings", "-json", "-project", this.projectFile, "-target", target], { cwd: this.root, timeoutSec: 600 });
+    const r = run(["xcodebuild", "-showBuildSettings", "-json", "-project", project, "-target", target], { cwd: this.root, timeoutSec: 600 });
     let settings: Record<string, string> = {};
     try { settings = JSON.parse(r.out.slice(r.out.indexOf("[")))[0]?.buildSettings ?? {}; } catch { /* unknown */ }
     if (r.ok) writeJson(cache, { ...c, [target]: { stamp, settings } });
@@ -433,7 +491,10 @@ export class XcodeAdapter implements Adapter {
       mods = this.modules().filter((m) => owners.has(m.name));
     }
     const m = mods.find((x) => x.meta?.testTarget) ?? mods[0];
-    const scheme = m ? this.scheme(m) : undefined;
+    if (!m?.meta?.testTarget) {
+      return { ok: false, compiled: false, tests: [], logFile, excerpt: "", seconds: 0, infraError: "no module with a unit-test target (see `unitgen doctor`)" };
+    }
+    const scheme = this.scheme(m);
     const dest = m ? this.destination(m) : undefined;
     if (!m || !scheme || !dest) {
       const why = !m || !m.meta?.testTarget ? "no module with a unit-test target (see `unitgen doctor`)"
@@ -471,7 +532,9 @@ export class XcodeAdapter implements Adapter {
       removeScheme();
     }
     const out = stripAnsi(r.out);
-    const tests = exists(bundle) ? xcresultTests(bundle) : [];
+    // A run stopped by a timeout leaves no usable result bundle: read the test lines it printed.
+    let tests = exists(bundle) ? xcresultTests(bundle) : [];
+    if (!tests.length) tests = parseSwiftTestOutput(out);
     const compiled = !/error: |\*\* BUILD FAILED \*\*|Testing cancelled because the build failed/.test(out) || tests.length > 0;
     let coverage;
     if (req.coverage && exists(bundle)) {
@@ -488,14 +551,17 @@ export class XcodeAdapter implements Adapter {
       && !Object.values(coverage).some((ls) => Object.values(ls).some((h) => h > 0))
       ? `xccov recorded 0 executed lines although ${passed} test(s) passed: coverage was not collected. Check the scheme's "Gather coverage" and build settings that replace llvm coverage (GCC_INSTRUMENT_PROGRAM_FLOW_ARCS, OTHER_CFLAGS/OTHER_SWIFT_FLAGS with -profile-* or --coverage).`
       : undefined;
-    const infra = /libarclite/.test(out)
+    const infra = /Undefined symbol: ___gcov_flush/.test(out)
+      // Old gcov coverage hooks (`__gcov_flush()` in a test host's AppDelegate) no longer link: LLVM 12 removed it.
+      ? "the project calls __gcov_flush(), which this Xcode no longer provides (LLVM renamed it __gcov_dump), so its tests do not link here even without unitgen: remove or replace that call, then re-run"
+      : /libarclite/.test(out)
       // Xcode 14.3+ dropped libarclite, which deployment targets below iOS 9 / macOS 10.11 link against.
       ? "the project's deployment target is too old for this Xcode (libarclite is gone since Xcode 14.3): raise IPHONEOS_DEPLOYMENT_TARGET / MACOSX_DEPLOYMENT_TARGET of the targets (iOS 12 / macOS 10.13 or later), then re-run"
       : /Unable to find a destination|no available devices|requires a provisioning profile|xcodebuild: error: Could not resolve package|Scheme .+ is not currently configured for the test action/.exec(out)?.[0];
     return {
       ok: r.ok, compiled, tests, coverage, logFile, seconds: (Date.now() - start) / 1000,
       // xcodebuild prints simulator/package noise first: lead with its own error lines.
-      excerpt: r.ok ? "" : [...new Set(out.split("\n").filter((l) => /(^|\s)error:/.test(l)).map((l) => l.trim()))].slice(0, 10).join("\n") || errorExcerpt(out),
+      excerpt: r.ok ? "" : [...new Set([...out.split("\n").filter((l) => /Undefined symbol: /.test(l)), ...out.split("\n").filter((l) => /(^|\s)error:/.test(l))].map((l) => l.trim()))].slice(0, 10).join("\n") || errorExcerpt(out),
       infraError: r.timedOut ? "timeout" : infra,
       ...(coverageProblem ? { coverageProblem } : {}),
     };
@@ -509,6 +575,16 @@ export class XcodeAdapter implements Adapter {
 /** xcodebuild output worth showing live (the full output is in the log): errors, failures, the outcome. */
 export function xcodebuildLine(l: string): boolean {
   return !/IDETestOperationsObserverDebug/.test(l) && /(^|\s)error:|\*\* [A-Z ]+ (FAILED|SUCCEEDED) \*\*|Test Case '.*' failed|Executed \d+ tests?|^Testing started|Testing failed|Unable to find a destination/.test(l);
+}
+
+/** Test bundles named for iOS (or for no platform) first, tvOS/watchOS/visionOS ones last. */
+function rankTest(name: string): number {
+  return /tvos|\btv\b|watch|vision|xros/i.test(name) ? 2 : /ios/i.test(name) ? 0 : 1;
+}
+
+/** Headers next to a target's sources (a test target's shared `FooTestCase.h` imports the framework). */
+function headersOf(files: string[]): string[] {
+  return [...new Set(files.filter(isObjC).map((f) => f.replace(/\.mm?$/, ".h")))].filter(exists);
 }
 
 /** Scheme name -> .xcscheme XML, from the project's and workspace's shared and per-user schemes. */

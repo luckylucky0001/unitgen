@@ -58,6 +58,8 @@ function stripComments(text: string): string {
 
 const DIRECTIVE = /^\s*(@interface|@protocol|@implementation|@property|@end|@class|@optional|@required|typedef\b|extern\b|FOUNDATION_EXPORT\b|FOUNDATION_EXTERN\b|UIKIT_EXTERN\b|NS_SWIFT_NAME\b)/;
 const METHOD = /^\s*[-+]\s*\(/;
+// Constants the code uses: `#define kFooKey @"foo"` (not function-like macros), `static NSString * const kBar = @"bar";`.
+const CONSTANT = /^\s*(#\s*define\s+[A-Za-z_]\w*\s+\S|(static\s+|extern\s+)?(const\s+)?[A-Za-z_]\w*\s*\*?\s*const\s+[A-Za-z_]\w*\s*=)/;
 // A C function prototype or definition at top level: `NSString *FooName(int x);`, `static inline CGFloat clamp(CGFloat v) {`.
 const C_FUNCTION = /^\s*(static\s+|inline\s+|extern\s+|__attribute__\(\([^)]*\)\)\s+)*[A-Za-z_][\w]*(\s+[A-Za-z_]\w*)*[\s*]+\**[A-Za-z_]\w*\s*\([^;{]*\)?\s*(;|\{)?\s*$/;
 const NOT_A_FUNCTION = /^\s*(return|if|else|for|while|switch|do|case|goto|sizeof)\b/;
@@ -90,6 +92,8 @@ export function objcDeclarationLines(text: string): string[] {
     if (continuing) {
       out[out.length - 1] += ` ${t.replace(/\{$/, "").trim()}`;
       continuing = !/[;{]$/.test(t) && t !== "";
+    } else if (depth === 0 && t && CONSTANT.test(l)) {
+      out.push(l);
     } else if (depth === 0 && t && (DIRECTIVE.test(l) || METHOD.test(l) || (C_FUNCTION.test(l) && !NOT_A_FUNCTION.test(l) && /\(/.test(t)))) {
       out.push(l.replace(/\s*\{$/, ""));
       continuing = METHOD.test(l) && !/[;{]$/.test(t);
@@ -141,7 +145,7 @@ export function objcConventions(o: { where: string; suite: string; header?: stri
   return [
     o.where,
     `Write the test in Objective-C with XCTest (the source under test is Objective-C): \`#import <XCTest/XCTest.h>\`, ${o.header ? `\`#import "${o.header}"\`` : "the header that declares the code under test"}, then \`@interface ${o.suite} : XCTestCase @end\` and \`@implementation ${o.suite}\` with \`- (void)testX\` methods (each name starts with \`test\`). One class per file, named exactly \`${o.suite}\` (it is used to run only this file).`,
-    o.examples.length ? `Import headers the way the existing tests do (${o.examples.join(", ")}).` : "",
+    o.examples.length ? `The existing tests also import ${o.examples.join(", ")}; use those for their helpers, and the import above for the code under test.` : "",
     o.publicOnly ?? "",
     "Assertions: `XCTAssertEqualObjects` for objects (NSString, NSNumber, NSArray, NSDictionary), `XCTAssertEqual` for scalars (NSInteger, BOOL, enums), `XCTAssertEqualWithAccuracy` for floating point, `XCTAssertNil`/`XCTAssertNotNil`, `XCTAssertTrue`/`XCTAssertFalse`, `XCTAssertThrowsSpecificNamed` for NSException. For `NSError **` APIs pass `&error` and assert on the return value and on `error.domain`/`error.code`.",
     "XCTAssert* are macros: an argument with a comma outside parentheses (`@[@1, @2]`, `@{@\"a\": @1, @\"b\": @2}`, `[x a:1 b:2]` is fine) must be wrapped in parentheses, e.g. `XCTAssertEqualObjects(list, (@[@1, @2]))`.",

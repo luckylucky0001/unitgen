@@ -148,7 +148,7 @@ function declarationsOf(text: string, names: string[], file = ""): string {
 }
 
 /** Existing fakes/stubs in the module's test sources that implement types the target uses. */
-function testDoubles(adapter: Adapter, m: Module, text: string, budget: number): string {
+function testDoubles(adapter: Adapter, m: Module, text: string, budget: number, source = ""): string {
   const idents = new Set((text.match(/\b[A-Z][A-Za-z0-9_]{2,}\b/g) ?? []).filter((x) => !GENERIC_SUPERTYPES.has(x)));
   // Production sources are not test doubles unless they say so by name (FakeX, MockX, InMemoryX, ...).
   const prodRoots = adapter.modules().flatMap((mm) => mm.sourceRoots.map((r) => r + path.sep));
@@ -156,7 +156,9 @@ function testDoubles(adapter: Adapter, m: Module, text: string, budget: number):
   // Objective-C tests sometimes re-declare a production class to reach its private API: that is no double.
   const prodTypes = new Set(adapter.modules().flatMap((mm) => adapter.sourceFiles(mm).filter(isObjC).flatMap((f) => definedTypes(readFile(f)))));
   const roots = [...new Set([path.dirname(m.testRoot), m.testRoot, ...(adapter.testSupportDirs?.(m) ?? [])])].filter(exists);
-  const exts = [".kt", ".java", ".swift", ".ets", ".ts", ".m", ".mm", ".h"];
+  // Doubles a test in the source's language can use (no Swift class for an Objective-C test).
+  const family = [[".kt", ".java"], [".swift"], [".ets", ".ts"], [".m", ".mm", ".h"]];
+  const exts = family.find((f) => f.some((x) => source.endsWith(x))) ?? family.flat();
   const parts: string[] = [];
   let used = 0;
   const seen = new Set<string>();
@@ -250,7 +252,7 @@ export function buildBrief(adapter: Adapter, state: State, source: string, opts:
   const existingGenerated = exists(place.path) ? readFile(place.path) : "";
   const header = adapter.headerFor?.(abs);
   const related = relatedDeclarations(adapter, m, abs, text, 12000);
-  const doubles = testDoubles(adapter, m, text, 8000);
+  const doubles = testDoubles(adapter, m, text, 8000, abs);
   const sections: string[] = [
     `# unitgen brief: ${relPath(abs, adapter.root)}`,
     "",

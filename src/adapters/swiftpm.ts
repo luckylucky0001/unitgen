@@ -124,7 +124,8 @@ export class SwiftPMAdapter implements Adapter {
     if (manifests.length > 1) lines.push(`manifests: ${manifests.map((f) => path.basename(f)).join(", ")}; this toolchain loads ${path.basename(this.activeManifest())}. unitgen applies its edits to all of them.`);
     if (xcodeproj) lines.push(`note: ${xcodeproj} exists too; this run uses SwiftPM (macOS). Pass --adapter xcode on every command to run in the iOS Simulator instead (needed for UIKit code).`);
     if (xcodeproj && !this.loadDumpSafe()?.targets?.some((x: DumpTarget) => x.type === "test" && !x.name.endsWith(SUFFIX))) {
-      lines.push(`note: Package.swift declares no test target, so the baseline starts at 0%. The project's existing tests are probably in ${xcodeproj}: pass --adapter xcode on every command to build on them.`);
+      const ws = fs.readdirSync(this.root).find((f) => f.endsWith(".xcworkspace"));
+      lines.push(`note: Package.swift declares no test target, so the baseline starts at 0%. The project's existing tests are probably in its Xcode ${ws ? `workspace ${ws}` : `project ${xcodeproj}`}: pass --adapter xcode on every command to build on them.`);
     }
     try {
       const d = this.loadDump();

@@ -150,5 +150,9 @@ names the file (`Foo.m` -> `FooUnitGenTests.m`, `NSString+Foo.m` -> `NSString_Fo
   over several lines) and negates conditions such as `if ([s hasPrefix:@"x"])`. It leaves `-dealloc`,
   `[super init]` chains and retain/release (or `FooRetain(x)`-style macros that are empty under ARC)
   alone, because no test can observe them.
+- CocoaPods: run `pod install` first; unitgen reads every project of the workspace, so a separate
+  test project (`Tests/Foo Tests.xcodeproj`) is found. Tests there import the pod's headers by name
+  (CocoaPods puts them on the search path) or as `#import <Foo/Foo.h>`.
+- `UNITGEN_SIMULATOR="iPhone 16e"` picks the simulator (one per project when testing two at once).
 - Projects whose old deployment target links `libarclite` (removed in Xcode 14.3) do not build on
   current Xcode; unitgen reports it as an environment problem. Raise the deployment target first.

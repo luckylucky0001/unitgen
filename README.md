@@ -21,7 +21,7 @@ report    生成 .unitgen/REPORT.md
 
 ## 验证
 
-在 25 个开源项目上用真实工具链（DevEco Studio 26、Xcode 16.4、Android SDK + Gradle）跑过完整流程。部分结果：
+在 29 个开源项目上用真实工具链（DevEco Studio 26、Xcode 16.4、Android SDK + Gradle）跑过完整流程。部分结果：
 
 | 项目 | 平台 | 目标文件 | 覆盖率 | 变异得分 |
 |---|---|---|---|---|
@@ -32,13 +32,15 @@ report    生成 .unitgen/REPORT.md
 | [fmdb](https://github.com/ccgus/fmdb) 13.8k★ | iOS · Objective-C · Xcode（macOS） | `FMDatabaseQueue.m` | 78% → 100% | 96% |
 | [MJExtension](https://github.com/CoderMJLee/MJExtension) 8.5k★ | iOS · Objective-C · Xcode + 模拟器 | `NSString+MJExtension.m` | 35% → 100% | 90% |
 | [CocoaLumberjack](https://github.com/CocoaLumberjack/CocoaLumberjack) 13.3k★ | iOS · Objective-C · SwiftPM | `DDDispatchQueueLogFormatter.m` | 13% → 100% | 88% |
+| [SDWebImage](https://github.com/SDWebImage/SDWebImage) 25.6k★ | iOS · Objective-C · Xcode + 模拟器 · CocoaPods | `NSData+ImageContentType.m` | 84% → 100% | 100%（抽样） |
+| [IGListKit](https://github.com/Instagram/IGListKit) 13.1k★ | iOS · Objective-C++ · SwiftPM | `IGListDiff.mm` | 0% → 88% | 78% |
 | [architecture-samples](https://github.com/android/architecture-samples) 45.9k★ | Android · Gradle | `TaskNetworkDataSource.kt` | 0% → 100% | 100% |
 | [Pokedex](https://github.com/skydoves/Pokedex) 8.4k★ | Android · Gradle（多模块） | `DetailRepositoryImpl.kt` | 89% → 100% | 100% |
 | [harmony-utils](https://github.com/787107497/harmony-utils) 122★ | 鸿蒙 · hvigor | `DateHelper.ets` | 0% → 98% | 100% |
 | [LinysBrowser_NEXT](https://github.com/awaLiny2333/LinysBrowser_NEXT) 292★ | 鸿蒙 · hvigor | `url-ext.ets` | 0% → 100% | 97% |
 | [DSBridge-HarmonyOS](https://github.com/751496032/DSBridge-HarmonyOS) 182★ | 鸿蒙 · hvigor | `BaseBridge.ts` | 0% → 94% | 88% |
 
-全部 42 个目标文件的数据、验证方法、在这些项目里发现的疑似 bug，见 [docs/VALIDATION.md](docs/VALIDATION.md)。
+全部 45 个目标文件的数据、验证方法、在这些项目里发现的疑似 bug，见 [docs/VALIDATION.md](docs/VALIDATION.md)。
 
 ## 安装
 
@@ -190,6 +192,8 @@ iOS
 - 用哪个测试框架以 brief 为准。`swift-tools-version` 低于 6.0 的包用 XCTest，因为它们 CI 里普通的 `swift test` 不跑 Swift Testing；部署目标低于 iOS 13 / macOS 10.15 的 Xcode 工程也用 XCTest。其他情况用 Swift Testing。
 - Objective-C：`.m` / `.mm` 文件的测试用 Objective-C 写（XCTest），文件名是 `<文件名>UnitGenTests.m`，分类文件 `NSString+Foo.m` 对应 `NSString_FooUnitGenTests.m`。brief 会附上同名头文件的全文，测试只能调用头文件里声明的方法。Swift 和 Objective-C 混编的 target 里，两种文件各按自己的语言写测试。
 - Objective-C 的 SwiftPM target：生成的测试 target 也是 Objective-C 的（SwiftPM 不允许一个 target 混用两种语言），unitgen 会把被测 target 所有头文件所在的目录加进它的 `headerSearchPath`，内部头文件也能 `#import`。覆盖率需要给 clang 加插桩参数，unitgen 运行时会自动加。
+- CocoaPods 工程：先 `pod install`。unitgen 会读 workspace 里列出的所有工程，包括单独的测试工程（比如 `Tests/Foo Tests.xcodeproj`，代码由 `Pods.xcodeproj` 里的开发 pod 编译）。第三方 pod 不算模块。
+- SwiftPM 包里有依赖 UIKit 的 target 时，`swift test` 在 macOS 上整个包都编译不过。unitgen 运行时只编译要跑的测试 target 依赖的那些 target，所以只依赖 Foundation 的 target 照样能测。用符号链接组织源码的包（比如 IGListKit 的 `spm/`）按真实路径处理。
 - 工程没有共享 scheme 时（scheme 在 `xcuserdata` 里，通常没提交），Xcode 自动生成的 scheme 可能跑不了测试。这时 unitgen 每次运行前在 `xcuserdata` 里临时写一个只含测试 target 的 scheme，跑完删掉。
 - Xcode 的构建产物放在 `.unitgen/DerivedData`，不影响你打开的 Xcode。unitgen 运行 xcodebuild 时会打开 `ENABLE_TESTABILITY`（`@testable import` 需要），并关掉老的 gcov 覆盖率开关（它们会让 llvm 覆盖率全为 0）。这些设置只对这次运行有效，不会改工程。
 
@@ -221,7 +225,7 @@ Android
 
 **工程原有的测试有失败，基线建不起来**
 
-输出里会列出失败的用例。确认这些失败和你要做的事无关后，用 `unitgen baseline --allow-failing`，用其余通过的测试作为基线。
+输出里会列出失败的用例。确认这些失败和你要做的事无关后，用 `unitgen baseline --allow-failing`，用其余通过的测试作为基线。在这期间没有改动工程文件的话，它直接沿用刚才那次运行，不再重跑。
 
 **verify 一直是 `INFRA_ERROR`**
 
@@ -273,6 +277,7 @@ status                     基线、已接受、已隔离的数量
 | `UNITGEN_HVIGOR_DAEMON=0` | hvigor 不用守护进程，每次冷启动（慢 3 倍左右） |
 | `DEVECO_STUDIO_HOME` / `DEVECO_SDK_HOME` | DevEco 不在 `/Applications/DevEco-Studio.app` 时指定位置 |
 | `UNITGEN_QUIET=1` | 终端不显示构建进度，日志照常写 |
+| `UNITGEN_SIMULATOR=<名称或 UDID>` | 指定 iOS 模拟器（比如同时测两个工程时各用一台） |
 | `UNITGEN_VERBOSE=1` | 打印执行的命令 |
 | `UNITGEN_ENV=<env.sh>` | 只对 unitgen 进程生效的工具链环境文件。不设置时，如果 unitgen 目录旁边有 `unitgen-env/env.sh`，会自动使用 |
 

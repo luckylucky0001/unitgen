@@ -2,6 +2,7 @@
 
 unitgen 在真实开源项目上的验证过程、结果，以及验证中发现并修复的问题。使用说明见 [README](../README.md)。
 
+- [第六轮：CocoaPods、真实 Objective-C++、Swift/Objective-C 混编](#第六轮cocoapods真实-objective-c-swiftobjective-c-混编2026-11-04)：IGListKit、SDWebImage、Texture、Masonry
 - [第五轮：Objective-C](#第五轮objective-c2026-11-03)：5 个 Objective-C 项目，Xcode（macOS、iOS 模拟器、命令行工具 target）和 SwiftPM，其中 2 个由只拿到 README 和 Skill 的子代理独立完成
 - [Windows（CI）](#windowsci)：GitHub Actions windows-latest 上的单测和端到端测试
 - [第四轮：从 main 开箱测试，含 Android](#第四轮从-main-开箱测试含-android2026-10-31)：Android SDK 装好后的 Android 工程，以及新的 Xcode / 鸿蒙工程
@@ -9,6 +10,38 @@ unitgen 在真实开源项目上的验证过程、结果，以及验证中发现
 - [第二轮：真实工具链](#第二轮验证2026-10-31deveco-studio-26--xcode-164真实工具链)：DevEco Studio 26 + Xcode 16.4，10 个项目
 - [发现并修复的 unitgen 问题](#发现并修复的-unitgen-问题)
 - [第一轮：只有 Command Line Tools](#第一轮验证结果2026-10-21本机macos--command-line-tools无-xcode--deveco)
+
+## 第六轮：CocoaPods、真实 Objective-C++、Swift/Objective-C 混编（2026-11-04）
+
+第五轮没覆盖到的三类工程：用 CocoaPods 的（本机装了 CocoaPods 1.17），核心是 Objective-C++ 的，以及 Swift 和 Objective-C 混编的。IGListKit 是我按 brief 写的测试；SDWebImage 和 Texture 是只读 README 和 Skill 的子代理从零做的，SDWebImage 修完问题后我又在 CocoaPods 工程里重跑了一遍。
+
+| 项目 | 平台 · 运行器 | 目标文件 | 目标文件覆盖率 | 新增测试 | 变异得分 |
+|---|---|---|---|---|---|
+| [IGListKit](https://github.com/Instagram/IGListKit) 13,080★ | iOS · Objective-C++ · SwiftPM（`spm/` 下全是指向 `Source/` 的符号链接；包里另有依赖 UIKit 的 target） | `IGListDiff.mm` | 0% → **88%**（0 → 184 / 210 行） | 12 | 65% → 78%（70 杀死 / 20 存活，评估 90/90；25 个靠崩溃） |
+| [SDWebImage](https://github.com/SDWebImage/SDWebImage) 25,609★ | iOS · Objective-C · Xcode + iOS 模拟器，CocoaPods（测试在 `Tests/SDWebImage Tests.xcodeproj`，代码是 Pods 里的开发 pod；项目自带 3 个 HEIC/HDR 测试在模拟器上失败，`--allow-failing`） | `NSData+ImageContentType.m` | 84% → **100%**（112 → 134 / 134 行） | 18 | 100%（评估 6/56，抽样）；子代理在 SwiftPM 下评估全部 56 个也是 100% |
+| [Texture](https://github.com/TextureGroup/Texture) 8,178★ | iOS · Objective-C++ · Xcode + iOS 模拟器，CocoaPods（测试在主工程） | `ASAsciiArtBoxCreator.mm` | 0% → **97%**（0 → 113 / 116 行，剩下 3 行是走不到的分支） | — | 88% → 91%（评估 22/68，抽样；2 个判为等价：容量提示、从不读取的底部留白） |
+
+另外：IGListKit 用 Xcode 跑（Swift + Objective-C 混编，测试用 SPM 引入的 OCMock）基线 566 个测试，98.8%；Masonry（18,115★）和 SDWebImage 是同一种 CocoaPods 布局，doctor 能正确找到 `Masonry iOS` → `Masonry iOS Tests`，但它的测试宿主 App 调用了 `__gcov_flush()`，当前 Xcode 已经没有这个符号，不经过 unitgen 直接构建也链接失败。
+
+发现并修复的问题：
+
+| 问题 | 修复 |
+|---|---|
+| CocoaPods 的标准布局（SDWebImage、Masonry）：测试在 workspace 里另一个工程（`Tests/Foo Tests.xcodeproj`），代码在 `Pods.xcodeproj`。unitgen 只读根目录的 `.xcodeproj`，找不到测试 target，提示「新建一个」，baseline 还随便挑了一个 Pods 的 scheme（`Expecta-iOS`） | 读 workspace 里列出的所有工程；第三方 pod 不算模块；测试按 `#import <Foo/...>` / `@import Foo;` 找到被测模块；设置、scheme、登记测试文件、临时 scheme 都用目标所在的那个工程；没有带测试 target 的模块时直接报环境问题 |
+| SwiftPM 的 `swift test` 编译整个包，包里一个依赖 UIKit 的 target 就让只依赖 Foundation 的 target 也测不了（IGListKit） | 运行时只保留要跑的测试 target 依赖的 target（插件一并保留）；包里没有可跑的测试时不再调用 `swift test`（否则 SwiftPM 报「没有可构建的 target」） |
+| 源码目录是符号链接时（IGListKit 的 `spm/Sources` 指向 `Source/`），brief 报「不属于任何模块」，覆盖率也对不上 | 源文件统一按真实路径记录和匹配 |
+| 同一份源码有 iOS 和 tvOS 两个变体时选了 tvOS（它的测试 bundle 直接依赖框架），结果「Unable to find a destination」 | tvOS / watchOS / visionOS 变体排在 iOS 和 macOS 后面 |
+| 只有测试 target、代码在另一个工程里的 Xcode 工程（CocoaLumberjack 的 `Tests/Tests.xcodeproj`），doctor 建议新建测试 target | 说明代码来自哪个被引用的工程，该到哪里运行 |
+| 项目自带测试失败而被拒的基线，加 `--allow-failing` 要整个重跑（Xcode 上要几分钟） | 期间没有改动工程文件就直接沿用那次运行（CHCSVParser：18 秒 → 0.4 秒；SDWebImage：104 秒 → 0.4 秒） |
+| 不加 `UNITGEN_QUIET` 时，xcodebuild 和 `swift test` 的原始输出有上千行（Texture 的基线约 7,900 行） | 终端只显示错误、失败的测试和最后的结果，完整输出在日志里 |
+| 失败的 doctor 也会留下一个空的 `.unitgen/`；它的 `.gitignore` 没有忽略 `DerivedData/`（Texture 里 355 MB）和备份文件 | 什么都没存时不留目录；`.gitignore` 补上 DerivedData、备份和缓存 |
+| SwiftPM 里只有 C 文件或头文件的 target 被当成 Swift 模块，还警告「没有源文件」 | 不再当作模块，doctor 说明原因 |
+| brief 把示例目录里的 Swift 类当成 Objective-C 测试的替身，把测试 bundle 里的辅助分类当成示例测试；import 的两条说法互相矛盾；内部头文件里的 `#define` 常量没有列出 | 替身只取同一种语言的；示例优先取真正声明测试的文件；import 说法改为「被测代码用上面那条，辅助代码按现有测试的写法」；声明里列出常量 |
+| 改过测试后，上一版测试的幸存者没重跑就被算成「没被检测到」 | 不计入得分，单独列出「还没用新测试重查」 |
+| 变异体卡住超时前已经有断言失败，仍算「靠崩溃杀死」；`initWithCapacity:` 这类容量提示的变异测不出来 | 有断言失败就算断言杀死（Xcode 超时时从输出里读测试结果）；容量提示不再生成算术和常量变异 |
+| 测试宿主调用 `__gcov_flush()` 的老工程（Masonry）链接失败，只提示「linker command failed」 | 说明是哪个符号、为什么、怎么改；错误摘要里优先放未定义符号 |
+
+新增 `UNITGEN_SIMULATOR`（按名称或 UDID 指定模拟器），两个工程可以同时测。CI 的 Xcode 端到端工程改成 Objective-C++（`.mm` 源文件和测试，`sourcecode.cpp.objcpp`）。
 
 ## 第五轮：Objective-C（2026-11-03）
 
@@ -263,7 +296,7 @@ CI 里加了 `scripts/e2e-objc.mjs`（macOS）：生成一个带 Objective-C tar
 | iOS SwiftPM | llvm-cov 把函数里的空行、注释、`#if/#else` 计为可执行行，brief 把空行标成未覆盖，前后分母也对不上（Splash：0/33 → 36/36） | 这些行一律不计 |
 | 变异测试 | 唯一能编译的变异被标成等价后，门禁报 FAILED「no mutant was evaluated」、报告写 0%（Splash 的 Font）；删掉「声明时没赋值的局部常量」的赋值注定编译不过；`var x: Int?` 行尾的 `?` 被当成三元表达式续行，下一行的删除变异全部丢失 | 门禁改为 NOT_APPLICABLE、报告写 n/a；跳过这类删除；修正续行判断 |
 | 运行 | 在工程子目录里执行命令报「No supported project」 | 像 git 一样向上查找工程根目录；鸿蒙模块目录继续向上找到应用根目录 |
-| iOS（第五轮） | Objective-C 相关的 25 个问题 | 见[第五轮](#第五轮objective-c2026-11-03) |
+| iOS（第五、六轮） | Objective-C、CocoaPods、Objective-C++ 相关的 38 个问题 | 见[第五轮](#第五轮objective-c2026-11-03) |
 | 鸿蒙 hvigor | 警告很多的模块（harmony-utils：151 条 ArkTS:WARN）里，COMPILE_ERROR 只给出 80 行警告、看不到真正的错误：hvigor 在 stdout 管道写完前就退出，超过约 64 KB 的部分丢失 | 输出不完整时改读 hvigor 自己的 `.hvigor/outputs/build-logs/build.log`；终端只显示 hvigor 进度和错误（基线的 stderr 从 10,751 行降到 336 行），完整输出照样写日志 |
 | 鸿蒙 brief/targets | import 解析跨到了下一条 import：项目自己的枚举 `DateType` 被当成系统 API，相关行标成 `!~`，文件被排成 platform | 一条 import 不再跨过另一条 import |
 | 变异测试 | hvigor 下枚举比较链（`type == DateType.YmdHms \|\| type == DateType.YmdHm`）、`if / else if` 链、字面量写在左边（`undefined !== a && null !== a`）里的取反仍然编译不过：DateHelper 56 个里 16 个 | 收窄判断覆盖这三种写法；对照实测结果，去掉的 16 个全是编译不过的，没有误伤 |

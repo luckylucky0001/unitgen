@@ -81,6 +81,8 @@ export function rankTargets(adapter: Adapter, cov: Coverage, opts: { modules?: M
   const out: Target[] = [];
   const haveCoverage = Object.keys(cov).length > 0;
   for (const m of mods) {
+    // An Xcode target no unit-test target tests (a demo app): nothing could run a test written for it.
+    if (adapter.id === "xcode" && !m.meta?.testTarget && !opts.modules) continue;
     const files = adapter.sourceFiles(m);
     // The module was measured: files absent from the report have no executable code (interfaces, typealiases).
     const moduleMeasured = haveCoverage && files.some((f) => cov[f] !== undefined);

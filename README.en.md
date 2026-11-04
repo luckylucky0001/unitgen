@@ -26,7 +26,7 @@ comparison with similar tools are in [docs/DESIGN.md](docs/DESIGN.md) (Chinese).
 
 ## Validation
 
-The full workflow has been run on 25 open-source projects with real toolchains (DevEco Studio 26,
+The full workflow has been run on 29 open-source projects with real toolchains (DevEco Studio 26,
 Xcode 16.4, Android SDK + Gradle). Some results:
 
 | Project | Platform | Target file | Coverage | Mutation score |
@@ -43,8 +43,10 @@ Xcode 16.4, Android SDK + Gradle). Some results:
 | [fmdb](https://github.com/ccgus/fmdb) 13.8k★ | iOS · Objective-C · Xcode (macOS) | `FMDatabaseQueue.m` | 78% → 100% | 96% |
 | [MJExtension](https://github.com/CoderMJLee/MJExtension) 8.5k★ | iOS · Objective-C · Xcode + Simulator | `NSString+MJExtension.m` | 35% → 100% | 90% |
 | [CocoaLumberjack](https://github.com/CocoaLumberjack/CocoaLumberjack) 13.3k★ | iOS · Objective-C · SwiftPM | `DDDispatchQueueLogFormatter.m` | 13% → 100% | 88% |
+| [SDWebImage](https://github.com/SDWebImage/SDWebImage) 25.6k★ | iOS · Objective-C · Xcode + Simulator · CocoaPods | `NSData+ImageContentType.m` | 84% → 100% | 100% (sample) |
+| [IGListKit](https://github.com/Instagram/IGListKit) 13.1k★ | iOS · Objective-C++ · SwiftPM | `IGListDiff.mm` | 0% → 88% | 78% |
 
-Numbers for all 42 target files, how they were measured, and suspected bugs found in these
+Numbers for all 45 target files, how they were measured, and suspected bugs found in these
 projects: [docs/VALIDATION.md](docs/VALIDATION.md) (Chinese).
 
 ## Install
@@ -237,6 +239,12 @@ how long the finished mutants took, at least 20 s), so loop-heavy code makes a r
 - Objective-C SwiftPM targets get an Objective-C test target (SwiftPM does not mix languages in one
   target). unitgen puts every header directory of the target under test on its `headerSearchPath`, so
   internal headers can be imported too, and adds the clang coverage flags SwiftPM leaves out.
+- CocoaPods projects: run `pod install` first. unitgen reads every project the workspace lists, a
+  separate test project (`Tests/Foo Tests.xcodeproj`, with the code built by a development pod in
+  `Pods.xcodeproj`) included. Third-party pods are not modules.
+- SwiftPM packages with a UIKit target do not build on macOS as a whole; unitgen's runs build only
+  the targets the tests being run depend on, so a Foundation-only target is still testable. Sources
+  organised as symlinks (IGListKit's `spm/`) are handled by their real paths.
 - Projects without shared schemes (schemes live in the usually uncommitted `xcuserdata`): the scheme
   Xcode generates may be unable to run tests. unitgen then writes a scheme with just the test target to
   `xcuserdata` before each run and deletes it afterwards.
@@ -279,7 +287,7 @@ often `ohpm install` has not run in the project root; doctor prints the full pat
 bundled ohpm.
 
 **The baseline fails because existing tests fail.** They are listed. If they are unrelated,
-`unitgen baseline --allow-failing` keeps a baseline from the passing ones.
+`unitgen baseline --allow-failing` keeps a baseline from the passing ones. If no project file changed since, it reuses that run instead of running again.
 
 **verify keeps returning `INFRA_ERROR`.** Read the reason. Common ones: production code that does
 not compile, uninstalled ohpm packages, hypium older than 1.0.19 (coverage never arrives), or
@@ -335,6 +343,7 @@ Environment variables:
 | `UNITGEN_HVIGOR_DAEMON=0` | cold hvigor builds instead of the daemon (about 3x slower) |
 | `DEVECO_STUDIO_HOME` / `DEVECO_SDK_HOME` | where DevEco is, when not in `/Applications/DevEco-Studio.app` |
 | `UNITGEN_QUIET=1` | no build progress in the terminal (logs are still written) |
+| `UNITGEN_SIMULATOR=<name or UDID>` | the iOS Simulator to use (e.g. one each when testing two projects at once) |
 | `UNITGEN_VERBOSE=1` | print the commands run |
 | `UNITGEN_ENV=<env.sh>` | toolchain environment file applied to the unitgen process only (default: `unitgen-env/env.sh` next to the unitgen checkout, if it exists) |
 

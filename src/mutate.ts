@@ -399,9 +399,12 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
       const cut = body ? close + 1 + body.index + 1 : masked.length;
       masked = " ".repeat(cut) + masked.slice(cut);
     }
+    // A size hint (`initWithCapacity:n * 2`, `reserveCapacity(n)`): no test can see its value.
+    const sizeHint = /Capacity:|reserveCapacity\s*\(|\.reserve\s*\(/.test(masked);
     for (const [op, re, rep] of OPERATORS) {
       const m = re.exec(masked);
       if (!m) continue;
+      if (sizeHint && /^([+\-*] ->|\d+ ->)/.test(op)) continue;
       if ((op === "|| -> &&" && nullGuard(masked, "||", text)) || (op === "&& -> ||" && nullGuard(masked, "&&", text))) continue;
       if (opts.literalNarrowing && /^(=== -> !==|!== -> ===|== -> !=|!= -> ==|\|\| -> &&|&& -> \|\|)$/.test(op) && literalChain(src, ln, m.index, m[0])) continue;
       // `"0" + s` is a concatenation: `"0" - s` never compiles.
@@ -446,7 +449,7 @@ function mutantsForLines(text: string, lines: number[], opts: MutantOptions): Mu
     const from = caseLabel ? caseLabel[0].length : 0;
     const numRe = /(?<![\w.$#])(?<!\|\s*)([2-9]|[1-9]\d{1,5})(?![\w.])(?!\s*\|)/g;
     numRe.lastIndex = from;
-    const num = /^\s*(import\b|#)/.test(original) ? null : numRe.exec(masked);
+    const num = /^\s*(import\b|#)/.test(original) || sizeHint ? null : numRe.exec(masked);
     if (num) {
       out.push({ line: ln, op: `${num[1]} -> ${Number(num[1]) + 1}`, original, mutated: original.slice(0, num.index) + String(Number(num[1]) + 1) + original.slice(num.index + num[1].length) });
     }
@@ -686,16 +689,16 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
         const timedOut = r.infraError === "timeout" || /TIMEOUT after/.test(r.excerpt);
         if (!timedOut && r.seconds > 0) done.push(r.seconds);
         let outcome: MutantResult["outcome"];
-        // A hang is detected, but not by an assertion.
-        if (timedOut) outcome = "killed-crash";
+        // Objective-C XCTest words its failures `((a) equal to (b)) failed: ...` / `((x) is true) failed` / `failed - msg` (XCTFail);
+        // an uncaught exception (`failed: caught "NSRangeException"`) is a crash.
+        const asserted = r.tests.some((t) => t.status === "failed" && /assert|expect|Expectation|AssertionError|expected|XCTAssert|#require|\(\(.*\)\s+failed\b|is not equal to|^failed - /im.test(t.message ?? ""));
+        // A hang is detected, but not by an assertion, unless assertions had already failed before it.
+        if (timedOut) outcome = asserted ? "killed" : "killed-crash";
         else if (r.infraError) outcome = "error";
         else if (!r.compiled) outcome = "stillborn";
         else if (!r.ok || r.tests.some((t) => t.status === "failed")) {
           // Killed by a crash (ReferenceError/TypeError, index out of range, a process that died) rather than
           // by an assertion: still a detected change, but flag it.
-          // Objective-C XCTest words its failures `((a) equal to (b)) failed: ...` / `((x) is true) failed` / `failed - msg` (XCTFail);
-          // an uncaught exception (`failed: caught "NSRangeException"`) is a crash.
-          const asserted = r.tests.some((t) => t.status === "failed" && /assert|expect|Expectation|AssertionError|expected|XCTAssert|#require|\(\(.*\)\s+failed\b|is not equal to|^failed - /im.test(t.message ?? ""));
           outcome = asserted ? "killed" : "killed-crash";
         }
         else outcome = r.tests.length ? "survived" : "error";
@@ -714,10 +717,13 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
   // Cumulative over every run: the latest outcome of each current candidate mutant.
   const latest = new Map<string, MutantResult>();
   for (const r of [...prev, ...results]) latest.set(key(r), r);
+  // Only outcomes measured with this version of the test count; survivors of an earlier version are
+  // listed apart until a run re-checks them (they go first).
   const current: MutantResult[] = all.flatMap((mu) => {
     const r = latest.get(key(mu));
-    return r && (valid(r) || r.outcome === "survived") ? [{ ...r, id: mu.id }] : [];
+    return r && valid(r) ? [{ ...r, id: mu.id }] : [];
   });
+  const unchecked = all.filter((mu) => { const r = latest.get(key(mu)); return r?.outcome === "survived" && !valid(r); });
   const count = (o: MutantResult["outcome"][]) => current.filter((r) => o.includes(r.outcome)).length;
   const killed = count(["killed", "killed-crash"]), crashes = count(["killed-crash"]), survived = count(["survived"]), stillborn = count(["stillborn"]);
   const score = killed + survived ? killed / (killed + survived) : 0;
@@ -727,7 +733,8 @@ export async function mutate(adapter: Adapter, state: State, testFile: string, t
       surv.map((x) => `- [${x.id}] line ${x.line} (${x.op}):\n    ${x.original.trim()}\n  → ${x.mutated.trim()}`).join("\n") +
       `\nIf a survivor cannot change observable behaviour (equivalent mutant), exclude just that mutant by its id, e.g. unitgen mutate ${relTest} --equivalent ${surv[0].id} (a bare line number excludes every mutant on the line), and say why with unitgen note`
     : "";
-  const report: MutationReport = { testFile: relTest, target: relPath(absTarget, adapter.root), killed, crashes, survived, stillborn, score, results, feedback, candidates: all.length,
+  const recheck = unchecked.length ? `\n${unchecked.length} mutant(s) survived an earlier version of the test and were not re-checked yet (${unchecked.map((u) => u.id).join(", ")}): the next mutate run re-checks them first.` : "";
+  const report: MutationReport = { testFile: relTest, target: relPath(absTarget, adapter.root), killed, crashes, survived, stillborn, score, results, feedback: feedback + recheck, candidates: all.length,
     logs: state.file("logs", `mutant-${path.basename(absTest).replace(/\W+/g, "_")}-*.log`),
     excluded: excluded.length, triedTotal: current.length, history: [...latest.values()],
     errors: results.filter((r) => r.outcome === "error").length,
